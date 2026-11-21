@@ -27,7 +27,16 @@ folder (`RUN_DIR`), and the step that turns a game dump into that folder is not 
 | `tools/hidtap/` | Rust diagnostic library that records the haptic samples sent to a DualSense over Bluetooth. |
 | `tools/` | Helpers for porting patch files between game versions and for recording controller audio. |
 | `patches/` | Patch definitions for game versions 1.018 and 1.019 (performance, physics at 30 FPS, fixes). |
+| `adapter/` | Rust AGS extension (`ags-extension.toml`): the AstroPort pages, settings and launch. |
+| `runner/` | `astroport-run`, the AGS build job that turns a game dump into a run folder. |
+| `assets/` | Icon, logo and badge for the AGS extension. |
+| `ags-extension.toml` | AGS extension manifest. |
 | `scripts/` | `build-engines.sh`, `play-hybrid.sh`, `check-repo.sh` and `prx-targets.txt`. |
+
+## Install through AGS
+
+Add this repository's URL in AGS, set "Astro Bot dump folder", and press "Build game files". Supported game
+versions are 1.019 and 1.018 (less tested, matched by version only).
 
 ## Building
 
@@ -45,6 +54,18 @@ cargo build --release --manifest-path patcher/Cargo.toml
 
 ```bash
 cargo build --release --manifest-path tools/hidtap/Cargo.toml
+```
+
+Releases are built with `scripts/build-release.sh`; see [docs/release.md](docs/release.md).
+
+Tests for the AGS parts:
+
+```bash
+timeout 900 cargo test --manifest-path adapter/Cargo.toml
+```
+
+```bash
+timeout 900 cargo test --manifest-path runner/Cargo.toml
 ```
 
 ## Credits

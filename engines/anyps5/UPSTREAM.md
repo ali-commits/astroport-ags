@@ -53,6 +53,8 @@ $ git log --no-merges --reverse --format='- %h %an: %s' 319621ba2e..2429864775
 - 2429864775 Ali: fix(libSceAudioPropagation): accept path calculation without rays and audio path entries
 ```
 
+`AGS_CONTROLLER_AUDIO_SINK` pad audio device; live haptic gain read from the renderer.
+
 ## 4. Files changed against the base
 
 For GPL-2.0 section 2a, as of 2026-11-21. No changed file carries a licence header, so no

@@ -17,6 +17,9 @@ General Public License, version 2 only (`GPL-2.0-only`). See [LICENSE](LICENSE).
 AstroHybrid is by faycal (https://github.com/imnotsharingmyname/pcportastrobot). It wrote the bridge that runs
 Kyty's renderer inside AnyPS5, and most of the engine changes in both. Its changes are modifications of the GPL-2.0-only engines above and are distributed here under the same licence.
 
+`runner/src/unwrap.rs` is a Rust port of AnyPS5's `tools/unwrap_self.py` (GPL-2.0-only, boykopovar/AnyPS5
+contributors).
+
 ## 4. Third-party libraries
 
 Each library keeps its own licence, at the path given. The folder `engines/kyty/3rdparty/patches` holds build patches, not a library.
@@ -76,7 +79,8 @@ Release packages also contain a DLSS-enabled renderer built with NVIDIA's DLSS S
 where the SDK licence allows it to be redistributed. Those parts are under NVIDIA's DLSS SDK licence, which is
 not compatible with the GPL. Distributing them together with GPL-2.0 code is a known licence risk that this
 project accepts. The SDK is not in this repository: the release build fetches it from
-https://github.com/NVIDIA/DLSS, and a source build without it has no DLSS. DLSS is offered on NVIDIA GPUs only.
+https://github.com/NVIDIA/DLSS (SDK 310.9.16), and a source build without it has no DLSS. Release packages carry
+the licence as `licenses/NVIDIA-DLSS-SDK-LICENSE.txt`. DLSS is offered on NVIDIA GPUs only.
 
 ## 6. Also used
 

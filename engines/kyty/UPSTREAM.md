@@ -116,6 +116,9 @@ $ git log --no-merges --reverse --format='- %h %an: %s' dd9f9901..457b1fa8
 - 457b1fa8 Ali: Remove the Qt launcher
 ```
 
+AGS session socket client (`src/streaming/`) ported from KytyPS5-AGS `src/streaming` at 064e7b9c6 (Ali, GPL-2.0), updated
+to session protocol 2; live settings (`liveSettings*.cpp`), `KytyGpuPadVibrationGain` export.
+
 ## 4. Files changed against the base
 
 For GPL-2.0 section 2a, as of 2026-11-21. None of these files carries a licence header, so no
