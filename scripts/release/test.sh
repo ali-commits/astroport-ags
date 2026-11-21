@@ -252,8 +252,152 @@ stage_tests() {
   fi
 }
 
+make_stage() {
+  local stage=$1 file
+  for file in ags-extension.toml bin/{astroport-adapter,astroport-run} \
+      lib/{libastro_patcher,libkyty_gpu}.so \
+      anyps5/{relinker,libAstroHybridHost.prx,libs/libSystemA.prx} \
+      shims/{libSceAgc,libSceAgcDriver,libSceVideoOut}.prx \
+      presets/{u59-preset,u59-preset.PPSA21567}.json \
+      patches/{PPSA21567-1018,PPSA21567-1019,settings,versions}.json \
+      assets/{icon.png,logo.png,badge.svg} licenses/{LICENSE,NOTICE.md}; do
+    mkdir -p -- "$(dirname "$stage/$file")"
+    printf 'fixture\n' >"$stage/$file"
+  done
+  chmod 0755 "$stage"/bin/{astroport-adapter,astroport-run} "$stage/anyps5/relinker"
+  cat >"$stage/ags-extension.toml" <<'EOF'
+id = "astroport"
+version = "0.1.0-testing.1"
+protocol = 2
+roles = ["launcher"]
+adapter = "bin/astroport-adapter"
+
+[assets]
+icon = "assets/icon.png"
+logo = "assets/logo.png"
+badge = "assets/badge.svg"
+EOF
+}
+
+package_tests() {
+  local package="$ROOT/scripts/release/package.sh" stage="$T/package-stage"
+  local out="$T/package-out" other="$T/package-other" extracted="$T/extracted"
+  local asset=astroport-0.1.0-testing.1-linux-x86_64.tar.zst
+  local manifest="$stage/ags-extension.toml" checksum members
+  local -a pack=(env TMPDIR="$T" SOURCE_DATE_EPOCH=0 "$package" "$stage")
+  make_stage "$stage"
+
+  if ! "${pack[@]}" "$out" >"$T/stdout" 2>"$T/stderr"; then
+    bad 'package: ok' "$(head -n 1 "$T/stderr")"
+  elif [[ $(cat "$T/stdout") != "$out/$asset"$'\n'"$out/$asset.sha256" ]]; then
+    bad 'package: ok' 'unexpected output paths'
+  elif ! (cd "$out" && sha256sum -c "$asset.sha256") >"$T/stdout" 2>"$T/stderr" ||
+      ! read -r checksum _ <"$out/$asset.sha256" || [[ ! $checksum =~ ^[0-9a-f]{64}$ ]]; then
+    bad 'package: ok' 'invalid checksum'
+  elif ! members=$(tar -I zstd -tf "$out/$asset" 2>"$T/stderr") ||
+      ! grep -qxF './ags-extension.toml' <<<"$members" || grep -Eq '^/|\.\.' <<<"$members"; then
+    bad 'package: ok' 'unexpected archive members'
+  else
+    ok 'package: ok'
+  fi
+
+  touch -m -d @1234567890 -- "$stage/lib/libkyty_gpu.so"
+  if "${pack[@]}" "$other" >"$T/stdout" 2>"$T/stderr" &&
+      [[ ${checksum:-} =~ ^[0-9a-f]{64}$ ]] &&
+      [[ $(cut -d ' ' -f 1 "$other/$asset.sha256") == "$checksum" ]]; then
+    ok 'package: deterministic'
+  else
+    bad 'package: deterministic' 'could not reproduce the archive checksum'
+  fi
+
+  mkdir -- "$extracted"
+  if tar -I zstd -xf "$out/$asset" -C "$extracted" 2>"$T/stderr" &&
+      [[ -x "$extracted/bin/astroport-adapter" && -x "$extracted/bin/astroport-run" &&
+         -x "$extracted/anyps5/relinker" ]]; then
+    ok 'package: modes'
+  else
+    bad 'package: modes' 'could not extract all three executables'
+  fi
+
+  if expect_fail 'package: no overwrite' 'already exists' "${pack[@]}" "$out"; then
+    if [[ -n ${checksum:-} && $(cat "$out/$asset.sha256") == "$checksum  $asset" ]] &&
+        (cd "$out" && sha256sum -c "$asset.sha256") >"$T/stdout" 2>"$T/stderr"; then
+      ok 'package: no overwrite'
+    else
+      bad 'package: no overwrite' 'original output was changed'
+    fi
+  fi
+
+  local invalid="$T/package-invalid"
+  ln -s /etc/hostname "$stage/lib/x"
+  if expect_fail 'package: absolute link' 'absolute link' "${pack[@]}" "$invalid"; then
+    ok 'package: absolute link'
+  fi
+  rm -- "$stage/lib/x"
+
+  touch -- "$T/outside"
+  ln -s ../../outside "$stage/lib/x"
+  if expect_fail 'package: escaping link' 'escapes the package' "${pack[@]}" "$invalid"; then
+    ok 'package: escaping link'
+  fi
+  rm -- "$stage/lib/x"
+
+  mkfifo -- "$stage/x"
+  if expect_fail 'package: fifo' 'special files' "${pack[@]}" "$invalid"; then
+    ok 'package: fifo'
+  fi
+  rm -- "$stage/x"
+
+  mv -- "$stage/anyps5/relinker" "$T/package-relinker"
+  if expect_fail 'package: missing relinker' 'missing anyps5/relinker' "${pack[@]}" "$invalid"; then
+    ok 'package: missing relinker'
+  fi
+  mv -- "$T/package-relinker" "$stage/anyps5/relinker"
+
+  mv -- "$stage/anyps5/libs/libSystemA.prx" "$T/package-module"
+  if expect_fail 'package: no system libraries' 'anyps5/libs holds no .prx' "${pack[@]}" "$invalid"; then
+    ok 'package: no system libraries'
+  fi
+  mv -- "$T/package-module" "$stage/anyps5/libs/libSystemA.prx"
+
+  truncate -s 2097153 -- "$stage/assets/icon.png"
+  if expect_fail 'package: big asset' 'larger than 2 MiB' "${pack[@]}" "$invalid"; then
+    ok 'package: big asset'
+  fi
+  printf 'fixture\n' >"$stage/assets/icon.png"
+
+  rm -- "$stage/assets/logo.png"
+  ln -s icon.png "$stage/assets/logo.png"
+  if expect_fail 'package: asset link' 'is not a regular file' "${pack[@]}" "$invalid"; then
+    ok 'package: asset link'
+  fi
+  rm -- "$stage/assets/logo.png"
+  printf 'fixture\n' >"$stage/assets/logo.png"
+
+  chmod 0644 "$stage/bin/astroport-adapter"
+  if expect_fail 'package: adapter not executable' 'is not an executable file' "${pack[@]}" "$invalid"; then
+    ok 'package: adapter not executable'
+  fi
+  chmod 0755 "$stage/bin/astroport-adapter"
+
+  cp -- "$manifest" "$T/package-manifest"
+  sed 's/^id = .*/id = "kytyps5"/' "$T/package-manifest" >"$manifest"
+  if expect_fail 'package: wrong id' 'manifest id is "kytyps5", not "astroport"' "${pack[@]}" "$invalid"; then
+    ok 'package: wrong id'
+  fi
+  sed 's/^version = .*/version = "1.0"/' "$T/package-manifest" >"$manifest"
+  if expect_fail 'package: bad version' 'version "1.0" is neither X.Y.Z nor X.Y.Z-testing.N' "${pack[@]}" "$invalid"; then
+    ok 'package: bad version'
+  fi
+  sed 's/^protocol = .*/protocol = 1/' "$T/package-manifest" >"$manifest"
+  if expect_fail 'package: old protocol' 'manifest protocol is "1", not 2 (AGS installs protocol 2 releases only)' \
+      "${pack[@]}" "$invalid"; then
+    ok 'package: old protocol'
+  fi
+}
+
 case ${1:-} in
-  ''|fetch|stage) ;;
+  ''|fetch|stage|package) ;;
   *) printf 'FAIL: unknown release test group %s\n' "$1" >&2; exit 1 ;;
 esac
 
@@ -263,7 +407,8 @@ trap 'rm -rf -- "$T"' EXIT
 case ${1:-} in
   fetch) fetch_tests ;;
   stage) stage_tests ;;
-  '') fetch_tests; stage_tests ;;
+  package) package_tests ;;
+  '') fetch_tests; stage_tests; package_tests ;;
 esac
 
 if (( failed > 0 )); then
