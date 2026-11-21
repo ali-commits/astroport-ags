@@ -45,7 +45,7 @@ pub fn job_plan(install: &Path, data: &Path, dump: &Path) -> Value {
 pub fn standard_support() -> Value {
     json!({
         "display.resolution": {"level": "honoured", "live": "live", "applier": "source"},
-        "display.fps": {"level": "honoured", "live": "live", "applier": "source", "values": [30, 60]},
+        "display.fps": {"level": "honoured", "live": "next_launch", "applier": "source", "values": [30, 60]},
         "perf.low_latency": {"level": "honoured", "live": "next_launch", "applier": "source", "values": ["off", "on"]}
     })
 }

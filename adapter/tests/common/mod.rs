@@ -30,19 +30,26 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn new() -> Fixture {
-        let install = tempfile::tempdir().unwrap();
-        let data = tempfile::tempdir().unwrap();
+        let extension = tempfile::tempdir().unwrap();
+        let install = extension.path().join("install");
+        let data = extension.path().join("data");
         let dump = tempfile::tempdir().unwrap();
-        fs::create_dir(install.path().join("bin")).unwrap();
+        fs::create_dir_all(install.join("bin")).unwrap();
+        fs::create_dir(&data).unwrap();
+        fs::write(
+            install.join("ags-extension.toml"),
+            format!("version = \"{}\"\n", env!("CARGO_PKG_VERSION")),
+        )
+        .unwrap();
         {
             let _guard = COPY_OR_SPAWN.lock().unwrap();
             fs::copy(
                 env!("CARGO_BIN_EXE_astroport-adapter"),
-                install.path().join("bin/astroport-adapter"),
+                install.join("bin/astroport-adapter"),
             )
             .unwrap();
         }
-        let patches = install.path().join("patches");
+        let patches = install.join("patches");
         fs::create_dir(&patches).unwrap();
         for source in fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../patches")).unwrap() {
             let source = source.unwrap();
@@ -54,7 +61,7 @@ impl Fixture {
         versions["versions"][1]["eboot_sha256"] = json!(FIXTURE_EBOOT_SHA256);
         fs::write(versions_file, serde_json::to_vec(&versions).unwrap()).unwrap();
 
-        let presets = install.path().join("presets");
+        let presets = install.join("presets");
         fs::create_dir(&presets).unwrap();
         let tools = std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -63,8 +70,8 @@ impl Fixture {
         for name in ["u59-preset.json", "u59-preset.PPSA21567.json"] {
             fs::copy(tools.join(name), presets.join(name)).unwrap();
         }
-        fs::create_dir(install.path().join("lib")).unwrap();
-        fs::write(install.path().join("lib/libastro_patcher.so"), []).unwrap();
+        fs::create_dir(install.join("lib")).unwrap();
+        fs::write(install.join("lib/libastro_patcher.so"), []).unwrap();
 
         let sce_sys = dump.path().join("sce_sys");
         fs::create_dir(&sce_sys).unwrap();
@@ -80,10 +87,10 @@ impl Fixture {
         )
         .unwrap();
         Fixture {
-            install: install.path().to_path_buf(),
-            data: data.path().to_path_buf(),
+            install,
+            data,
             dump: dump.path().to_path_buf(),
-            _dirs: vec![install, data, dump],
+            _dirs: vec![extension, dump],
         }
     }
 
@@ -104,6 +111,14 @@ impl Fixture {
             "release": env!("CARGO_PKG_VERSION")
         });
         fs::write(run.join("build.json"), record.to_string()).unwrap();
+        let generated = json!({
+            "version": 1,
+            "files": {
+                (format!("run-{version}/AstroBot")):
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+        });
+        fs::write(self.data.join("../.generated.json"), generated.to_string()).unwrap();
     }
 }
 

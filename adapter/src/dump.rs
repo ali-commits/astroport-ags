@@ -192,6 +192,12 @@ struct BuildRecord {
     release: String,
 }
 
+#[derive(Deserialize)]
+struct GeneratedRecord {
+    version: u32,
+    files: HashMap<String, String>,
+}
+
 pub fn built(data: &Path, version: &str, eboot_sha256: &str, release: &str) -> bool {
     let run = run_folder(data, version);
     // M2-5 sheet §3.5 requires a regular game file without following a symlink.
@@ -213,6 +219,17 @@ pub fn built(data: &Path, version: &str, eboot_sha256: &str, release: &str) -> b
         && record.version == version
         && record.eboot_sha256 == eboot_sha256
         && record.release == release
+        && generated_executable_is_listed(data, version)
+}
+
+fn generated_executable_is_listed(data: &Path, version: &str) -> bool {
+    // M2-5 sheet §3.5 places the record beside data and keys it relative to data/generated.
+    let Ok(bytes) = fs::read(data.join("../.generated.json")) else {
+        return false;
+    };
+    let executable = format!("run-{version}/AstroBot");
+    serde_json::from_slice::<GeneratedRecord>(&bytes)
+        .is_ok_and(|record| record.version == 1 && record.files.contains_key(&executable))
 }
 
 #[cfg(test)]
@@ -368,16 +385,22 @@ mod tests {
 
     #[test]
     fn built_needs_matching_record() {
-        let data = tempdir().unwrap();
-        let run = data.path().join("generated/run-1.019");
-        assert_eq!(run_folder(data.path(), "1.019"), run);
-        let is_built = || built(data.path(), "1.019", "h", "0.1.0");
+        let extension = tempdir().unwrap();
+        let data = extension.path().join("data");
+        let run = data.join("generated/run-1.019");
+        assert_eq!(run_folder(&data, "1.019"), run);
+        let is_built = || built(&data, "1.019", "h", "0.1.0");
         assert!(!is_built());
 
         fs::create_dir_all(&run).unwrap();
         let game = run.join("AstroBot");
         let record = run.join("build.json");
         fs::write(&game, b"fixture").unwrap();
+        fs::write(
+            extension.path().join(".generated.json"),
+            json!({"version": 1, "files": {"run-1.019/AstroBot": FIXTURE_HASH}}).to_string(),
+        )
+        .unwrap();
         fs::write(&record, "{broken").unwrap();
         assert!(!is_built());
 
@@ -388,7 +411,7 @@ mod tests {
         valid["content_version"] = json!("01.019.000");
         valid["inputs_sha256"] = json!("inputs");
         valid["to_intel"] = json!(false);
-        valid["dump"] = json!(data.path());
+        valid["dump"] = json!(data);
         fs::write(&record, valid.to_string()).unwrap();
         assert!(is_built());
 

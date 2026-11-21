@@ -14,7 +14,7 @@ fn manifest_is_protocol_2() {
     let m = manifest();
     assert_eq!(m["id"].as_str(), Some("astroport"));
     assert_eq!(m["name"].as_str(), Some("AstroPort"));
-    assert_eq!(m["version"].as_str(), Some(env!("CARGO_PKG_VERSION")));
+    assert!(m["version"].as_str().is_some_and(|v| !v.is_empty()));
     assert_eq!(m["license"].as_str(), Some("GPL-2.0-only"));
     assert_eq!(m["protocol"].as_integer(), Some(2));
     assert_eq!(

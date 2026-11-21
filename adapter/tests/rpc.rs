@@ -279,7 +279,7 @@ fn game_page_supported_not_built() {
         page["standard"],
         json!({
             "display.resolution": {"level": "honoured", "live": "live", "applier": "source"},
-            "display.fps": {"level": "honoured", "live": "live", "applier": "source", "values": [30, 60]},
+            "display.fps": {"level": "honoured", "live": "next_launch", "applier": "source", "values": [30, 60]},
             "perf.low_latency": {"level": "honoured", "live": "next_launch", "applier": "source", "values": ["off", "on"]}
         })
     );
@@ -314,6 +314,59 @@ fn built_run_folder_hides_the_build_button() {
         a.call("library.list", json!({}))["result"]["games"][0]["installed"],
         true
     );
+}
+
+#[test]
+fn build_release_matches_the_installed_manifest() {
+    let f = Fixture::built();
+    fs::write(
+        f.install.join("ags-extension.toml"),
+        "version = \"9.0.0-testing.1\"\n",
+    )
+    .unwrap();
+    let path = f.data.join("generated/run-1.019/build.json");
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    record["release"] = json!("9.0.0-testing.1");
+    fs::write(path, record.to_string()).unwrap();
+
+    let mut a = Adapter::spawn(&f);
+    set_dump(&mut a, &f);
+    assert_eq!(
+        a.call("library.list", json!({}))["result"]["games"][0]["installed"],
+        true
+    );
+    let reply = launch(&mut a, json!({}), json!({}));
+    assert!(reply.get("result").is_some(), "{reply}");
+}
+
+#[test]
+fn missing_or_unlisted_generated_executable_shows_build_again() {
+    let f = Fixture::built();
+    let mut a = Adapter::spawn(&f);
+    set_dump(&mut a, &f);
+    assert_eq!(
+        a.call("library.list", json!({}))["result"]["games"][0]["installed"],
+        true
+    );
+
+    let generated = f.data.join("../.generated.json");
+    fs::remove_file(&generated).unwrap();
+    for record in [None, Some(r#"{"version":1,"files":{}}"#)] {
+        if let Some(record) = record {
+            fs::write(&generated, record).unwrap();
+        }
+        let page = describe_game(&mut a);
+        assert_eq!(page["sections"][0]["id"], "astroport.build");
+        assert_eq!(item(&page, "build")["job"], true);
+        assert_eq!(
+            a.call("library.list", json!({}))["result"]["games"][0]["installed"],
+            false
+        );
+        assert_eq!(
+            launch(&mut a, json!({}), json!({}))["error"],
+            json!({"code": "failed", "message": "Build the game files first."})
+        );
+    }
 }
 
 #[test]

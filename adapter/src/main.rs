@@ -24,6 +24,7 @@ const DAMAGED_INSTALLATION: &str = "The AstroPort installation is damaged. Repai
 struct State {
     install: PathBuf,
     data: PathBuf,
+    release: Option<String>,
     versions: Versions,
     map: Result<settings::SettingsMap, String>,
     store: Store,
@@ -44,6 +45,12 @@ impl State {
             &self.versions,
             &mut self.cache,
         )
+    }
+
+    fn is_built(&self, version: &str, eboot_sha256: &str) -> bool {
+        self.release
+            .as_deref()
+            .is_some_and(|release| dump::built(&self.data, version, eboot_sha256, release))
     }
 
     fn game_page(&mut self, game: &Value) -> Result<Value, RpcError> {
@@ -67,12 +74,7 @@ impl State {
                 eboot_sha256,
                 ..
             } => (
-                dump::built(
-                    &self.data,
-                    &entry.version,
-                    eboot_sha256,
-                    env!("CARGO_PKG_VERSION"),
-                ),
+                self.is_built(&entry.version, eboot_sha256),
                 map.available(&self.install.join("patches").join(&entry.patches))
                     .map_err(|_| RpcError::new("failed", DAMAGED_INSTALLATION))?,
             ),
@@ -114,12 +116,7 @@ impl State {
         }
         let (_, entry, eboot_sha256) = self.supported_dump()?;
         let failed = |message: &str| RpcError::new("failed", message);
-        if !dump::built(
-            &self.data,
-            &entry.version,
-            &eboot_sha256,
-            env!("CARGO_PKG_VERSION"),
-        ) {
+        if !self.is_built(&entry.version, &eboot_sha256) {
             return Err(failed("Build the game files first."));
         }
         let device = self.device();
@@ -151,12 +148,7 @@ impl State {
                 entry,
                 eboot_sha256,
             } => {
-                let installed = dump::built(
-                    &self.data,
-                    &entry.version,
-                    &eboot_sha256,
-                    env!("CARGO_PKG_VERSION"),
-                );
+                let installed = self.is_built(&entry.version, &eboot_sha256);
                 (dump, entry.version, installed)
             }
             Detected::Unsupported { dump, version, .. } => (dump, version, false),
@@ -268,6 +260,18 @@ fn dispatch(state: &mut State, method: &str, params: &Value) -> Result<Value, Rp
     }
 }
 
+fn installed_release(install: &Path) -> Option<String> {
+    let manifest = fs::read_to_string(install.join("ags-extension.toml")).ok()?;
+    // Match the runner's parser for the release written to build.json.
+    manifest
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .find(|(key, _)| key.trim() == "version")
+        .and_then(|(_, value)| value.trim_start().strip_prefix('"'))
+        .and_then(|value| value.split_once('"'))
+        .map(|(version, _)| version.to_owned())
+}
+
 fn run() -> io::Result<()> {
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
@@ -283,6 +287,7 @@ fn run() -> io::Result<()> {
     let map = settings::load(&install.join("patches/settings.json"));
     let store = Store::load(&data);
     let mut state = State {
+        release: installed_release(&install),
         install,
         data,
         versions,
