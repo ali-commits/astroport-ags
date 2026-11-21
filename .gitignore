@@ -11,8 +11,14 @@
 !/tools/
 !/scripts/
 !/docs/
+!/adapter/
+!/runner/
+!/assets/
+!/ags-extension.toml
 # Build output of the port's own code (anchored: engine sources have folders named target, cache, build)
 /patcher/target/
 /tools/hidtap/target/
+/adapter/target/
+/runner/target/
 /tools/**/__pycache__/
 /tools/PPSA21567-*.json

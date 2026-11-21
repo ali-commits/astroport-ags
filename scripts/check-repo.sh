@@ -14,7 +14,7 @@ while IFS= read -r -d '' f; do
   (( s > max )) && { max=$s; maxf=$f; }
   (( s > 52428800 )) && bad "file over 50 MiB: $f ($s bytes)"
   case "$f" in
-    *.prx|*.sprx|*.elf|eboot.bin|*/eboot.bin|*.dll|*.exe|*.lib|*.profdata|*.log|src-*|run-*|ngx-sdk/*|build/*)
+    *.prx|*.sprx|*.elf|eboot.bin|*/eboot.bin|*.dll|*.exe|*.lib|*.profdata|*.log|src-*|run-*|ngx-sdk/*|build/*|*nvsdk_ngx*|*libnvidia-ngx-*)
       bad "forbidden tracked path: $f" ;;
   esac
 done < <("${G[@]}" ls-files -z)
@@ -40,10 +40,10 @@ for f in .gitignore LICENSE README.md NOTICE.md engines/kyty/LICENSE engines/kyt
   grep -qxF "$f" <<<"$tracked" || bad "missing tracked file: $f"
 done
 
-for p in build/x run-hybrid-1019/x src-1019/x ngx-sdk/x last-hybrid.log patcher/target/x tools/hidtap/target/x tools/__pycache__/x.pyc; do
+for p in build/x run-hybrid-1019/x src-1019/x ngx-sdk/x last-hybrid.log patcher/target/x tools/hidtap/target/x tools/__pycache__/x.pyc adapter/target/x runner/target/x build/release/dlss-sdk/x; do
   "${G[@]}" check-ignore -q --no-index "$p" || bad "should be ignored: $p"
 done
-for p in engines/anyps5/3rdparty/zstd/build/cmake/CMakeLists.txt engines/kyty/src/graphics/host_gpu/renderer/cache/textureCache.cpp patcher/src/lib.rs scripts/check-repo.sh; do
+for p in engines/anyps5/3rdparty/zstd/build/cmake/CMakeLists.txt engines/kyty/src/graphics/host_gpu/renderer/cache/textureCache.cpp patcher/src/lib.rs scripts/check-repo.sh adapter/src/main.rs runner/src/main.rs ags-extension.toml assets/icon.svg; do
   "${G[@]}" check-ignore -q --no-index "$p" && bad "should not be ignored: $p"
 done
 
