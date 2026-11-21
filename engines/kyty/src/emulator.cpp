@@ -1,0 +1,216 @@
+#include "emulator.h"
+
+#include "common/abi.h"
+#include "common/assert.h"
+#include "common/emulatorConfig.h"
+#include "common/file.h"
+#include "common/logging/log.h"
+#include "common/profiler.h"
+#include "common/singleton.h"
+#include "common/stringUtils.h"
+#include "common/subsystems.h"
+#include "common/systemInfo.h"
+#include "common/threads.h"
+#include "common/u59Preset.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineList.h"
+#include "graphics/presentation/systemOverlay.h"
+#include "graphics/host_gpu/renderer/nativeRayTracing.h"
+#include "graphics/shader/recompiler/CodegenOptions.h"
+#include "graphics/presentation/window.h"
+#include "kernel/fileSystem.h"
+#include "kernel/memory.h"
+#include "kernel/pthread.h"
+#include "kytyGitVersion.h"
+#include "libs/agc.h"
+#include "libs/audio.h"
+#include "libs/controller.h"
+#include "libs/libs.h"
+#include "libs/network.h"
+#include "libs/wheelHost.h"
+#include "loader/additionalContent.h"
+#include "loader/runtimeLinker.h"
+#include "loader/systemContent.h"
+
+#include <cstdlib>
+#include <filesystem>
+#include <thread>
+
+namespace Emulator {
+
+static void PrintSystemInfo() {
+	const Common::SystemInfo info = Common::GetSystemInfo();
+
+#if defined(__APPLE__)
+	static constexpr auto platform_name = "macOS";
+#elif KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	static constexpr auto platform_name = "Windows";
+#elif KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	static constexpr auto platform_name = "Linux";
+#else
+	static constexpr auto platform_name = "Unknown";
+#endif
+
+	LOGF("Build\n"
+	     "  version: %s\n\n"
+	     "Host\n"
+	     "  os:      %s\n"
+	     "  cpu:     %s\n"
+	     "  threads: %u\n"
+	     "  Intel CPU compatibility (AMD instruction patch): %s\n\n",
+	     KYTY_BUILD_LABEL, platform_name, info.ProcessorName.c_str(),
+	     std::thread::hardware_concurrency(), Config::GetAmdCpuDecision().c_str());
+}
+
+static void KytyClose() {
+	auto* rt = Common::Singleton<Loader::RuntimeLinker>::Instance();
+
+	rt->Clear();
+
+	LOGF("done!\n");
+
+	Common::Subsystems::EmergencyShutdownActive();
+}
+
+static void MountOrCreateDir(const std::filesystem::path& dir, const std::string& point) {
+	if (!Common::File::IsDirectoryExisting(dir)) {
+		Common::File::CreateDirectories(dir);
+	}
+
+	EXIT_NOT_IMPLEMENTED(!Common::File::IsDirectoryExisting(dir));
+
+	Libs::LibKernel::FileSystem::Mount(dir, point);
+	auto dir_text = Common::PathToString(dir);
+	LOGF("Mounted %s -> %s\n", point.c_str(), dir_text.c_str());
+}
+
+static void MountSandboxDirs() {
+	std::string title_id;
+	if (!Loader::SystemContentParamSfoGetString("TITLE_ID", &title_id) || title_id.empty()) {
+		title_id = "UNKNOWN";
+	}
+
+	MountOrCreateDir("_DownloadData/" + title_id, "/download0");
+	MountOrCreateDir("_TempData/" + title_id, "/temp0");
+	MountOrCreateDir("_TempData/" + title_id, "/temp");
+}
+
+static void Init(const Config::ConfigOptions& cfg, const std::filesystem::path& param_json,
+                 Common::Subsystems& subsystems) {
+	EXIT_IF(!Common::Thread::IsMainThread());
+
+	subsystems.Initialize<Config::Lifecycle>();
+	Config::Load(cfg);
+	subsystems.Initialize<Log::Lifecycle>();
+
+	if (Common::File::IsFileExisting(param_json)) {
+		Loader::SystemContentLoadParamSfo(param_json);
+	}
+	if (cfg.splash_enabled) {
+		Libs::Graphics::InitializeSplashScreen(param_json.parent_path());
+	}
+
+	// Initialization order is explicit; destruction is automatic and reversed.
+	subsystems.Initialize<Libs::LibKernel::PthreadLifecycle>();
+	subsystems.Initialize<Profiler::Lifecycle>();
+	subsystems.Initialize<Libs::Network::Lifecycle>();
+	// KYTY_RT_HW: the Windows ray tracing driver runtime needs low virtual addresses that the guest
+	// reservation below would own (vkCreateDevice with ray tracing then fails with
+	// VK_ERROR_INITIALIZATION_FAILED): a temporary ray tracing device initializes it first.
+	if (Libs::Graphics::ShaderRecompiler::GetCodegenOptions().rt_hw) {
+		Libs::Graphics::PrepareNativeRayTracingRuntime(cfg.gpu_index);
+	}
+	subsystems.Initialize<Libs::LibKernel::Memory::Lifecycle>();
+	subsystems.Initialize<Libs::LibKernel::FileSystem::Lifecycle>();
+	subsystems.Initialize<Libs::Controller::Lifecycle>();
+	subsystems.Initialize<Libs::Audio::Lifecycle>();
+	subsystems.Initialize<Libs::Graphics::Lifecycle>();
+	// After the window: SDL is initialised there, on this thread.
+	subsystems.Initialize<Libs::Wheel::Lifecycle>();
+}
+
+static void LoadElf(const std::filesystem::path& elf, bool dbg_print_reloc = false,
+                    const std::filesystem::path& save_name = {}) {
+	auto* rt = Common::Singleton<Loader::RuntimeLinker>::Instance();
+
+	auto* program = rt->LoadProgram(
+	    Libs::LibKernel::FileSystem::GetRealFilename(Common::PathToGenericString(elf)));
+
+	if (dbg_print_reloc) {
+		program->dbg_print_reloc = true;
+	}
+
+	if (!save_name.empty()) {
+		rt->SaveProgram(program, Libs::LibKernel::FileSystem::GetRealFilename(
+		                             Common::PathToGenericString(save_name)));
+	}
+}
+
+static void Execute(const std::filesystem::path& game_patch) {
+	std::thread([game_patch] {
+		Common::Singleton<Loader::RuntimeLinker>::Instance()->Execute(game_patch);
+	}).detach();
+	Libs::Graphics::WindowRun();
+	std::quick_exit(0);
+}
+
+void Run(const RunOptions& options) {
+	if (options.app0_dir.empty()) {
+		EXIT("app0 directory is required\n");
+	}
+
+	if (options.elf.empty()) {
+		EXIT("ELF is required\n");
+	}
+
+	const auto         param_json = options.app0_dir / "sce_sys" / "param.json";
+	// The renderer, created during Init before /app0 is mounted, reads shader code from it
+	// (KYTY_PIPELINE_LIST).
+	Libs::Graphics::SetPipelineListExecutable(options.app0_dir / options.elf.filename());
+	Common::Subsystems subsystems(true);
+	Init(options.config, param_json, subsystems);
+
+	PrintSystemInfo();
+	std::string title_id;
+	Loader::SystemContentParamSfoGetString("TITLE_ID", &title_id);
+	if (title_id.empty()) {
+		std::string content_id;
+		if (Loader::SystemContentParamSfoGetString("CONTENT_ID", &content_id) &&
+		    content_id.size() == 36 && content_id[6] == '-' && content_id[16] == '_') {
+			title_id = content_id.substr(7, 9);
+		}
+	}
+	if (!title_id.empty()) {
+		Log::WriteToConsoleAndLog(fmt::format("Title ID: {}\n", title_id));
+	}
+	// A start without u59-preset.json (direct, or a launcher without the file) says so once.
+	for (const auto& line: Common::U59Preset::StartupWarnings([](const char* name) { return std::getenv(name); })) {
+		Log::WriteToConsoleAndLog(line);
+	}
+	// The launcher applied u59-preset.<title>.json over the bundled preset for this game.
+	if (const char* title_preset = std::getenv("KYTY_TITLE_PRESET");
+	    title_preset != nullptr && title_preset[0] != '\0') {
+		Log::WriteToConsoleAndLog(fmt::format("Per-title preset applied: {}\n", title_preset));
+	}
+
+	int ok = atexit(KytyClose);
+	EXIT_NOT_IMPLEMENTED(ok != 0);
+
+	// Guest threads are still running, so skip KytyClose() and only flush emergency state.
+	ok = at_quick_exit(Common::Subsystems::EmergencyShutdownActive);
+	EXIT_NOT_IMPLEMENTED(ok != 0);
+
+	Libs::LibKernel::FileSystem::Mount(options.app0_dir, "/app0");
+	Libs::LibKernel::FileSystem::Mount(options.app0_dir, "/hostapp");
+
+	MountSandboxDirs();
+
+	Loader::AddContentLoad(options.addcont_dir, options.addcont, title_id);
+	auto* rt = Common::Singleton<Loader::RuntimeLinker>::Instance();
+	Libs::InitAll(rt->Symbols());
+
+	LoadElf(options.elf);
+
+	Execute(options.game_patch);
+}
+
+} // namespace Emulator

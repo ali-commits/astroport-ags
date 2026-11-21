@@ -1,0 +1,897 @@
+#include "graphics/shader/recompiler/CodegenOptions.h"
+#include "graphics/shader/recompiler/ir/ShaderIR.h"
+#include "graphics/shader/recompiler/ir/passes/ConstantPropagation.h"
+#include "graphics/shader/recompiler/ir/passes/DeadCodeElimination.h"
+#include "graphics/shader/recompiler/ir/passes/ReadLaneElimination.h"
+#include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
+
+#include <algorithm>
+#include <cstdlib>
+#include <iostream>
+#include <stdexcept>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+namespace {
+
+using namespace Libs::Graphics::ShaderRecompiler::IR;
+using Libs::Graphics::ShaderComputeInputInfo;
+using Libs::Graphics::ShaderType;
+
+void Check(bool condition, const char *message) {
+  if (!condition) {
+    throw std::runtime_error(message);
+  }
+}
+
+template <typename F>
+void CheckFatal(F &&function, std::string_view expected, const char *message) {
+  try {
+    function();
+  } catch (const std::runtime_error &error) {
+    Check(std::string_view(error.what()).find(expected) !=
+              std::string_view::npos,
+          message);
+    return;
+  }
+  Check(false, message);
+}
+
+struct Fixture {
+  Program program;
+  ShaderComputeInputInfo compute{};
+
+  explicit Fixture(uint32_t block_count = 1) {
+    program.stage = ShaderType::Compute;
+    program.shader_hash = 0x12345678u;
+    program.user_data_base = 2;
+    for (uint32_t index = 0; index < block_count; index++) {
+      program.block_storage.push_back(std::make_unique<Block>());
+      auto *block = program.block_storage.back().get();
+      program.blocks.push_back(block);
+      program.block_info.push_back({.id = index});
+    }
+  }
+
+  Block &BlockAt(uint32_t index = 0) { return *program.blocks[index]; }
+
+  Value Emit(ValueOpcode opcode, std::initializer_list<Value> args = {},
+             uint64_t flags = 0, uint32_t block = 0) {
+    return Value(&BlockAt(block).AppendNewInst(opcode, args, flags));
+  }
+
+  Value EmitMemory(ValueOpcode opcode, std::initializer_list<Value> args,
+                   uint32_t memory, uint32_t pc = 0x40, uint32_t block = 0) {
+    MemoryFlags flags{.index = memory, .pc = pc};
+    uint64_t bits = 0;
+    std::memcpy(&bits, &flags, sizeof(flags));
+    return Emit(opcode, args, bits, block);
+  }
+
+  uint32_t AddMemory(ResourceKind kind, int32_t offset = 0) {
+    MemoryInfo info;
+    info.kind = kind;
+    info.offset = static_cast<uint32_t>(offset);
+    program.memory_info.push_back(info);
+    return static_cast<uint32_t>(program.memory_info.size() - 1u);
+  }
+
+  void Plan() { BuildSrtPlan(program); }
+};
+
+struct TestMemory {
+  std::unordered_map<uint64_t, uint32_t> words;
+  uint32_t reads = 0;
+};
+
+bool ReadMemory(void *userdata, uint64_t address, std::span<uint32_t> values) {
+  auto &memory = *static_cast<TestMemory *>(userdata);
+  for (auto &value : values) {
+    const auto it = memory.words.find(address);
+    if (it == memory.words.end()) return false;
+    value = it->second;
+    address += sizeof(uint32_t);
+  }
+  memory.reads++;
+  return true;
+}
+
+Value Address(Fixture &fixture, Value low, Value high, uint32_t block = 0) {
+  return fixture.Emit(ValueOpcode::GetAddressResource, {low, high}, 0, block);
+}
+
+Value RawRead(Fixture &fixture, Value address, Value offset, uint32_t memory,
+              uint32_t block = 0) {
+  return fixture.EmitMemory(ValueOpcode::LoadAddressU32,
+                            {address, offset, Value(0u), Value(true)}, memory,
+                            0x80, block);
+}
+
+void TestImmediateFlatteningAndGvn() {
+  Fixture fixture;
+  const auto memory = fixture.AddMemory(ResourceKind::ScalarAddress, 0x20);
+  const auto first = RawRead(
+      fixture, Address(fixture, Value(0x1000u), Value(0u)), Value(0u), memory);
+  const auto second = RawRead(
+      fixture, Address(fixture, Value(0x1000u), Value(0u)), Value(0u), memory);
+  fixture.Emit(ValueOpcode::GetBufferResource,
+               {first, second, Value(16u), Value(0u)});
+
+  fixture.Plan();
+  Check(fixture.program.srt_reads.size() == 1,
+        "equivalent typed scalar reads were not coalesced");
+  Check(fixture.program.dynamic_reads.empty(),
+        "immediate scalar read was classified as dynamic");
+  Check(fixture.program.memory_info[memory].planning_only,
+        "flattened raw read was not kept as a planning-only root");
+
+  TestMemory memory_image{{{0x1020u, 0xfeedbeefu}}};
+  SrtRuntime runtime{.read_memory = ReadMemory, .userdata = &memory_image};
+  std::vector<uint32_t> flat;
+  Check(SrtWalker(fixture.program, runtime).RefreshFlatBuffer(flat), "flattened SRT walk failed");
+  Check(flat == std::vector<uint32_t>{0xfeedbeefu} && memory_image.reads == 1,
+        "flattened SRT did not evaluate its canonical read once");
+}
+
+void TestRawScalarComponentAlignment() {
+  Fixture fixture;
+  const auto memory = fixture.AddMemory(ResourceKind::ScalarAddress, 2);
+  const auto read = RawRead(
+      fixture, Address(fixture, Value(0x1003u), Value(0u)), Value(2u), memory);
+  fixture.Emit(ValueOpcode::GetBufferResource,
+               {read, Value(0u), Value(16u), Value(0u)});
+  fixture.Plan();
+
+  TestMemory memory_image{{{0x1000u, 0x12345678u}}};
+  SrtRuntime runtime{.read_memory = ReadMemory, .userdata = &memory_image};
+  std::vector<uint32_t> flat;
+  Check(SrtWalker(fixture.program, runtime).RefreshFlatBuffer(flat), "raw scalar SRT walk failed");
+  Check(
+      flat == std::vector<uint32_t>{0x12345678u} && memory_image.reads == 1,
+      "raw scalar base, immediate, and offset were not aligned independently");
+}
+
+void TestScalarMemoryDomainMismatchFails() {
+  Fixture raw;
+  const auto raw_memory = raw.AddMemory(ResourceKind::ScalarBuffer);
+  RawRead(raw, Address(raw, Value(0x1000u), Value(0u)), Value(0u), raw_memory);
+  CheckFatal([&] { BuildSrtPlan(raw.program); },
+             "incompatible scalar memory metadata",
+             "raw scalar load accepted descriptor-buffer metadata");
+
+  Fixture buffer;
+  const auto buffer_memory = buffer.AddMemory(ResourceKind::ScalarAddress);
+  const auto resource =
+      buffer.Emit(ValueOpcode::GetBufferResource,
+                  {Value(0x1000u), Value(0u), Value(16u), Value(0u)});
+  buffer.EmitMemory(ValueOpcode::ReadConstBuffer, {resource, Value(0u)},
+                    buffer_memory);
+  CheckFatal([&] { BuildSrtPlan(buffer.program); },
+             "incompatible scalar memory metadata",
+             "descriptor scalar load accepted raw-address metadata");
+}
+
+void TestDynamicReadRemainsTyped() {
+  Fixture fixture;
+  const auto memory = fixture.AddMemory(ResourceKind::ScalarAddress);
+  const auto offset = fixture.Emit(ValueOpcode::GetUserData,
+                                   {Value(static_cast<ScalarReg>(2))});
+  const auto read = RawRead(
+      fixture, Address(fixture, Value(0x1000u), Value(0u)), offset, memory);
+  fixture.Emit(ValueOpcode::GetBufferResource,
+               {read, Value(0u), Value(16u), Value(0u)});
+
+  fixture.Plan();
+  Check(fixture.program.srt_reads.empty() &&
+            fixture.program.dynamic_reads == std::vector<Value>{read},
+        "dynamic scalar read received a fake flattened slot");
+}
+
+void TestNestedSrtWalk() {
+  Fixture fixture;
+  const auto memory = fixture.AddMemory(ResourceKind::ScalarAddress);
+  const auto pointer = RawRead(
+      fixture, Address(fixture, Value(0x1000u), Value(0u)), Value(0u), memory);
+  const auto value =
+      RawRead(fixture, Address(fixture, pointer, Value(0u)), Value(0u), memory);
+  fixture.Emit(ValueOpcode::GetBufferResource,
+               {value, Value(0u), Value(16u), Value(0u)});
+  fixture.Plan();
+
+  TestMemory memory_image{{{0x1000u, 0x2000u}, {0x2000u, 0xabcdef01u}}};
+  SrtRuntime runtime{.read_memory = ReadMemory, .userdata = &memory_image};
+  std::vector<uint32_t> flat;
+  Check(SrtWalker(fixture.program, runtime).RefreshFlatBuffer(flat), "nested SRT walk failed");
+  Check(flat == std::vector<uint32_t>({0x2000u, 0xabcdef01u}),
+        "nested typed SRT reads were not evaluated in dependency order");
+}
+
+void TestShaderBaseAndUserData() {
+  Fixture fixture;
+  const auto base = fixture.Emit(ValueOpcode::GetShaderBase);
+  const auto low =
+      fixture.Emit(ValueOpcode::CompositeExtractU64, {base, Value(0u)});
+  const auto high =
+      fixture.Emit(ValueOpcode::CompositeExtractU64, {base, Value(1u)});
+  const auto user = fixture.Emit(ValueOpcode::GetUserData,
+                                 {Value(static_cast<ScalarReg>(2))});
+  const auto sum = fixture.Emit(ValueOpcode::IAdd32, {user, Value(4u)});
+  fixture.Plan();
+  fixture.program.descriptor_sources.push_back(
+      {.dwords = {low, high, sum}, .dword_count = 3});
+
+  const std::array user_data{0x20u};
+  SrtRuntime runtime{.user_data = user_data,
+                     .shader_base = 0x12345678abcdef00ull};
+  DescriptorValue result;
+  Check(SrtWalker(fixture.program, runtime).EvaluateDescriptor(0, result),
+        "shader-relative descriptor evaluation failed");
+  Check(result.dword_count == 3 && result.dwords[0] == 0xabcdef00u &&
+            result.dwords[1] == 0x12345678u && result.dwords[2] == 0x24u,
+        "shader-relative typed descriptor expression evaluated incorrectly");
+}
+
+void TestCarryAndBitFields() {
+  Fixture fixture;
+  const auto low = fixture.Emit(ValueOpcode::IAdd32, {Value(0xffffffffu), Value(2u)});
+  const auto carry = fixture.Emit(ValueOpcode::ULessThan32, {low, Value(0xffffffffu)});
+  const auto high = fixture.Emit(ValueOpcode::SelectU32, {carry, Value(1u), Value(0u)});
+  const auto inserted =
+      fixture.Emit(ValueOpcode::BitFieldInsert,
+                   {Value(0u), Value(0x89abcdefu), Value(0u), Value(32u)});
+  const auto sign = fixture.Emit(ValueOpcode::BitFieldSExtract,
+                                 {Value(0x000000f0u), Value(4u), Value(4u)});
+  fixture.Plan();
+  fixture.program.descriptor_sources.push_back(
+      {.dwords = {low, high, inserted, sign}, .dword_count = 4});
+
+  DescriptorValue result;
+  Check(SrtWalker(fixture.program, {}).EvaluateDescriptor(0, result),
+        "carry and bit-field descriptor evaluation failed");
+  Check(result.dwords[0] == 1u && result.dwords[1] == 1u &&
+            result.dwords[2] == 0x89abcdefu && result.dwords[3] == 0xffffffffu,
+        "typed carry or bit-field runtime evaluation is incorrect");
+}
+
+void TestInvariantAndDivergentPhi() {
+  Fixture fixture(3);
+  auto &invariant = fixture.BlockAt(2).AppendNewInst(ValueOpcode::Phi);
+  invariant.SetFlags(Type::U32);
+  invariant.AddPhiOperand(&fixture.BlockAt(0), Value(7u));
+  invariant.AddPhiOperand(&fixture.BlockAt(1), Value(7u));
+  auto &divergent = fixture.BlockAt(2).AppendNewInst(ValueOpcode::Phi);
+  divergent.SetFlags(Type::U32);
+  divergent.AddPhiOperand(&fixture.BlockAt(0), Value(7u));
+  divergent.AddPhiOperand(&fixture.BlockAt(1), Value(9u));
+  fixture.Plan();
+  fixture.program.descriptor_sources.push_back(
+      {.dwords = {Value(&invariant)}, .dword_count = 1});
+  fixture.program.descriptor_sources.push_back(
+      {.dwords = {Value(&divergent)}, .dword_count = 1});
+
+  DescriptorValue result;
+  Check(SrtWalker(fixture.program, {}).EvaluateDescriptor(0, result) &&
+            result.dwords[0] == 7u,
+        "loop-invariant typed phi was rejected");
+  Check(!SrtWalker(fixture.program, {}).EvaluateDescriptor(1, result),
+        "divergent phi was accepted");
+}
+
+void TestControlDependentStandaloneLoadStaysTyped() {
+  Fixture fixture(3);
+  const auto memory = fixture.AddMemory(ResourceKind::ScalarAddress);
+  auto &base = fixture.BlockAt(2).AppendNewInst(ValueOpcode::Phi);
+  base.SetFlags(Type::U32);
+  base.AddPhiOperand(&fixture.BlockAt(0), Value(0x1000u));
+  base.AddPhiOperand(&fixture.BlockAt(1), Value(0x2000u));
+  const auto read =
+      RawRead(fixture, Address(fixture, Value(&base), Value(0u), 2), Value(0u),
+              memory, 2);
+  fixture.Plan();
+  Check(fixture.program.srt_reads.empty() &&
+            read.ResolveInstruction()->GetOpcode() ==
+                ValueOpcode::LoadAddressU32 &&
+            !fixture.program.memory_info[memory].planning_only,
+        "control-dependent standalone scalar load was flattened into a host "
+        "snapshot");
+}
+
+void TestRuntime64BitDescriptorOps() {
+  Fixture fixture;
+  const auto shifted = fixture.Emit(ValueOpcode::ShiftLeftLogical64,
+                                    {Value(uint64_t{0x1234u}), Value(32u)});
+  const auto masked =
+      fixture.Emit(ValueOpcode::BitwiseAnd64,
+                   {shifted, Value(uint64_t{0x0000ffff00000000ull})});
+  const auto combined = fixture.Emit(
+      ValueOpcode::IAdd64, {masked, Value(uint64_t{0x000000010000abcdull})});
+  const auto low =
+      fixture.Emit(ValueOpcode::CompositeExtractU64, {combined, Value(0u)});
+  const auto high =
+      fixture.Emit(ValueOpcode::CompositeExtractU64, {combined, Value(1u)});
+  fixture.Plan();
+  fixture.program.descriptor_sources.push_back(
+      {.dwords = {low, high}, .dword_count = 2});
+
+  DescriptorValue result;
+  Check(SrtWalker(fixture.program, {}).EvaluateDescriptor(0, result) &&
+            result.dwords[0] == 0xabcdu && result.dwords[1] == 0x1235u,
+        "64-bit typed descriptor arithmetic evaluation is incorrect");
+}
+
+void TestUniformFirstLaneSamplerLod() {
+  Fixture fixture;
+  const auto active = fixture.Emit(
+      ValueOpcode::IEqual32, {fixture.Emit(ValueOpcode::LaneId), Value(0u)});
+  const auto stale = fixture.Emit(
+      ValueOpcode::GetVectorRegister, {Value(static_cast<VectorReg>(0))});
+  const auto write = [&](Value value, Value previous) {
+    return fixture.Emit(ValueOpcode::SelectU32, {active, value, previous});
+  };
+  const auto user = fixture.Emit(
+      ValueOpcode::GetUserData, {Value(static_cast<ScalarReg>(8))});
+  const auto as_float = fixture.Emit(ValueOpcode::ConvertF32U32, {user});
+  const auto initial = write(
+      fixture.Emit(ValueOpcode::BitCastU32F32, {as_float}), stale);
+  const auto initial_float =
+      fixture.Emit(ValueOpcode::BitCastF32U32, {initial});
+  const auto scaled = fixture.Emit(ValueOpcode::FPMul32,
+                                   {Value::F32(256.0f), initial_float});
+  const auto scaled_write = write(
+      fixture.Emit(ValueOpcode::BitCastU32F32, {scaled}), initial);
+  const auto scaled_float =
+      fixture.Emit(ValueOpcode::BitCastF32U32, {scaled_write});
+  const auto nan = fixture.Emit(ValueOpcode::FPIsNan32, {scaled_float});
+  const auto low = fixture.Emit(ValueOpcode::FPOrdLessThanEqual32,
+                                {scaled_float, Value::F32(0.0f)});
+  const auto high = fixture.Emit(ValueOpcode::FPOrdGreaterThanEqual32,
+                                 {scaled_float, Value::F32(4294967296.0f)});
+  const auto truncated = fixture.Emit(ValueOpcode::FPTrunc32, {scaled_float});
+  const auto safe_low = fixture.Emit(
+      ValueOpcode::SelectF32,
+      {fixture.Emit(ValueOpcode::LogicalOr, {nan, low}), Value::F32(0.0f),
+       truncated});
+  const auto safe = fixture.Emit(
+      ValueOpcode::SelectF32,
+      {high, Value::F32(4294967040.0f), safe_low});
+  const auto converted = fixture.Emit(ValueOpcode::ConvertU32F32, {safe});
+  const auto saturated = write(
+      fixture.Emit(ValueOpcode::SelectU32,
+                   {high, Value(UINT32_MAX), converted}),
+      scaled_write);
+  const auto lod = fixture.Emit(ValueOpcode::UMin32,
+                                {saturated, Value(0xfffu)});
+  const auto lod_write = write(lod, saturated);
+  const auto masked = fixture.Emit(ValueOpcode::BitwiseAnd32,
+                                   {lod_write, Value(0xfffu)});
+  const auto masked_write = write(masked, lod_write);
+  const auto packed = write(
+      fixture.Emit(
+          ValueOpcode::BitwiseOr32,
+          {fixture.Emit(ValueOpcode::ShiftLeftLogical32,
+                        {masked_write, Value(12u)}),
+           masked_write}),
+      masked_write);
+  const auto first = fixture.Emit(ValueOpcode::ReadFirstLane,
+                                  {packed, active});
+  const auto divergent = fixture.Emit(
+      ValueOpcode::ReadFirstLane, {stale, active});
+  fixture.Plan();
+
+  Check(ValidateRuntimeValue(fixture.program, first),
+        "uniform sampler LOD construction was rejected");
+  Check(!ValidateRuntimeValue(fixture.program, divergent),
+        "divergent first-lane value was accepted as uniform");
+  fixture.program.descriptor_sources.push_back(
+      {.dwords = {first}, .dword_count = 1});
+
+  std::array<uint32_t, 7> user_data{};
+  user_data[6] = 3u;
+  SrtRuntime runtime{.user_data = user_data};
+  DescriptorValue result;
+  Check(SrtWalker(fixture.program, runtime).EvaluateDescriptor(0, result) &&
+            result.dwords[0] == 0x00300300u,
+        "uniform sampler LOD evaluated incorrectly");
+  user_data[6] = 20u;
+  Check(SrtWalker(fixture.program, runtime).EvaluateDescriptor(0, result) &&
+            result.dwords[0] == 0x00ffffffu,
+        "uniform sampler LOD clamp evaluated incorrectly");
+}
+
+void TestFloatComparisonDescriptorInputs() {
+  struct Input {
+    uint32_t bits;
+    uint32_t less_equal;
+    uint32_t greater_equal;
+  };
+  constexpr std::array inputs = {
+      Input{0x00000001u, 0, 1}, Input{0x80000001u, 1, 0},
+      Input{0x007fffffu, 0, 1}, Input{0x807fffffu, 1, 0},
+      Input{0x00800000u, 0, 1}, Input{0x80800000u, 1, 0},
+      Input{0x00000000u, 1, 1}, Input{0x80000000u, 1, 1},
+      Input{0x7fc00000u, 0, 0}};
+  for (const bool flush : {false, true}) {
+    Fixture fixture;
+    const auto user = fixture.Emit(
+        ValueOpcode::GetUserData, {Value(static_cast<ScalarReg>(2))});
+    const auto value = fixture.Emit(ValueOpcode::BitCastF32U32, {user});
+    const auto less_equal = fixture.Emit(ValueOpcode::FPOrdLessThanEqual32,
+                                         {value, Value::F32(0.0f)});
+    const auto greater_equal = fixture.Emit(ValueOpcode::FPOrdGreaterThanEqual32,
+                                            {value, Value::F32(0.0f)});
+    less_equal.Instruction()->SetFlags(FPCompareFlags{flush});
+    greater_equal.Instruction()->SetFlags(FPCompareFlags{flush});
+    const auto low = fixture.Emit(ValueOpcode::SelectU32,
+                                  {less_equal, Value(1u), Value(0u)});
+    const auto high = fixture.Emit(ValueOpcode::SelectU32,
+                                   {greater_equal, Value(1u), Value(0u)});
+    fixture.program.descriptor_sources.push_back(
+        {.dwords = {low, high}, .dword_count = 2});
+    fixture.Plan();
+    for (size_t index = 0; index < inputs.size(); index++) {
+      const auto &input = inputs[index];
+      const std::array user_data{input.bits};
+      DescriptorValue result;
+      Check(SrtWalker(fixture.program, {.user_data = user_data})
+                    .EvaluateDescriptor(0, result) &&
+                result.dwords[0] == (flush && index < 4 ? 1 : input.less_equal) &&
+                result.dwords[1] == (flush && index < 4 ? 1 : input.greater_equal),
+            "descriptor comparison disagrees with native FP32 input mode");
+    }
+  }
+}
+
+void TestSignedConversionDescriptorInputs() {
+  // 3.75 and -3.75 truncate, the largest float below 2^31 converts exactly, 2^31 and +inf
+  // saturate up, -2^31 and -1e10 saturate down, and -0.0, a denormal and both NaNs read zero.
+  constexpr std::array<std::pair<uint32_t, uint32_t>, 11> inputs = {{
+      {0x40700000u, 3u},          {0xc0700000u, 0xfffffffdu}, {0x4effffffu, 0x7fffff80u},
+      {0x4f000000u, 0x7fffffffu}, {0x7f800000u, 0x7fffffffu}, {0xcf000000u, 0x80000000u},
+      {0xd01502f9u, 0x80000000u}, {0x80000000u, 0u},          {0x00000001u, 0u},
+      {0x7fc00000u, 0u},          {0xffc00000u, 0u}}};
+  Fixture fixture;
+  const auto user = fixture.Emit(
+      ValueOpcode::GetUserData, {Value(static_cast<ScalarReg>(2))});
+  const auto converted = fixture.Emit(
+      ValueOpcode::ConvertS32F32, {fixture.Emit(ValueOpcode::BitCastF32U32, {user})});
+  fixture.program.descriptor_sources.push_back(
+      {.dwords = {converted}, .dword_count = 1});
+  fixture.Plan();
+  for (const auto &[bits, expected] : inputs) {
+    const std::array user_data{bits};
+    DescriptorValue result;
+    Check(SrtWalker(fixture.program, {.user_data = user_data})
+                  .EvaluateDescriptor(0, result) &&
+              result.dwords[0] == expected,
+          "descriptor signed conversion disagrees with the native conversion");
+  }
+}
+
+void TestSharedIntegerRuntimeDependencies() {
+  Fixture fixture;
+  const auto lane = fixture.Emit(ValueOpcode::LaneId);
+  const auto active =
+      fixture.Emit(ValueOpcode::IEqual32, {lane, Value(0u)});
+  auto inactive = lane;
+  for (uint32_t level = 0; level < 36; level++) {
+    const auto left =
+        fixture.Emit(ValueOpcode::IAdd32, {inactive, Value(1u)});
+    const auto right =
+        fixture.Emit(ValueOpcode::IMul32, {inactive, Value(3u)});
+    inactive = fixture.Emit(ValueOpcode::BitwiseXor32, {left, right});
+  }
+  const auto selected = fixture.Emit(
+      ValueOpcode::SelectU32, {active, Value(42u), inactive});
+  const auto first =
+      fixture.Emit(ValueOpcode::ReadFirstLane, {selected, active});
+  Check(ValidateRuntimeValue(fixture.program, first, RuntimeValueType::Integer),
+        "shared integer dependencies behind an inactive arm were rejected");
+
+  const auto uniform_use = fixture.Emit(ValueOpcode::IAdd32, {first, inactive});
+  Check(!ValidateRuntimeValue(fixture.program, uniform_use,
+                              RuntimeValueType::Integer),
+        "integer-only dependency acceptance was reused as uniform acceptance");
+
+  const auto other_active =
+      fixture.Emit(ValueOpcode::IEqual32, {lane, Value(1u)});
+  const auto other_first =
+      fixture.Emit(ValueOpcode::ReadFirstLane, {selected, other_active});
+  const auto both = fixture.Emit(ValueOpcode::IAdd32, {first, other_first});
+  Check(!ValidateRuntimeValue(fixture.program, both, RuntimeValueType::Integer),
+        "uniform acceptance was reused across different execution masks");
+
+  const auto floating =
+      fixture.Emit(ValueOpcode::BitCastU32F32, {Value::F32(1.f)});
+  const auto mixed =
+      fixture.Emit(ValueOpcode::BitwiseOr32, {inactive, floating});
+  selected.ResolveInstruction()->SetArg(2, mixed);
+  Check(!ValidateRuntimeValue(fixture.program, first, RuntimeValueType::Integer),
+        "shared integer dependencies hid a floating-point sibling");
+}
+
+void TestConstantBufferBounds() {
+  struct Case {
+    uint32_t offset;
+    uint32_t immediate;
+    uint32_t stride;
+    uint32_t records;
+    bool valid;
+    uint32_t expected;
+    uint32_t reads;
+  };
+  struct MemoryProbe {
+    TestMemory memory{{{0x3000u, 0x12345678u}, {0x300cu, 0xa5a5a5a5u}}};
+    uint32_t attempts = 0;
+  };
+  const auto read_memory = [](void *userdata, uint64_t address,
+                              std::span<uint32_t> values) {
+    auto &probe = *static_cast<MemoryProbe *>(userdata);
+    ++probe.attempts;
+    return ReadMemory(&probe.memory, address, values);
+  };
+  // PS5 scalar-buffer loads return zero per out-of-range DWORD without touching
+  // memory; an unreadable in-range address remains a failed walk. The byte offset
+  // is the immediate plus the dynamic offset, rounded down to a DWORD.
+  for (const auto &test : {Case{12u, 0u, 0u, 16u, true, 0xa5a5a5a5u, 1u},
+                           Case{2u, 1u, 0u, 16u, true, 0x12345678u, 1u},
+                           Case{0xfffffffcu, 4u, 0u, 16u, true, 0u, 0u},
+                           Case{16u, 0u, 0u, 16u, true, 0u, 0u},
+                           Case{12u, 0u, 0u, 14u, true, 0u, 0u},
+                           Case{0u, 0u, 0u, 0u, true, 0u, 0u},
+                           Case{8u, 0u, 0u, 16u, false, 0u, 1u},
+                           Case{12u, 0u, 48u, 32768u, true, 0xa5a5a5a5u, 1u},
+                           Case{0x6339c0u, 16u, 48u, 32768u, true, 0u, 0u}}) {
+    Fixture fixture;
+    const auto memory =
+        fixture.AddMemory(ResourceKind::ScalarBuffer, static_cast<int32_t>(test.immediate));
+    const auto buffer =
+        fixture.Emit(ValueOpcode::GetBufferResource,
+                     {Value(0x3000u), Value(test.stride << 16u), Value(test.records), Value(0u)});
+    const auto read = fixture.EmitMemory(ValueOpcode::ReadConstBuffer,
+                                         {buffer, Value(test.offset)}, memory);
+    fixture.Emit(ValueOpcode::GetBufferResource,
+                 {read, Value(0u), Value(16u), Value(0u)});
+    fixture.Plan();
+
+    MemoryProbe memory_image;
+    SrtRuntime runtime{.read_memory = read_memory, .userdata = &memory_image};
+    std::vector<uint32_t> flat;
+    Check(SrtWalker(fixture.program, runtime).RefreshFlatBuffer(flat) == test.valid,
+          "constant-buffer walk misaligned or wrapped its offset components");
+    Check((!test.valid || flat == std::vector<uint32_t>{test.expected}) &&
+              memory_image.attempts == test.reads,
+          "constant-buffer walk read the wrong word or accessed an out-of-bounds address");
+  }
+}
+
+void TestReadLaneElimination() {
+  Fixture fixture;
+  const auto undef = fixture.Emit(ValueOpcode::UndefU32);
+  const auto write = fixture.Emit(ValueOpcode::WriteLane,
+                                  {undef, Value(0xdeadbeefu), Value(5u)});
+  const auto read = fixture.Emit(ValueOpcode::ReadLane, {write, Value(5u)});
+  const auto use = fixture.Emit(ValueOpcode::IAdd32, {read, Value(1u)});
+  const auto stats = EliminateReadLane(fixture.program, 64);
+  Check(stats.rewritten_reads == 1 &&
+            use.ResolveInstruction()->Arg(0).Resolve() == Value(0xdeadbeefu),
+        "fixed-lane typed read was not rewritten from its SSA write chain");
+
+  const auto selector = fixture.Emit(ValueOpcode::GetUserData,
+                                     {Value(static_cast<ScalarReg>(2))});
+  const auto dynamic = fixture.Emit(ValueOpcode::ReadLane, {write, selector});
+  fixture.Emit(ValueOpcode::IAdd32, {dynamic, Value(1u)});
+  Check(EliminateReadLane(fixture.program, 64).rewritten_reads == 0,
+        "dynamic-lane read was rewritten unsafely");
+}
+
+void TestOptimizationPipeline() {
+  Fixture fixture;
+  const auto sum = fixture.Emit(ValueOpcode::IAdd32, {Value(40u), Value(2u)});
+  const auto kept = fixture.Emit(ValueOpcode::BitwiseOr32, {sum, Value(0u)});
+  fixture.Emit(ValueOpcode::ReferenceU32, {kept});
+  fixture.Emit(ValueOpcode::IMul32, {Value(6u), Value(7u)});
+
+  ConstantPropagationPass(fixture.program.blocks);
+  RemoveIdentities(fixture.program.blocks);
+  EliminateDeadCode(fixture.program.blocks);
+
+  const auto &instructions = fixture.BlockAt().Instructions();
+  Check(instructions.size() == 1 &&
+            instructions.front().GetOpcode() == ValueOpcode::ReferenceU32 &&
+            instructions.front().Arg(0).Resolve() == Value(42u),
+        "typed constant propagation, identity folding, or dead-code "
+        "elimination regressed");
+}
+
+void TestControlFlowValueSurvivesReadLaneFolding() {
+  Fixture fixture(3);
+  auto *entry = fixture.program.blocks[0];
+  auto *taken = fixture.program.blocks[1];
+  auto *other = fixture.program.blocks[2];
+  entry->AddBranch(taken);
+  entry->AddBranch(other);
+
+  auto &entry_info = fixture.program.block_info[0];
+  entry_info.terminator.kind =
+      Libs::Graphics::ShaderRecompiler::CFG::TerminatorKind::ConditionalBranch;
+  entry_info.terminator.true_block = 1;
+  entry_info.terminator.false_block = 2;
+  fixture.program.block_info[1].terminator.kind =
+      Libs::Graphics::ShaderRecompiler::CFG::TerminatorKind::Return;
+  fixture.program.block_info[2].terminator.kind =
+      Libs::Graphics::ShaderRecompiler::CFG::TerminatorKind::Return;
+
+  const auto undef = fixture.Emit(ValueOpcode::UndefU32);
+  const auto write =
+      fixture.Emit(ValueOpcode::WriteLane, {undef, Value(42u), Value(5u)});
+  const auto read = fixture.Emit(ValueOpcode::ReadLane, {write, Value(5u)});
+  entry_info.condition =
+      fixture.Emit(ValueOpcode::IEqual32, {read, Value(42u)});
+  fixture.Emit(ValueOpcode::Reference, {entry_info.condition});
+
+  Check(EliminateReadLane(fixture.program, 64).rewritten_reads == 1,
+        "control-flow fixture did not eliminate its fixed-lane read");
+  ConstantPropagationPass(fixture.program.blocks);
+  ResolveControlFlowIdentities(fixture.program);
+  RemoveIdentities(fixture.program.blocks);
+  EliminateDeadCode(fixture.program.blocks);
+
+  Check(entry_info.condition == Value(true),
+        "folded branch condition did not survive identity removal");
+  ValidateProgram(fixture.program, true);
+}
+
+void TestUndefinedRuntimeValueFails() {
+  Fixture fixture;
+  const auto undef = fixture.Emit(ValueOpcode::UndefU32);
+  fixture.Plan();
+  fixture.program.descriptor_sources.push_back(
+      {.dwords = {undef}, .dword_count = 1});
+  DescriptorValue result;
+  Check(!SrtWalker(fixture.program, {}).EvaluateDescriptor(0, result),
+        "undefined typed descriptor source was accepted");
+}
+
+// KYTY_MOVREL_KNOWN_ZEROS. Astro Bot's foliage vertex shaders index a register array by a loop
+// counter, M0 = (i << 2) & 0xff: its values are unknown, but its two low bits are zero, so only
+// every fourth register of a V_MOVRELS select chain can be read.
+void TestKnownZeroBitsFoldIndexedReads() {
+  namespace Recompiler = Libs::Graphics::ShaderRecompiler;
+  const auto saved = Recompiler::GetCodegenOptions();
+  struct Restore {
+    Recompiler::CodegenOptions options;
+    ~Restore() { Recompiler::SetCodegenOptions(options); }
+  } restore{saved};
+
+  for (const bool enabled : {false, true}) {
+    auto options = saved;
+    options.movrel_range = true;
+    options.movrel_known_zeros = enabled;
+    Recompiler::SetCodegenOptions(options);
+
+    Fixture fixture;
+    const auto counter =
+        fixture.Emit(ValueOpcode::GetUserData, {Value(static_cast<ScalarReg>(2))});
+    const auto shifted = fixture.Emit(ValueOpcode::ShiftLeftLogical32, {counter, Value(2u)});
+    const auto m0 = fixture.Emit(ValueOpcode::BitwiseAnd32, {shifted, Value(0xffu)});
+    Value selected = Value(100u);
+    for (uint32_t index = 1; index < 64u; index++) {
+      const auto match = fixture.Emit(ValueOpcode::IEqual32, {m0, Value(index)});
+      selected = fixture.Emit(ValueOpcode::SelectU32, {match, Value(100u + index), selected});
+    }
+    const auto chain = fixture.Emit(ValueOpcode::ReferenceU32, {selected});
+    const auto compare = [&](Value lhs, ValueOpcode opcode, uint32_t constant) {
+      return fixture.Emit(
+          ValueOpcode::ReferenceU32,
+          {fixture.Emit(ValueOpcode::SelectU32,
+                        {fixture.Emit(opcode, {lhs, Value(constant)}), Value(1u), Value(2u)})});
+    };
+    // A sum keeps the fewer low zero bits: 4 * i + 2 can be 6 but never 7.
+    const auto plus_two = fixture.Emit(ValueOpcode::IAdd32, {shifted, Value(2u)});
+    const auto six = compare(plus_two, ValueOpcode::IEqual32, 6u);
+    const auto seven = compare(plus_two, ValueOpcode::IEqual32, 7u);
+    const auto not_seven = compare(plus_two, ValueOpcode::INotEqual32, 7u);
+    // A waterfall loop reads one lane's index; that lane's value keeps the bits.
+    const auto lane_index = fixture.Emit(
+        ValueOpcode::BitwiseAnd32,
+        {fixture.Emit(ValueOpcode::ReadFirstLane, {shifted, Value(true)}), Value(0xffu)});
+    const auto lane_eight = compare(lane_index, ValueOpcode::IEqual32, 8u);
+    const auto lane_five = compare(lane_index, ValueOpcode::IEqual32, 5u);
+    // A value whose low bits are unknown folds nothing.
+    const auto unknown = compare(counter, ValueOpcode::IEqual32, 5u);
+
+    ConstantPropagationPass(fixture.program.blocks);
+    RemoveIdentities(fixture.program.blocks);
+    EliminateDeadCode(fixture.program.blocks);
+
+    std::vector<uint32_t> indices;
+    auto value = chain.ResolveInstruction()->Arg(0).Resolve();
+    while (const auto *select = value.TryInstruction()) {
+      Check(select->GetOpcode() == ValueOpcode::SelectU32, "chain lost its selects");
+      const auto *match = select->Arg(0).ResolveInstruction();
+      Check(match != nullptr && match->GetOpcode() == ValueOpcode::IEqual32 &&
+                match->Arg(0).Resolve() == m0.Resolve(),
+            "chain select does not test M0");
+      const auto index = match->Arg(1).Resolve().U32();
+      Check(select->Arg(1).Resolve() == Value(100u + index),
+            "chain select picks the wrong register");
+      indices.push_back(index);
+      value = select->Arg(2).Resolve();
+    }
+    std::ranges::sort(indices);
+    std::vector<uint32_t> expected;
+    for (uint32_t index = enabled ? 4u : 1u; index < 64u; index += enabled ? 4u : 1u) {
+      expected.push_back(index);
+    }
+    Check(value == Value(100u) && indices == expected,
+          enabled ? "compares with bits M0 never sets were kept, or reachable ones were dropped"
+                  : "known zero bits folded compares while KYTY_MOVREL_KNOWN_ZEROS was off");
+    const auto folded = [](Value reference, uint32_t result) {
+      return reference.ResolveInstruction()->Arg(0).Resolve() == Value(result);
+    };
+    const auto kept = [](Value reference) {
+      return reference.ResolveInstruction()->Arg(0).Resolve().TryInstruction() != nullptr;
+    };
+    Check(kept(six), "a compare the known bits allow was folded");
+    Check(kept(unknown), "a compare on a value with unknown low bits was folded");
+    Check(kept(lane_eight), "a lane compare the known bits allow was folded");
+    if (enabled) {
+      Check(folded(seven, 2u) && folded(not_seven, 1u),
+            "a compare the known bits rule out was not folded");
+      Check(folded(lane_five, 2u), "known bits did not pass through ReadFirstLane");
+    } else {
+      Check(kept(seven) && kept(not_seven) && kept(lane_five),
+            "known zero bits folded compares while KYTY_MOVREL_KNOWN_ZEROS was off");
+    }
+  }
+}
+
+void TestKnownZeroBitsThroughLoopPhis() {
+  // bruno 1d9b1ff09. Loop header phis: an index the loop never changes (a waterfall loop's), a
+  // counter stepping by 4, and one stepping by 1. The first two keep their two low zero bits.
+  namespace Recompiler = Libs::Graphics::ShaderRecompiler;
+  const auto saved = Recompiler::GetCodegenOptions();
+  struct Restore {
+    Recompiler::CodegenOptions options;
+    ~Restore() { Recompiler::SetCodegenOptions(options); }
+  } restore{saved};
+  auto options = saved;
+  options.movrel_range = true;
+  options.movrel_known_zeros = true;
+  Recompiler::SetCodegenOptions(options);
+
+  Fixture fixture(2);
+  auto &entry = fixture.BlockAt(0);
+  auto &loop = fixture.BlockAt(1);
+  entry.AddBranch(&loop);
+  loop.AddBranch(&loop);
+  const auto user = fixture.Emit(ValueOpcode::GetUserData, {Value(static_cast<ScalarReg>(2))});
+  const auto shifted = fixture.Emit(ValueOpcode::ShiftLeftLogical32, {user, Value(2u)});
+  auto &invariant = loop.AppendNewInst(ValueOpcode::Phi, {}, uint64_t(Type::U32));
+  auto &counter = loop.AppendNewInst(ValueOpcode::Phi, {}, uint64_t(Type::U32));
+  auto &odd = loop.AppendNewInst(ValueOpcode::Phi, {}, uint64_t(Type::U32));
+  auto &loop_exec = loop.AppendNewInst(ValueOpcode::Phi, {}, uint64_t(Type::U1));
+  const auto next = fixture.Emit(ValueOpcode::IAdd32, {Value(&counter), Value(4u)}, 0, 1);
+  const auto next_odd = fixture.Emit(ValueOpcode::IAdd32, {Value(&odd), Value(1u)}, 0, 1);
+  invariant.AddPhiOperand(&entry, shifted);
+  invariant.AddPhiOperand(&loop, Value(&invariant));
+  counter.AddPhiOperand(&entry, Value(0u));
+  counter.AddPhiOperand(&loop, next);
+  odd.AddPhiOperand(&entry, shifted);
+  odd.AddPhiOperand(&loop, next_odd);
+  const auto compare = [&](Value index, uint32_t constant) {
+    return fixture.Emit(
+        ValueOpcode::ReferenceU32,
+        {fixture.Emit(ValueOpcode::SelectU32,
+                      {fixture.Emit(ValueOpcode::IEqual32, {index, Value(constant)}, 0, 1),
+                       Value(1u), Value(2u)},
+                      0, 1)},
+        0, 1);
+  };
+  const auto lane = fixture.Emit(
+      ValueOpcode::BitwiseAnd32,
+      {fixture.Emit(ValueOpcode::ReadFirstLane, {Value(&invariant), Value(true)}, 0, 1),
+       Value(0xffu)},
+      0, 1);
+  const auto lane_eight = compare(lane, 8u);
+  const auto lane_five = compare(lane, 5u);
+  const auto counter_eight = compare(Value(&counter), 8u);
+  const auto counter_six = compare(Value(&counter), 6u);
+  const auto odd_five = compare(Value(&odd), 5u);
+  // A waterfall loop: the index register was written under the EXEC before the loop, and the
+  // loop's EXEC only loses lanes; the lane it reads holds the written value.
+  const auto entry_exec = fixture.Emit(ValueOpcode::IEqual32, {user, Value(3u)});
+  const auto other = fixture.Emit(ValueOpcode::GetUserData, {Value(static_cast<ScalarReg>(3))});
+  const auto masked = fixture.Emit(
+      ValueOpcode::SelectU32,
+      {entry_exec, fixture.Emit(ValueOpcode::BitwiseAnd32, {other, Value(0xfffffffcu)}), user});
+  const auto done = fixture.Emit(
+      ValueOpcode::LogicalNot, {fixture.Emit(ValueOpcode::IEqual32, {other, Value(9u)}, 0, 1)},
+      0, 1);
+  loop_exec.AddPhiOperand(&entry, entry_exec);
+  loop_exec.AddPhiOperand(
+      &loop, fixture.Emit(ValueOpcode::LogicalAnd, {Value(&loop_exec), done}, 0, 1));
+  const auto waterfall = fixture.Emit(
+      ValueOpcode::BitwiseAnd32,
+      {fixture.Emit(ValueOpcode::ReadFirstLane, {masked, Value(&loop_exec)}, 0, 1), Value(0xffu)},
+      0, 1);
+  const auto waterfall_eight = compare(waterfall, 8u);
+  const auto waterfall_five = compare(waterfall, 5u);
+  // Without the mask, the inactive lanes' value (any) could be read.
+  const auto unmasked = fixture.Emit(
+      ValueOpcode::BitwiseAnd32,
+      {fixture.Emit(ValueOpcode::ReadFirstLane,
+                    {masked, fixture.Emit(ValueOpcode::IEqual32, {other, Value(7u)}, 0, 1)}, 0,
+                    1),
+       Value(0xffu)},
+      0, 1);
+  const auto unmasked_five = compare(unmasked, 5u);
+
+  ConstantPropagationPass(fixture.program.blocks);
+
+  const auto folded = [](Value reference) {
+    return reference.ResolveInstruction()->Arg(0).Resolve() == Value(2u);
+  };
+  Check(!folded(lane_eight) && folded(lane_five),
+        "known bits did not pass through a loop-invariant phi");
+  Check(!folded(counter_eight) && folded(counter_six),
+        "known bits did not hold across a counter stepping by 4");
+  Check(!folded(odd_five), "a compare a loop can satisfy was folded");
+  Check(!folded(waterfall_eight) && folded(waterfall_five),
+        "a waterfall loop's index lost the bits of its masked write");
+  Check(!folded(unmasked_five), "a lane outside the write mask was taken to hold the write");
+}
+
+} // namespace
+
+namespace Common {
+
+void DbgExitIfHandler(const char *, const char *, int) { std::abort(); }
+
+void DbgExitHandler(const char *, int, std::string_view text) {
+  throw std::runtime_error(std::string(text));
+}
+
+} // namespace Common
+
+int main() {
+  try {
+    TestImmediateFlatteningAndGvn();
+    TestRawScalarComponentAlignment();
+    TestScalarMemoryDomainMismatchFails();
+    TestDynamicReadRemainsTyped();
+    TestNestedSrtWalk();
+    TestShaderBaseAndUserData();
+    TestCarryAndBitFields();
+    TestInvariantAndDivergentPhi();
+    TestControlDependentStandaloneLoadStaysTyped();
+    TestRuntime64BitDescriptorOps();
+    TestUniformFirstLaneSamplerLod();
+    TestFloatComparisonDescriptorInputs();
+    TestSignedConversionDescriptorInputs();
+    TestSharedIntegerRuntimeDependencies();
+    TestConstantBufferBounds();
+    TestReadLaneElimination();
+    TestOptimizationPipeline();
+    TestControlFlowValueSurvivesReadLaneFolding();
+    TestUndefinedRuntimeValueFails();
+    TestKnownZeroBitsFoldIndexedReads();
+    TestKnownZeroBitsThroughLoopPhis();
+    std::cout << "TypedValuePlanningTests: all cases passed\n";
+    return 0;
+  } catch (const std::exception &e) {
+    std::cerr << "TypedValuePlanningTests: failed: " << e.what() << '\n';
+    return 1;
+  }
+}
+
+// Keep this focused standalone target self-contained by amalgamating its small
+// typed-IR implementation set.
+#include "../src/graphics/shader/recompiler/ir/Block.cpp"
+#include "../src/graphics/shader/recompiler/ir/Program.cpp"
+#include "../src/graphics/shader/recompiler/ir/Type.cpp"
+#include "../src/graphics/shader/recompiler/ir/Value.cpp"
+#include "../src/graphics/shader/recompiler/ir/opcodes/ValueOpcodes.cpp"
+#include "../src/graphics/shader/recompiler/ir/passes/ConstantPropagation.cpp"
+#include "../src/graphics/shader/recompiler/ir/passes/DeadCodeElimination.cpp"
