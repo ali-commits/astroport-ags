@@ -1,3 +1,5 @@
+use astroport_run::build::{build, status, BuildArgs};
+use astroport_run::layout::default_font_roots;
 use astroport_run::{progress::Progress, JobError};
 use std::env;
 use std::path::PathBuf;
@@ -58,30 +60,41 @@ fn default_install() -> Result<PathBuf, JobError> {
         })
 }
 
-fn run(args: Args) -> Result<(), JobError> {
-    let _install = match args.install {
-        Some(install) => install,
-        None => default_install()?,
-    };
-    let (_dump, _data, _version) = (args.dump, args.data, args.version);
-    Err(JobError {
-        category: "internal",
-        message: "not built yet".into(),
-    })
-}
-
 fn main() -> ExitCode {
-    let mut progress = Progress::from_env();
     let Some(args) = parse_args(env::args().skip(1)) else {
-        progress.error(&JobError {
+        Progress::from_env().error(&JobError {
             category: "internal",
             message: USAGE.into(),
         });
         return ExitCode::from(2);
     };
 
-    match run(args) {
-        Ok(()) => {
+    if let Some(version) = args.version {
+        let install = args.install.map_or_else(default_install, Ok);
+        let state = install.map_or("missing", |install| {
+            status(&args.dump, &args.data, &version, &install)
+        });
+        println!(r#"{{"state":"{state}"}}"#);
+        return ExitCode::SUCCESS;
+    }
+
+    let mut progress = Progress::from_env();
+    let result = args
+        .install
+        .map_or_else(default_install, Ok)
+        .and_then(|install| {
+            build(
+                &BuildArgs {
+                    dump: args.dump,
+                    data: args.data,
+                    install,
+                },
+                &default_font_roots(),
+                &mut progress,
+            )
+        });
+    match result {
+        Ok(_) => {
             progress.completed();
             ExitCode::SUCCESS
         }

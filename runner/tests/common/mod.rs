@@ -175,3 +175,46 @@ pub fn fake_install(root: &Path) -> PathBuf {
     versions_json(&root.join("patches/versions.json"), None);
     root.to_path_buf()
 }
+
+#[allow(dead_code)]
+pub fn fake_relinker(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::write(
+        path,
+        r#"#!/bin/sh
+exec timeout --foreground -k 10 30 /bin/sh -s -- "$0" "$@" <<'SCRIPT'
+set -eu
+script=$1
+shift
+[ ! -f "$(dirname "$script")/fail" ] || exit 3
+to_intel=
+if [ "$1" = --to-intel ]; then
+    to_intel=$1
+    shift
+fi
+[ "$#" -eq 3 ] && [ "$1" = --registry ] || exit 2
+input=$2
+output=$3
+out=$(dirname "$output")
+{
+    if [ -n "$to_intel" ]; then printf "%s\n" "$to_intel"; fi
+    printf "%s\n" "$@"
+} > "$out/args.txt"
+[ -f "$input" ]
+mkdir -p "$out/app0/sce_module"
+printf 'fake executable\n' > "$output"
+printf '{}\n' > "$output.registry.json"
+printf '{}\n' > "$output.needed.json"
+for module in "$(dirname "$input")"/sce_module/*.prx; do
+    [ -f "$module" ] || continue
+    name=${module##*/}
+    cp "$module" "$out/app0/sce_module/$name.guest.prx"
+    printf '{}\n' > "$output.$name.guest.prx.registry.json"
+done
+SCRIPT
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
