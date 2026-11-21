@@ -29,7 +29,7 @@ scripts/build-release.sh --check
 scripts/build-release.sh
 ```
 
-The build needs a reachable Podman or Docker engine. Set `ASTROPORT_CONTAINER` to `podman` or `docker` to choose one. By default the script uses Podman if it is on `PATH` and Docker otherwise. The archive and checksum are in `build/release/out/v<version>/`.
+The build needs a reachable Podman or Docker engine. Set `ASTROPORT_CONTAINER` to `podman` or `docker` to choose one. `ASTROPORT_CONTAINER_ARGS` adds options to the build container's `run`, for example `--memory 9g --cpuset-cpus 0-5` to cap it on a shared machine. By default the script uses Podman if it is on `PATH` and Docker otherwise. The archive and checksum are in `build/release/out/v<version>/`.
 
 Only the owner publishes the tag and release. Use `--prerelease` for a testing version.
 

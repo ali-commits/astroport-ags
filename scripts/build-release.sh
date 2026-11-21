@@ -72,7 +72,8 @@ mkdir -p -- "$src/build/release/dlss-sdk" "$out" 2>/dev/null || fail 'could not 
 "$engine" build -t astroport-release -f scripts/release/Containerfile scripts/release ||
   fail "container image build failed with $engine"
 epoch=$(git log -1 --format=%ct 2>/dev/null) || fail 'could not read the commit timestamp'
-"$engine" run --rm "${user_args[@]}" \
+read -r -a extra_args <<<"${ASTROPORT_CONTAINER_ARGS:-}"  # e.g. "--memory 9g --cpuset-cpus 0-5"
+"$engine" run --rm "${user_args[@]}" "${extra_args[@]}" \
   -v "$src:/work/src" \
   -v "$release/dlss-sdk:/work/src/build/release/dlss-sdk:ro" \
   -v "$out:/work/out" \
