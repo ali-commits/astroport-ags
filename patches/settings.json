@@ -1,0 +1,89 @@
+{
+  "format": 1,
+  "fixed_env": {
+    "GLIBC_TUNABLES": "glibc.rtld.optional_static_tls=0x200000",
+    "APS5_GPU_ENGINE": "kyty",
+    "KYTY_GPU_LIBRARY": "{run}/libs/libkyty_gpu.so",
+    "KYTY_GPU_HOST_MODULE": "{run}/libs/libAstroHybridHost.prx",
+    "KYTY_HANG_WATCHDOG": "0",
+    "ASTROHYBRID_CACHE_TITLE_ID": "PPSA21567",
+    "APS5_PAD_TRIGGER_STATE": "1", "ASTROHYBRID_PAD_MOTION": "1", "KYTY_CP_PRIORITY": "2",
+    "KYTY_DRAW_PREP_PRIORITY": "2", "KYTY_DRAW_PREP_SPIN_US": "10", "KYTY_DRAW_PREP_COLD_SPIN_US": "5",
+    "KYTY_AGC_DONE_MODE": "bounded",
+    "ASTROHYBRID_PAD_PREFER": "auto", "ASTROHYBRID_RUMBLE_SCALE": "100", "ASTROHYBRID_RUMBLE_SWITCH_FLOOR": "96",
+    "ASTROHYBRID_WINDOW_TITLE": "Astro Bot",
+    "ASTROHYBRID_COMMIT_EPOCH_FASTPATH": "0", "KYTY_BUFFER_RANGE_FIXES": "1",
+    "APS5_SAVEDATA_TRANSFER_FALLBACK": "1",
+    "KYTY_WAYLAND_NATIVE": "1",
+    "LD_AUDIT": "{install}/lib/libastro_patcher.so",
+    "ASTRO_PATCH_PROCESS": "AstroBot"
+  },
+  "presets": ["{install}/presets/u59-preset.json", "{install}/presets/u59-preset.PPSA21567.json"],
+  "patches": {
+    "lighting.deferred": "non-tiled deferred-lighting",
+    "lighting.gi": "disable gi probes",
+    "timing.decouple": "decouple gameplay timers",
+    "timing.no_sleep": "disable game cpu frame-limiter sleep",
+    "pad.r1x": "r1+x toggles",
+    "cap.30": "precise frame cap 30 fps", "cap.60": "precise frame cap 60 fps", "cap.90": "precise frame cap 90 fps",
+    "cap.120": "precise frame cap 120 fps", "cap.144": "precise frame cap 144 fps",
+    "render.1080": "fixed render resolution 1920x1080", "render.1368": "fixed render resolution 2432x1368",
+    "render.1872": "fixed render resolution 3328x1872", "render.2160": "fixed render resolution 3840x2160",
+    "physics.rope": "[physics] rope bridges", "physics.cloth": "[physics] cloth and inflatables",
+    "physics.jack": "[physics] jack-in-the-box",
+    "fix.havok_contact": "havok contact query", "fix.havok_tree": "havok tree queries",
+    "fix.bot_rescue": "[fix] bot rescue",
+    "dt.20": "delta time step capped at 1/20 s", "dt.30": "delta time step capped at 1/30 s",
+    "mip.1080": "1080p mip bias", "mip.low": "low detail mip bias",
+    "tex.2k": "4k textures load at 2k",
+    "lod.half": "lod x0.5", "lod.quarter": "lod x0.25",
+    "video.speed": "videos play at real speed",
+    "intro.skip": "skip the playstation studios intro",
+    "ultrawide": "ultrawide:"
+  },
+  "settings": {
+    "display.fps": {"values": {
+      "30": {"on": ["cap.30", "timing.decouple", "timing.no_sleep", "dt.20", "physics.rope", "physics.cloth", "physics.jack"],
+             "off": ["cap.60", "cap.90", "cap.120", "cap.144", "dt.30"],
+             "env": {"ASTROHYBRID_FPS_LIMIT": "30", "ASTROHYBRID_LOW_LATENCY_INTERVAL_US": "33333"}},
+      "60": {"on": ["cap.60", "timing.decouple", "timing.no_sleep", "dt.20"],
+             "off": ["cap.30", "cap.90", "cap.120", "cap.144", "dt.30", "physics.rope", "physics.cloth", "physics.jack"],
+             "env": {"ASTROHYBRID_FPS_LIMIT": "60", "ASTROHYBRID_LOW_LATENCY_INTERVAL_US": "16666"}}}},
+    "graphics.render": {"values": {
+      "1080p": {"on": ["render.1080"], "off": ["render.1368", "render.1872", "render.2160"]},
+      "1368p": {"on": ["render.1368"], "off": ["render.1080", "render.1872", "render.2160"]},
+      "1872p": {"on": ["render.1872"], "off": ["render.1080", "render.1368", "render.2160"]},
+      "2160p": {"on": ["render.2160"], "off": ["render.1080", "render.1368", "render.1872"]}}},
+    "graphics.lighting": {"values": {
+      "fast": {"on": ["lighting.deferred", "lighting.gi"]},
+      "original": {"off": ["lighting.deferred", "lighting.gi"]}}},
+    "graphics.detail": {"values": {
+      "high": {"off": ["lod.half", "lod.quarter"]},
+      "medium": {"on": ["lod.half"], "off": ["lod.quarter"]},
+      "low": {"on": ["lod.quarter"], "off": ["lod.half"]}}},
+    "graphics.textures": {"values": {
+      "sharp": {"off": ["mip.1080", "mip.low"]},
+      "balanced": {"on": ["mip.1080"], "off": ["mip.low"]},
+      "soft": {"on": ["mip.low"], "off": ["mip.1080"]}}},
+    "graphics.ultrawide": {"values": {
+      "true": {"on": ["ultrawide"], "env": {"KYTY_GPU_WIDTH": "3440", "KYTY_GPU_HEIGHT": "1440"}},
+      "false": {"off": ["ultrawide"]}}},
+    "game.skip_intro": {"values": {"true": {"on": ["intro.skip"]}, "false": {"off": ["intro.skip"]}}},
+    "controller.rumble": {"values": {
+      "true": {"env": {"ASTROHYBRID_DUALSENSE_RUMBLE": "1"}}, "false": {"env": {"ASTROHYBRID_DUALSENSE_RUMBLE": "0"}}}},
+    "perf.low_latency": {"values": {
+      "on": {"env": {"ASTROHYBRID_LOW_LATENCY": "1"}}, "off": {"env": {"ASTROHYBRID_LOW_LATENCY": "0"}}}},
+    "fullscreen": {"values": {
+      "true": {"env": {"KYTY_GPU_FULLSCREEN": "1"}}, "false": {"env": {"KYTY_GPU_FULLSCREEN": "0"}}}},
+    "graphics.dlss": {"values": {
+      "true": {"env": {"ASTROHYBRID_DLSS": "1"}}, "false": {"env": {"ASTROHYBRID_DLSS": "0"}}}}
+  },
+  "advanced": [
+    {"id": "pad.r1x", "label": "R1 + X switches the game timing", "default": true},
+    {"id": "fix.havok_contact", "label": "Physics crash fix: contact query", "default": true},
+    {"id": "fix.havok_tree", "label": "Physics crash fix: tree query", "default": true},
+    {"id": "fix.bot_rescue", "label": "Bot rescue timing fix", "default": true},
+    {"id": "tex.2k", "label": "Load 4K textures at 2K", "default": false},
+    {"id": "video.speed", "label": "Videos at real speed", "default": true}
+  ]
+}

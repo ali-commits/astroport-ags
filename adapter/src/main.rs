@@ -1,6 +1,8 @@
 mod dump;
 mod page;
 mod rpc;
+#[allow(dead_code)] // Page and launch consume the settings map in later tasks.
+mod settings;
 mod values;
 
 use dump::{Detected, HashCache, Versions};
@@ -11,10 +13,11 @@ use std::{env, fs, io, path::PathBuf, process::ExitCode};
 use values::Store;
 
 struct State {
-    #[allow(dead_code)] // Used by the settings and launch tasks.
+    #[allow(dead_code)] // Used by the launch task.
     install: PathBuf,
     data: PathBuf,
     versions: Versions,
+    map: Result<settings::SettingsMap, String>,
     store: Store,
     cache: HashCache,
     events: Vec<Value>,
@@ -69,6 +72,12 @@ impl State {
 }
 
 fn dispatch(state: &mut State, method: &str, params: &Value) -> Result<Value, RpcError> {
+    if method != "hello" && state.map.is_err() {
+        return Err(RpcError::new(
+            "failed",
+            "The AstroPort installation is damaged. Repair it.",
+        ));
+    }
     match method {
         "hello" => Ok(json!({
             "protocol": 2,
@@ -149,11 +158,13 @@ fn run() -> io::Result<()> {
     let data = env::current_dir()?;
     let versions =
         dump::load_versions(&install.join("patches/versions.json")).map_err(io::Error::other)?;
+    let map = settings::load(&install.join("patches/settings.json"));
     let store = Store::load(&data);
     let mut state = State {
         install,
         data,
         versions,
+        map,
         store,
         cache: HashCache::default(),
         events: Vec::new(),
