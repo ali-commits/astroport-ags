@@ -1,15 +1,74 @@
 mod dump;
+mod page;
 mod rpc;
+mod values;
 
+use dump::{Detected, HashCache, Versions};
+use page::GAME_ID;
 use rpc::{read_frame, write_frame, RpcError};
 use serde_json::{json, Value};
-use std::{io, process::ExitCode};
+use std::{env, fs, io, path::PathBuf, process::ExitCode};
+use values::Store;
 
 struct State {
+    #[allow(dead_code)] // Used by the settings and launch tasks.
+    install: PathBuf,
+    data: PathBuf,
+    versions: Versions,
+    store: Store,
+    cache: HashCache,
     events: Vec<Value>,
 }
 
-fn dispatch(_state: &mut State, method: &str, _params: &Value) -> Result<Value, RpcError> {
+impl State {
+    fn detect(&mut self) -> Detected {
+        dump::detect(
+            self.store.dump_folder().as_deref(),
+            &self.versions,
+            &mut self.cache,
+        )
+    }
+
+    fn library_list(&mut self) -> Value {
+        let (directory, version, installed) = match self.detect() {
+            Detected::Supported {
+                dump,
+                entry,
+                eboot_sha256,
+            } => {
+                let installed = dump::built(
+                    &self.data,
+                    &entry.version,
+                    &eboot_sha256,
+                    env!("CARGO_PKG_VERSION"),
+                );
+                (dump, entry.version, installed)
+            }
+            Detected::Unsupported { dump, version, .. } => (dump, version, false),
+            Detected::NotSet | Detected::NotFound => return json!({"games": []}),
+        };
+
+        let mut game = json!({
+            "id": GAME_ID,
+            "title": "Astro Bot",
+            "platform": "PS5",
+            "identity": {"scheme": "ps5-title", "value": GAME_ID},
+            "version": version,
+            "installed": installed
+        });
+        let art = directory.join("sce_sys/icon0.png");
+        if let Some(path) = art.to_str().filter(|_| {
+            fs::symlink_metadata(&art)
+                .is_ok_and(|meta| meta.is_file() && meta.len() <= 2 * 1024 * 1024)
+        }) {
+            game["cover"] = json!(path);
+            game["icon"] = json!(path);
+        }
+        json!({"games": [game]})
+    }
+}
+
+fn dispatch(state: &mut State, method: &str, params: &Value) -> Result<Value, RpcError> {
     match method {
         "hello" => Ok(json!({
             "protocol": 2,
@@ -22,6 +81,55 @@ fn dispatch(_state: &mut State, method: &str, _params: &Value) -> Result<Value, 
             }],
             "metrics": []
         })),
+        "library.list" => Ok(state.library_list()),
+        "values.get" => match params["scope"].as_str() {
+            Some("machine") => Ok(json!({"values": state.store.machine()})),
+            Some("game") => Ok(json!({"values": {}})),
+            _ => Err(RpcError::new(
+                "invalid-params",
+                "Choose a valid value scope.",
+            )),
+        },
+        "values.set" => {
+            match params["scope"].as_str() {
+                Some("machine") => {}
+                Some("game") => {
+                    return Err(RpcError::new(
+                        "invalid-params",
+                        "AstroPort has no per-game values.",
+                    ));
+                }
+                _ => {
+                    return Err(RpcError::new(
+                        "invalid-params",
+                        "Choose a valid value scope.",
+                    ))
+                }
+            }
+            let values = serde_json::from_value(params["values"].clone()).map_err(|_| {
+                RpcError::new("invalid-params", "Provide machine values as an object.")
+            })?;
+            state.store.set_machine(values).map_err(|message| {
+                let code = if message == values::SAVE_ERROR {
+                    "failed"
+                } else {
+                    "invalid-params"
+                };
+                RpcError::new(code, message)
+            })?;
+            state
+                .events
+                .push(json!({"method": "library.changed", "params": {}}));
+            state
+                .events
+                .push(json!({"method": "page.changed", "params": {}}));
+            Ok(json!({"values": state.store.machine()}))
+        }
+        "page.describe" if params["game"].is_null() => {
+            let detected = state.detect();
+            Ok(page::extension_page(&state.store, &detected))
+        }
+        "page.describe" => Err(RpcError::new("not-found", "AstroPort has no such game.")),
         _ => Err(RpcError::new(
             "unknown-method",
             format!("AstroPort does not know {method}."),
@@ -32,7 +140,24 @@ fn dispatch(_state: &mut State, method: &str, _params: &Value) -> Result<Value, 
 fn run() -> io::Result<()> {
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
-    let mut state = State { events: Vec::new() };
+    let executable = env::current_exe()?;
+    let install = executable
+        .parent()
+        .and_then(|bin| bin.parent())
+        .ok_or_else(|| io::Error::other("Cannot find the AstroPort install folder."))?
+        .to_owned();
+    let data = env::current_dir()?;
+    let versions =
+        dump::load_versions(&install.join("patches/versions.json")).map_err(io::Error::other)?;
+    let store = Store::load(&data);
+    let mut state = State {
+        install,
+        data,
+        versions,
+        store,
+        cache: HashCache::default(),
+        events: Vec::new(),
+    };
 
     while let Some(request) = read_frame(&mut stdin)? {
         let id = &request["id"];

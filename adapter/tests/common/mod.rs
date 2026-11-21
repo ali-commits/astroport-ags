@@ -21,7 +21,6 @@ static COPY_OR_SPAWN: Mutex<()> = Mutex::new(());
 pub struct Fixture {
     pub install: PathBuf,
     pub data: PathBuf,
-    #[allow(dead_code)]
     pub dump: PathBuf,
     _dirs: Vec<tempfile::TempDir>,
 }
@@ -40,6 +39,32 @@ impl Fixture {
             )
             .unwrap();
         }
+        let patches = install.path().join("patches");
+        fs::create_dir(&patches).unwrap();
+        for source in fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../patches")).unwrap() {
+            let source = source.unwrap();
+            fs::copy(source.path(), patches.join(source.file_name())).unwrap();
+        }
+        let versions_file = patches.join("versions.json");
+        let mut versions: Value =
+            serde_json::from_slice(&fs::read(&versions_file).unwrap()).unwrap();
+        versions["versions"][1]["eboot_sha256"] =
+            json!("f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d");
+        fs::write(versions_file, serde_json::to_vec(&versions).unwrap()).unwrap();
+
+        let sce_sys = dump.path().join("sce_sys");
+        fs::create_dir(&sce_sys).unwrap();
+        fs::write(dump.path().join("eboot.bin"), b"fixture").unwrap();
+        fs::write(
+            sce_sys.join("param.json"),
+            br#"{"titleId":"PPSA21567","contentVersion":"01.019.000"}"#,
+        )
+        .unwrap();
+        fs::write(
+            sce_sys.join("icon0.png"),
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc```\x00\x00\x00\x04\x00\x01\xf6\x178U\x00\x00\x00\x00IEND\xaeB`\x82",
+        )
+        .unwrap();
         Fixture {
             install: install.path().to_path_buf(),
             data: data.path().to_path_buf(),
@@ -107,7 +132,6 @@ impl Adapter {
         reply
     }
 
-    #[allow(dead_code)]
     pub fn next_frame(&mut self) -> Value {
         self.exchange(None)
     }
