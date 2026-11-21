@@ -283,6 +283,8 @@ endif()
 add_subdirectory("${KYTY_SOURCE_DIR}/common" "${CMAKE_CURRENT_BINARY_DIR}/common")
 
 file(GLOB kyty_emulator_src CONFIGURE_DEPENDS
+	"${KYTY_SOURCE_DIR}/streaming/*.cpp"
+	"${KYTY_SOURCE_DIR}/streaming/*.h"
 	"${KYTY_SOURCE_DIR}/libs/*.cpp"
 	"${KYTY_SOURCE_DIR}/libs/*.h"
 	"${KYTY_SOURCE_DIR}/graphics/*.cpp"
@@ -795,6 +797,13 @@ target_link_libraries(hang_watchdog_tests common)
 target_include_directories(hang_watchdog_tests PRIVATE ${inc_headers})
 if(LINUX)
 	target_link_libraries(hang_watchdog_tests Threads::Threads)
+
+	add_executable(session_socket_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SessionSocketTests.cpp"
+		"${KYTY_SOURCE_DIR}/streaming/protocol.cpp" "${KYTY_SOURCE_DIR}/streaming/transport.cpp")
+	target_include_directories(session_socket_tests PRIVATE "${KYTY_SOURCE_DIR}")
+	target_link_libraries(session_socket_tests PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
+	add_test(NAME session_socket COMMAND session_socket_tests)
+	set_tests_properties(session_socket PROPERTIES TIMEOUT 30)
 endif()
 
 # Compile-wait console lines (common/compileWatch.h): blocked waits, the periodic summary, frame stalls.

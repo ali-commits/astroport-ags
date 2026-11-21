@@ -24,6 +24,7 @@
 #include "libs/controller.h"
 #include "libs/wheelHost.h"
 #include "loader/systemContent.h"
+#include "streaming/transport.h"
 
 #include <SDL3/SDL.h>
 #include <cstdlib>
@@ -46,6 +47,20 @@
 // IWYU pragma: no_include <intrin.h>
 
 #define KYTY_DBG_INPUT
+
+namespace Streaming {
+OutputState ReadLiveOutput() {
+	// Until Task 4 owns live display state, only the launch configuration is available.
+	uint32_t fps = 60;
+	if (const char* value = std::getenv("ASTROHYBRID_FPS_LIMIT")) {
+		char* end = nullptr;
+		const auto parsed = std::strtoul(value, &end, 10);
+		if (end != value && *end == '\0' && parsed >= 10 && parsed <= 240)
+			fps = static_cast<uint32_t>(parsed);
+	}
+	return {Config::GetScreenWidth(), Config::GetScreenHeight(), fps};
+}
+} // namespace Streaming
 
 namespace Libs::Graphics {
 
@@ -140,10 +155,16 @@ struct EventController {
 namespace {
 
 std::unique_ptr<WindowContext> g_window;
+std::mutex                     g_window_lifetime_mutex;
 Common::Mutex                  g_luminance_mutex;
 DisplayLuminance               g_luminance;
 
 } // namespace
+
+uint64_t PresentedFrames() {
+	std::lock_guard lock(g_window_lifetime_mutex);
+	return g_window ? g_window->loop.presented_frames.load(std::memory_order_relaxed) : 0;
+}
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 // A factory caches output descriptions, so each query creates a new one.
@@ -939,7 +960,10 @@ Presenter& WindowInit(uint32_t width, uint32_t height) {
 	WindowCreate(*window);
 	window->CreateVulkan();
 	auto& presenter = *window->presenter;
-	g_window        = std::move(window);
+	{
+		std::lock_guard lock(g_window_lifetime_mutex);
+		g_window = std::move(window);
+	}
 	return presenter;
 }
 
@@ -955,7 +979,13 @@ void WindowShutdown() {
 	if (g_window != nullptr) {
 		HostInputShutdown();
 		Controller::EmergencyShutdown();
-		g_window.reset();
+		// The presenter can join a worker that is sampling PresentedFrames().
+		// Destroy the window after releasing the lifetime lock.
+		std::unique_ptr<WindowContext> window;
+		{
+			std::lock_guard lock(g_window_lifetime_mutex);
+			window = std::move(g_window);
+		}
 	}
 }
 
