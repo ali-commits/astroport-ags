@@ -1,7 +1,11 @@
 //! Applies a KytyPS5 cheat file (`_Patches/<TITLE>.json`) to an AnyPS5-relinked game at startup.
 //!
-//! Loaded with `LD_PRELOAD`. Its constructor runs after the dynamic loader has mapped and relocated the
-//! game, before the game's own code starts. Each `memory` entry's `offset` is a guest virtual address of
+//! Loaded with `LD_AUDIT`. Its constructor runs after the dynamic loader has mapped and relocated the
+//! game, before the game's own code starts. A second copy loaded by the renderer skips startup patching
+//! when `KytyGpuQueuePadAudio` is visible. The renderer can call `astro_patch_live` to toggle one mod
+//! after checking the current bytes of every entry.
+//!
+//! Each `memory` entry's `offset` is a guest virtual address of
 //! `eboot.bin`. AnyPS5's Linux output puts guest address 0 at `ASTRO_PATCH_BASE` (default `0x400000`).
 //! Kyty code caves outside the image (for example `0x12000000`) are mapped as fresh RWX pages first.
 //!
@@ -14,7 +18,9 @@
 //! - `ASTRO_PATCH_PROCESS`: executable name to patch (default `AstroBot`); other processes are left alone.
 
 use serde::Deserialize;
+use std::ffi::{c_char, CStr};
 use std::io::Write;
+use std::sync::Mutex;
 
 #[derive(Deserialize)]
 struct CheatFile {
@@ -54,7 +60,7 @@ fn parse_hex_u64(s: &str) -> Option<u64> {
 
 fn parse_bytes(s: &str) -> Option<Vec<u8>> {
     let s = s.trim();
-    if s.len() % 2 != 0 {
+    if !s.is_ascii() || s.len() % 2 != 0 {
         return None;
     }
     (0..s.len())
@@ -131,22 +137,148 @@ fn ensure_mapped(addr: usize, len: usize) -> Result<(), String> {
     Ok(())
 }
 
-/// Writes `bytes` at `addr`, temporarily making the pages writable (and executable, as code is patched).
-fn write_mem(addr: usize, bytes: &[u8]) -> Result<(), String> {
-    let first = addr & !(PAGE - 1);
-    let last = (addr + bytes.len() + PAGE - 1) & !(PAGE - 1);
-    let rc = unsafe {
-        libc::mprotect(first as *mut libc::c_void, last - first, libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC)
-    };
-    if rc != 0 {
-        return Err(format!("mprotect {first:#x}: {}", std::io::Error::last_os_error()));
+/// Makes all affected pages RWX before writing any bytes.
+fn write_mem(entries: &[(usize, Vec<u8>)]) -> Result<(), String> {
+    for (addr, bytes) in entries {
+        let first = addr & !(PAGE - 1);
+        let last = (addr + bytes.len() + PAGE - 1) & !(PAGE - 1);
+        let rc = unsafe {
+            libc::mprotect(first as *mut libc::c_void, last - first, libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC)
+        };
+        if rc != 0 {
+            return Err(format!("mprotect {first:#x}: {}", std::io::Error::last_os_error()));
+        }
     }
-    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), addr as *mut u8, bytes.len()) };
+    for (addr, bytes) in entries {
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), *addr as *mut u8, bytes.len()) };
+    }
     Ok(())
+}
+
+fn live_plan(
+    m: &Mod,
+    on: bool,
+    base: usize,
+    read: &dyn Fn(usize, usize) -> Option<Vec<u8>>,
+) -> Result<Vec<(usize, Vec<u8>)>, i32> {
+    let mut entries = Vec::with_capacity(m.memory.len());
+    let mut needs_write = false;
+    let mut has_target = false;
+    for e in &m.memory {
+        let offset = parse_hex_u64(&e.offset)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or(-4)?;
+        let addr = base.checked_add(offset).ok_or(-4)?;
+        let (target, expected) = if on { (&e.on, &e.off) } else { (&e.off, &e.on) };
+        let target = parse_bytes(target).ok_or(-4)?;
+        let expected = parse_bytes(expected).ok_or(-4)?;
+        if target.is_empty() || target.len() != expected.len() {
+            return Err(-4);
+        }
+        // Leave room for write_mem to round the end up to a page boundary.
+        addr.checked_add(target.len())
+            .and_then(|end| end.checked_add(PAGE - 1))
+            .ok_or(-4)?;
+        let current = read(addr, target.len()).ok_or(-3)?;
+        if current != target && current != expected {
+            return Err(-2);
+        }
+        if target != expected {
+            needs_write |= current == expected;
+            has_target |= current == target;
+        }
+        entries.push((addr, target));
+    }
+    if needs_write && has_target {
+        return Err(-2);
+    }
+    if !needs_write {
+        entries.clear();
+    }
+    Ok(entries)
+}
+
+/// Toggles the single mod matched by a case-insensitive substring.
+///
+/// The caller must pass a pointer to a valid NUL-terminated string or null.
+#[no_mangle]
+pub extern "C" fn astro_patch_live(name: *const c_char, on: i32) -> i32 {
+    static LIVE_WRITE: Mutex<()> = Mutex::new(());
+
+    let on = on != 0;
+    let mut label = "request".to_owned();
+    let result = (|| {
+        if name.is_null() {
+            return Err((-4, "null mod name".into()));
+        }
+        let name = unsafe { CStr::from_ptr(name) }
+            .to_str()
+            .map_err(|_| (-4, "mod name is not UTF-8".into()))?;
+        label = name.to_owned();
+        let path = std::env::var("ASTRO_PATCHES").map_err(|e| (-4, format!("ASTRO_PATCHES: {e}")))?;
+        let base = match std::env::var("ASTRO_PATCH_BASE") {
+            Ok(value) => parse_hex_u64(&value)
+                .and_then(|base| usize::try_from(base).ok())
+                .ok_or_else(|| (-4, "invalid ASTRO_PATCH_BASE".into()))?,
+            Err(std::env::VarError::NotPresent) => 0x400000,
+            Err(e) => return Err((-4, format!("ASTRO_PATCH_BASE: {e}"))),
+        };
+        let text = std::fs::read_to_string(&path).map_err(|e| (-4, format!("read {path}: {e}")))?;
+        let file: CheatFile = serde_json::from_str(&text).map_err(|e| (-4, format!("parse {path}: {e}")))?;
+        let name = name.to_lowercase();
+        let mut matches = file.mods.iter().filter(|m| m.name.to_lowercase().contains(&name));
+        let m = matches.next().ok_or_else(|| (-1, "no matching mod".into()))?;
+        if matches.next().is_some() {
+            return Err((-1, "multiple matching mods".into()));
+        }
+        label = m.name.clone();
+
+        let _guard = LIVE_WRITE.lock().map_err(|_| (-4, "live write lock poisoned".into()))?;
+        let entries = live_plan(m, on, base, &|addr, len| {
+            readable(addr, len).then(|| {
+                // The caller keeps guest memory mapped during a live patch.
+                unsafe { std::slice::from_raw_parts(addr as *const u8, len) }.to_vec()
+            })
+        })
+        .map_err(|code| {
+            let reason = match code {
+                -2 => "entries contain unexpected or mixed bytes",
+                -3 => "entry is unreadable",
+                _ => "invalid patch entry",
+            };
+            (code, reason.into())
+        })?;
+        if entries.is_empty() {
+            return Err((1, "already in requested state".into()));
+        }
+        write_mem(&entries).map_err(|e| (-3, e))?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            let state = if on { "on" } else { "off" };
+            log(&format!("live {state} {label}"));
+            0
+        }
+        Err((code, reason)) => {
+            log(&format!("live SKIP {label}: {reason}"));
+            code
+        }
+    }
+}
+
+fn startup_wanted(renderer_loaded: bool) -> bool {
+    !renderer_loaded
 }
 
 fn run() -> Result<(), String> {
     let Ok(path) = std::env::var("ASTRO_PATCHES") else { return Ok(()) };
+    let renderer_loaded = unsafe {
+        !libc::dlsym(libc::RTLD_DEFAULT, c"KytyGpuQueuePadAudio".as_ptr()).is_null()
+    };
+    if !startup_wanted(renderer_loaded) {
+        return Ok(());
+    }
     // Only the game itself: LD_AUDIT also reaches the launcher's helper programs (cp, tr, ...) and
     // processes the game starts, whose memory at the guest addresses is something else.
     let process = std::env::var("ASTRO_PATCH_PROCESS").unwrap_or_else(|_| "AstroBot".into());
@@ -227,8 +359,9 @@ fn run() -> Result<(), String> {
             continue;
         }
         for (addr, on) in entries {
-            write_mem(addr, &on)?;
-            written.push((addr, addr + on.len()));
+            let end = addr + on.len();
+            write_mem(&[(addr, on)])?;
+            written.push((addr, end));
         }
         applied += 1;
         log(&format!("  on  {}", m.name));
@@ -252,4 +385,81 @@ static INIT: extern "C" fn() = init;
 #[no_mangle]
 pub extern "C" fn la_version(version: u32) -> u32 {
     version
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn m(on: &str, off: &str) -> Mod {
+        Mod {
+            name: "Precise frame cap 60 FPS (x)".into(),
+            enabled: false,
+            memory: vec![Mem {
+                offset: "0x10".into(),
+                on: on.into(),
+                off: off.into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn writes_when_expected_bytes_match() {
+        let r = live_plan(&m("aabb", "0011"), true, 0x1000, &|a, n| {
+            assert_eq!((a, n), (0x1010, 2));
+            Some(vec![0x00, 0x11])
+        });
+        assert_eq!(r, Ok(vec![(0x1010, vec![0xaa, 0xbb])]));
+    }
+
+    #[test]
+    fn turning_off_expects_on_bytes() {
+        assert_eq!(
+            live_plan(&m("aabb", "0011"), false, 0, &|_, _| Some(vec![0xaa, 0xbb])),
+            Ok(vec![(0x10, vec![0x00, 0x11])])
+        );
+    }
+
+    #[test]
+    fn already_in_state_writes_nothing() {
+        assert_eq!(
+            live_plan(&m("aabb", "0011"), true, 0, &|_, _| Some(vec![0xaa, 0xbb])),
+            Ok(vec![])
+        );
+    }
+
+    #[test]
+    fn foreign_bytes_refuse() {
+        assert_eq!(
+            live_plan(&m("aabb", "0011"), true, 0, &|_, _| Some(vec![0x12, 0x34])),
+            Err(-2)
+        );
+    }
+
+    #[test]
+    fn unreadable_refuses() {
+        assert_eq!(live_plan(&m("aabb", "0011"), true, 0, &|_, _| None), Err(-3));
+    }
+
+    #[test]
+    fn mixed_entries_refuse_whole_mod() {
+        let mut x = m("aabb", "0011");
+        x.memory.push(Mem {
+            offset: "0x20".into(),
+            on: "cc".into(),
+            off: "dd".into(),
+        });
+        assert_eq!(
+            live_plan(&x, true, 0, &|a, _| {
+                Some(if a == 0x10 { vec![0x00, 0x11] } else { vec![0xcc] })
+            }),
+            Err(-2)
+        );
+    }
+
+    #[test]
+    fn second_copy_does_not_patch_at_load() {
+        assert!(startup_wanted(false));
+        assert!(!startup_wanted(true));
+    }
 }
