@@ -283,6 +283,8 @@ endif()
 add_subdirectory("${KYTY_SOURCE_DIR}/common" "${CMAKE_CURRENT_BINARY_DIR}/common")
 
 file(GLOB kyty_emulator_src CONFIGURE_DEPENDS
+	"${KYTY_SOURCE_DIR}/streaming/*.cpp"
+	"${KYTY_SOURCE_DIR}/streaming/*.h"
 	"${KYTY_SOURCE_DIR}/libs/*.cpp"
 	"${KYTY_SOURCE_DIR}/libs/*.h"
 	"${KYTY_SOURCE_DIR}/graphics/*.cpp"
@@ -795,6 +797,21 @@ target_link_libraries(hang_watchdog_tests common)
 target_include_directories(hang_watchdog_tests PRIVATE ${inc_headers})
 if(LINUX)
 	target_link_libraries(hang_watchdog_tests Threads::Threads)
+
+	add_executable(session_socket_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SessionSocketTests.cpp"
+		"${KYTY_SOURCE_DIR}/streaming/protocol.cpp" "${KYTY_SOURCE_DIR}/streaming/transport.cpp"
+		"${KYTY_SOURCE_DIR}/streaming/liveSettings.cpp")
+	target_include_directories(session_socket_tests PRIVATE "${KYTY_SOURCE_DIR}")
+	target_link_libraries(session_socket_tests PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
+	add_test(NAME session_socket COMMAND session_socket_tests)
+	set_tests_properties(session_socket PROPERTIES TIMEOUT 30)
+
+	add_executable(live_settings_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/LiveSettingsTests.cpp"
+		"${KYTY_SOURCE_DIR}/streaming/liveSettings.cpp")
+	target_include_directories(live_settings_tests PRIVATE "${KYTY_SOURCE_DIR}")
+	target_link_libraries(live_settings_tests PRIVATE nlohmann_json::nlohmann_json)
+	add_test(NAME live_settings COMMAND live_settings_tests)
+	set_tests_properties(live_settings PROPERTIES TIMEOUT 30)
 endif()
 
 # Compile-wait console lines (common/compileWatch.h): blocked waits, the periodic summary, frame stalls.
@@ -3172,13 +3189,17 @@ if (CLANG AND NOT KYTY_CLANG_CL)
 endif()
 # dlopen/dlsym/dladdr for RenderDoc.
 target_link_libraries(kyty_emulator ${CMAKE_DL_LIBS})
-# AstroHybrid: NVIDIA DLSS Super Resolution through NGX (renderer/dlss.cpp). Set to the NGX SDK
-# folder (include/, lib/Windows_x86_64/nvsdk_ngx_d.lib) to build it in; empty: not built in.
+# AstroHybrid: NVIDIA DLSS Super Resolution through NGX (renderer/hybridDlss.cpp). Set to the NGX
+# SDK folder with include/ and lib/Windows_x86_64/nvsdk_ngx_d.lib or lib/Linux_x86_64/libnvsdk_ngx.a.
 set(KYTY_NGX_SDK_DIR "" CACHE PATH "NVIDIA NGX SDK folder (DLSS); empty to build without it")
 if(KYTY_NGX_SDK_DIR)
 	target_compile_definitions(kyty_emulator PRIVATE KYTY_NGX=1)
 	target_include_directories(kyty_emulator PRIVATE "${KYTY_NGX_SDK_DIR}/include")
-	target_link_libraries(kyty_emulator "${KYTY_NGX_SDK_DIR}/lib/Windows_x86_64/nvsdk_ngx_d.lib")
+	if(WIN32)
+		target_link_libraries(kyty_emulator "${KYTY_NGX_SDK_DIR}/lib/Windows_x86_64/nvsdk_ngx_d.lib")
+	else()
+		target_link_libraries(kyty_emulator "${KYTY_NGX_SDK_DIR}/lib/Linux_x86_64/libnvsdk_ngx.a" ${CMAKE_DL_LIBS})
+	endif()
 endif()
 # AstroHybrid: DLSS Frame Generation through Streamline (renderer/frameGen.cpp), headers only;
 # sl.interposer.dll is loaded at run time. Empty: not built in.

@@ -24,6 +24,7 @@
 #include "libs/controller.h"
 #include "libs/wheelHost.h"
 #include "loader/systemContent.h"
+#include "streaming/liveSettings.h"
 
 #include <SDL3/SDL.h>
 #include <cstdlib>
@@ -140,10 +141,24 @@ struct EventController {
 namespace {
 
 std::unique_ptr<WindowContext> g_window;
+std::mutex                     g_window_lifetime_mutex;
 Common::Mutex                  g_luminance_mutex;
 DisplayLuminance               g_luminance;
 
 } // namespace
+
+uint64_t PresentedFrames() {
+	std::lock_guard lock(g_window_lifetime_mutex);
+	return g_window ? g_window->loop.presented_frames.load(std::memory_order_relaxed) : 0;
+}
+
+void WindowRequestSize(uint32_t width, uint32_t height) {
+	std::lock_guard lock(g_window_lifetime_mutex);
+	if (g_window) {
+		g_window->pending_size.store((static_cast<uint64_t>(width) << 32) | height,
+		                             std::memory_order_relaxed);
+	}
+}
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 // A factory caches output descriptions, so each query creates a new one.
@@ -200,6 +215,11 @@ static void GameEventTerminate(WindowLoopState& game) {
 	game.need_exit = true;
 }
 
+static void SetFullscreenState(WindowContext& context, bool fullscreen) {
+	context.fullscreen.store(fullscreen, std::memory_order_relaxed);
+	Streaming::Live().Update([=](Streaming::LiveState& state) { state.fullscreen = fullscreen; });
+}
+
 static void ToggleDesktopFullscreen() {
 	if (g_window == nullptr || g_window->window == nullptr) {
 		return;
@@ -209,6 +229,8 @@ static void ToggleDesktopFullscreen() {
 	const bool fullscreen = (flags & SDL_WINDOW_FULLSCREEN) != 0u;
 	if (!SDL_SetWindowFullscreen(g_window->window, !fullscreen)) {
 		LOGF("Toggle fullscreen failed: %s\n", SDL_GetError());
+	} else {
+		SetFullscreenState(*g_window, !fullscreen);
 	}
 }
 
@@ -434,6 +456,10 @@ void WindowContext::RefreshSizeFromWindow() {
 void WindowContext::ProcessWindowEvent(const SDL_WindowEvent& event) {
 	const auto& window_event = event;
 	switch (window_event.type) {
+		case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
+		case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
+			SetFullscreenState(*this, window_event.type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN);
+			break;
 		case SDL_EVENT_WINDOW_SHOWN: {
 			LOGF("Window %" PRIu32 " shown\n", window_event.windowID);
 			RefreshSizeFromWindow();
@@ -847,6 +873,13 @@ void WindowContext::Run() {
 			title_frames = frames;
 		}
 		const auto wait_ms = static_cast<int>(title_interval_ms - (now - title_time));
+		if (const auto size = pending_size.exchange(0, std::memory_order_relaxed)) {
+			const auto width = static_cast<int>(size >> 32);
+			const auto height = static_cast<int>(static_cast<uint32_t>(size));
+			if (!SDL_SetWindowSize(window, width, height)) {
+				LOGF("Window resize failed: %s\n", SDL_GetError());
+			}
+		}
 		if (!HostInputWaitEvent(&loop.event, wait_ms)) {
 			continue;
 		}
@@ -912,6 +945,12 @@ static void WindowCreate(WindowContext& context) {
 		EXIT("%s\n", SDL_GetError());
 	}
 
+	SetFullscreenState(context, (SDL_GetWindowFlags(context.window) & SDL_WINDOW_FULLSCREEN) != 0u);
+	Streaming::Live().Update([&](Streaming::LiveState& state) {
+		state.width = static_cast<uint32_t>(width);
+		state.height = static_cast<uint32_t>(height);
+	});
+
 	RefreshDisplayLuminance(context.window);
 	SDL_SetWindowPosition(context.window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 	HostInputInit(context.window);
@@ -937,9 +976,12 @@ Presenter& WindowInit(uint32_t width, uint32_t height) {
 	window->graphic_ctx.screen_height = height;
 
 	WindowCreate(*window);
+	// The presenter starts the session worker during creation. A settings request that
+	// needs the window must wait until g_window is published.
+	std::lock_guard lock(g_window_lifetime_mutex);
 	window->CreateVulkan();
 	auto& presenter = *window->presenter;
-	g_window        = std::move(window);
+	g_window = std::move(window);
 	return presenter;
 }
 
@@ -955,7 +997,13 @@ void WindowShutdown() {
 	if (g_window != nullptr) {
 		HostInputShutdown();
 		Controller::EmergencyShutdown();
-		g_window.reset();
+		// The presenter can join a worker that is sampling PresentedFrames().
+		// Destroy the window after releasing the lifetime lock.
+		std::unique_ptr<WindowContext> window;
+		{
+			std::lock_guard lock(g_window_lifetime_mutex);
+			window = std::move(g_window);
+		}
 	}
 }
 

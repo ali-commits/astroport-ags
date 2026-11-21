@@ -96,6 +96,8 @@ struct WindowContext {
 	std::unique_ptr<Presenter>     presenter;
 	WindowLoopState                loop;
 	std::atomic_bool               minimized     = false;
+	std::atomic<bool>              fullscreen    = false;
+	std::atomic<uint64_t>          pending_size   = 0;
 
 	Common::Mutex mutex;
 
@@ -104,6 +106,8 @@ private:
 	/// Does nothing when the window is still minimised or the reported size is non-positive.
 	void RefreshSizeFromWindow();
 };
+
+void WindowRequestSize(uint32_t width, uint32_t height);
 
 } // namespace Libs::Graphics
 
