@@ -1,10 +1,11 @@
-#[allow(dead_code)] // The game page and launch use device defaults in later tasks.
+#[allow(dead_code)] // Launch uses the remaining device fields in a later task.
 mod device;
 mod dump;
 mod page;
 mod rpc;
-#[allow(dead_code)] // Page and launch consume the settings map in later tasks.
+#[allow(dead_code)] // Launch uses the remaining settings map fields in a later task.
 mod settings;
+mod sheet;
 mod values;
 
 use device::Device;
@@ -19,8 +20,9 @@ use std::{
 };
 use values::Store;
 
+const DAMAGED_INSTALLATION: &str = "The AstroPort installation is damaged. Repair it.";
+
 struct State {
-    #[allow(dead_code)] // Used by the launch task.
     install: PathBuf,
     data: PathBuf,
     versions: Versions,
@@ -32,7 +34,6 @@ struct State {
 }
 
 impl State {
-    #[allow(dead_code)] // Used by the game page and launch tasks.
     fn device(&mut self) -> &Device {
         self.device
             .get_or_insert_with(|| device::probe(Path::new("/sys"), device::nvidia_smi))
@@ -44,6 +45,43 @@ impl State {
             &self.versions,
             &mut self.cache,
         )
+    }
+
+    fn game_page(&mut self, game: &Value) -> Result<Value, RpcError> {
+        let not_found = || RpcError::new("not-found", "AstroPort has no such game.");
+        if game != GAME_ID {
+            return Err(not_found());
+        }
+        let detected = self.detect();
+        if matches!(detected, Detected::NotSet | Detected::NotFound) {
+            return Err(not_found());
+        }
+
+        let defaults = device::defaults(self.device());
+        let map = self
+            .map
+            .as_ref()
+            .map_err(|_| RpcError::new("failed", DAMAGED_INSTALLATION))?;
+        let (is_built, available) = match &detected {
+            Detected::Supported {
+                entry,
+                eboot_sha256,
+                ..
+            } => (
+                dump::built(
+                    &self.data,
+                    &entry.version,
+                    eboot_sha256,
+                    env!("CARGO_PKG_VERSION"),
+                ),
+                map.available(&self.install.join("patches").join(&entry.patches))
+                    .map_err(|_| RpcError::new("failed", DAMAGED_INSTALLATION))?,
+            ),
+            _ => (false, Default::default()),
+        };
+        Ok(page::game_page(
+            &detected, is_built, map, &available, &defaults,
+        ))
     }
 
     fn library_list(&mut self) -> Value {
@@ -87,10 +125,7 @@ impl State {
 
 fn dispatch(state: &mut State, method: &str, params: &Value) -> Result<Value, RpcError> {
     if method != "hello" && state.map.is_err() {
-        return Err(RpcError::new(
-            "failed",
-            "The AstroPort installation is damaged. Repair it.",
-        ));
+        return Err(RpcError::new("failed", DAMAGED_INSTALLATION));
     }
     match method {
         "hello" => Ok(json!({
@@ -148,11 +183,19 @@ fn dispatch(state: &mut State, method: &str, params: &Value) -> Result<Value, Rp
                 .push(json!({"method": "page.changed", "params": {}}));
             Ok(json!({"values": state.store.machine()}))
         }
-        "page.describe" if params["game"].is_null() => {
-            let detected = state.detect();
-            Ok(page::extension_page(&state.store, &detected))
+        "page.describe" => {
+            let page = if params["game"].is_null() {
+                let detected = state.detect();
+                page::extension_page(&state.store, &detected)
+            } else {
+                state.game_page(&params["game"])?
+            };
+            if cfg!(debug_assertions) {
+                let limits = page::check_limits(&page);
+                debug_assert!(limits.is_ok(), "{limits:?}");
+            }
+            Ok(page)
         }
-        "page.describe" => Err(RpcError::new("not-found", "AstroPort has no such game.")),
         _ => Err(RpcError::new(
             "unknown-method",
             format!("AstroPort does not know {method}."),
