@@ -1,5 +1,6 @@
 pub mod progress;
 pub mod unwrap;
+pub mod version;
 
 #[derive(Debug)]
 pub struct JobError {

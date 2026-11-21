@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct Seg {
@@ -93,4 +93,51 @@ pub fn temp_dir(name: &str) -> PathBuf {
     }
     fs::create_dir(&path).unwrap();
     path
+}
+
+#[allow(dead_code)]
+pub fn fake_dump(
+    root: &Path,
+    content_version: &str,
+    eboot: &[u8],
+    modules: &[(&str, Vec<u8>)],
+) -> PathBuf {
+    fs::create_dir_all(root.join("sce_sys")).unwrap();
+    fs::create_dir_all(root.join("sce_module")).unwrap();
+    fs::create_dir_all(root.join("data")).unwrap();
+    fs::write(root.join("eboot.bin"), eboot).unwrap();
+    fs::write(
+        root.join("sce_sys/param.json"),
+        serde_json::json!({"titleId": "PPSA21567", "contentVersion": content_version}).to_string(),
+    )
+    .unwrap();
+    for (name, bytes) in modules {
+        fs::write(root.join("sce_module").join(name), bytes).unwrap();
+    }
+    fs::write(root.join("args.txt"), "-package -sequence product").unwrap();
+    fs::write(root.join("data/x.bin"), b"data").unwrap();
+    fs::write(root.join("param.sfx"), b"param").unwrap();
+    root.to_path_buf()
+}
+
+#[allow(dead_code)]
+pub fn versions_json(path: &Path, eboot_1019_sha256: Option<&str>) {
+    let versions = serde_json::json!({
+        "title_id": "PPSA21567",
+        "versions": [
+            {
+                "version": "1.018",
+                "content_version": "01.018.000",
+                "eboot_sha256": null,
+                "patches": "PPSA21567-1018.json",
+            },
+            {
+                "version": "1.019",
+                "content_version": "01.019.000",
+                "eboot_sha256": eboot_1019_sha256,
+                "patches": "PPSA21567-1019.json",
+            },
+        ],
+    });
+    fs::write(path, versions.to_string()).unwrap();
 }
