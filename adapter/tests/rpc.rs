@@ -43,7 +43,7 @@ fn hello_answers_protocol_2() {
     assert_eq!(r["result"]["roles"], json!(["launcher"]));
     assert_eq!(
         r["result"]["features"],
-        json!(["library", "page", "values"])
+        json!(["library", "page", "values", "jobs"])
     );
     assert_eq!(
         r["result"]["controllers"],
@@ -634,4 +634,96 @@ fn missing_preset_refused() {
         launch(&mut a, json!({}), json!({}))["error"],
         json!({"code": "failed", "message": "The AstroPort installation is damaged. Repair it."})
     );
+}
+
+#[test]
+fn job_plan_build_returns_the_runner() {
+    let f = Fixture::new();
+    let mut a = Adapter::spawn(&f);
+    set_dump(&mut a, &f);
+    let reply = a.call(
+        "job.plan",
+        json!({"job": "build", "game": "PPSA21567", "params": {}, "cleanup": false, "resume": null}),
+    );
+    assert_eq!(reply["error"], Value::Null, "{reply}");
+    let r = &reply["result"];
+    assert_eq!(r["label"], "Build game files");
+    assert_eq!(
+        r["argv"],
+        json!([f.install.join("bin/astroport-run"), "build", "--dump", f.dump,
+            "--install", f.install, "--data", f.data])
+    );
+    assert_eq!(
+        r["steps"],
+        json!(["Check the game dump", "Unwrap the game files", "Convert for Linux",
+            "Set up the game folder", "Record the result"])
+    );
+    assert!(r["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|s| (1..=40).contains(&s.as_str().unwrap().chars().count())));
+    assert_eq!(r["env"], json!({}));
+    assert_eq!(r["cwd"], json!(f.data));
+    assert_eq!(
+        r["writable"],
+        json!([f.data.join("generated"), f.data.join("saves")])
+    );
+    assert_eq!(
+        r["admission"],
+        json!({"blocks_launch": true, "pauses_while_playing": false, "runs_while_playing": false, "counts_against_downloads": false})
+    );
+    assert_eq!(r["notify"], json!({"completed": true, "failed": true}));
+    assert_eq!(
+        (
+            r["changes_software"].as_bool(),
+            r["resumable"].as_bool(),
+            r["cleanup"].as_bool()
+        ),
+        (Some(true), Some(false), Some(false))
+    );
+    assert_eq!(
+        a.call("job.plan", json!({"job": "other", "game": "PPSA21567", "params": {}}))["error"],
+        json!({"code": "not-found", "message": "AstroPort has no such job."})
+    );
+    for params in [
+        json!({"job": "build", "game": "CUSA00001", "params": {}}),
+        json!({"job": "build", "params": {}}),
+    ] {
+        assert_eq!(
+            a.call("job.plan", params)["error"],
+            json!({"code": "not-found", "message": "AstroPort has no such game."})
+        );
+    }
+    assert_eq!(
+        a.call("hello", json!({"protocol": 2, "ags": "0.20.0", "features": ["jobs"]}))["result"]["features"],
+        json!(["library", "page", "values", "jobs"])
+    );
+}
+
+#[test]
+fn job_plan_refuses_an_unsupported_dump() {
+    let f = Fixture::new();
+    fs::write(
+        f.dump.join("sce_sys/param.json"),
+        br#"{"titleId":"PPSA21567","contentVersion":"01.020.000"}"#,
+    )
+    .unwrap();
+    let mut a = Adapter::spawn(&f);
+    set_dump(&mut a, &f);
+    assert_eq!(
+        a.call("job.plan", json!({"job": "build", "game": "PPSA21567", "params": {}}))["error"],
+        json!({
+            "code": "failed",
+            "message": "Version 1.020 is not supported. AstroPort runs 1.018 and 1.019."
+        })
+    );
+}
+
+#[test]
+fn sheet_points_are_marked() {
+    let s = include_str!("../src/sheet.rs");
+    let n = |p: &str| s.lines().filter(|l| l.trim_start().starts_with(p)).count();
+    assert!(n("// sheet §") >= 10);
+    assert_eq!(n("// SHEET:"), 2); // the overlay placement is resolved
 }

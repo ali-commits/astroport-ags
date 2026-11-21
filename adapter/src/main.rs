@@ -83,21 +83,37 @@ impl State {
         ))
     }
 
+    fn supported_dump(&mut self) -> Result<(PathBuf, dump::VersionEntry, String), RpcError> {
+        let failed = |message: &str| RpcError::new("failed", message);
+        match self.detect() {
+            Detected::Supported {
+                dump,
+                entry,
+                eboot_sha256,
+            } => Ok((dump, entry, eboot_sha256)),
+            Detected::Unsupported { message, .. } => Err(failed(&message)),
+            Detected::NotSet => Err(failed("Choose the folder of your Astro Bot dump.")),
+            Detected::NotFound => Err(failed("No Astro Bot dump in this folder.")),
+        }
+    }
+
+    fn job_plan(&mut self, params: &Value) -> Result<Value, RpcError> {
+        if params["job"] != "build" {
+            return Err(RpcError::new("not-found", "AstroPort has no such job."));
+        }
+        if params["game"] != GAME_ID {
+            return Err(RpcError::new("not-found", "AstroPort has no such game."));
+        }
+        let (dump, _, _) = self.supported_dump()?;
+        Ok(sheet::job_plan(&self.install, &self.data, &dump))
+    }
+
     fn launch_plan(&mut self, params: &Value) -> Result<Value, RpcError> {
         if params["game"] != GAME_ID {
             return Err(RpcError::new("not-found", "AstroPort has no such game."));
         }
+        let (_, entry, eboot_sha256) = self.supported_dump()?;
         let failed = |message: &str| RpcError::new("failed", message);
-        let (entry, eboot_sha256) = match self.detect() {
-            Detected::Supported {
-                entry,
-                eboot_sha256,
-                ..
-            } => (entry, eboot_sha256),
-            Detected::Unsupported { message, .. } => return Err(failed(&message)),
-            Detected::NotSet => return Err(failed("Choose the folder of your Astro Bot dump.")),
-            Detected::NotFound => return Err(failed("No Astro Bot dump in this folder.")),
-        };
         if !dump::built(
             &self.data,
             &entry.version,
@@ -176,7 +192,7 @@ fn dispatch(state: &mut State, method: &str, params: &Value) -> Result<Value, Rp
             "protocol": 2,
             "version": env!("CARGO_PKG_VERSION"),
             "roles": ["launcher"],
-            "features": ["library", "page", "values"],
+            "features": ["library", "page", "values", "jobs"],
             "controllers": [{
                 "kind": "dualsense",
                 "features": ["gyro", "touchpad", "adaptive_triggers", "haptics"]
@@ -185,6 +201,7 @@ fn dispatch(state: &mut State, method: &str, params: &Value) -> Result<Value, Rp
         })),
         "library.list" => Ok(state.library_list()),
         "launch.plan" => state.launch_plan(params),
+        "job.plan" => state.job_plan(params),
         "values.get" => match params["scope"].as_str() {
             Some("machine") => Ok(json!({"values": state.store.machine()})),
             Some("game") => Ok(json!({"values": {}})),
