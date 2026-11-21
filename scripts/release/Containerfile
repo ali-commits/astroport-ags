@@ -9,5 +9,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     && rm -rf /var/lib/apt/lists/*
 
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
-RUN rustup toolchain install 1.100.0 --profile minimal && rustup default 1.100.0
+# Ubuntu ships rustup in /usr/bin; it refuses to run unless it also sits in $CARGO_HOME/bin
+RUN mkdir -p /opt/cargo/bin && ln -s /usr/bin/rustup /opt/cargo/bin/rustup \
+    && rustup toolchain install 1.100.0 --profile minimal && rustup default 1.100.0
 RUN chmod -R a+rX /opt/rustup /opt/cargo
