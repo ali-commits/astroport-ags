@@ -849,7 +849,6 @@ constexpr std::array<const char*, 10> FRAME_LIMIT_LABELS {"30 FPS", "35 FPS", "4
 // 50 on screen with 2x = 25). Ctrl+F2 then cycles the listed values as before.
 constexpr uint32_t    FRAME_LIMIT_CUSTOM = 1000;
 std::atomic<uint32_t> g_custom_frame_limit {0};
-char                  g_custom_frame_limit_label[16] {};
 
 std::atomic<uint32_t>& FrameLimitChoice() {
 	static std::atomic<uint32_t> choice {[] {
@@ -865,8 +864,6 @@ std::atomic<uint32_t>& FrameLimitChoice() {
 			const auto custom = std::strtoul(value, &end, 10);
 			if (end != value && *end == '\0' && custom >= 10 && custom <= 240) {
 				g_custom_frame_limit.store(static_cast<uint32_t>(custom), std::memory_order_relaxed);
-				std::snprintf(g_custom_frame_limit_label, sizeof(g_custom_frame_limit_label), "%lu FPS",
-				              custom);
 				return FRAME_LIMIT_CUSTOM;
 			}
 		}
@@ -972,10 +969,25 @@ void UpdateGameStep(GameStep& step, uint64_t now, uint64_t frequency, uint32_t l
 } // namespace
 
 const char* FrameLimitLabel() {
-	const auto choice = FrameLimitChoice().load(std::memory_order_relaxed);
-	return choice == FRAME_LIMIT_DISABLED ? nullptr
-	       : choice == FRAME_LIMIT_CUSTOM ? g_custom_frame_limit_label
-	                                      : FRAME_LIMIT_LABELS[choice];
+	const auto choice = FrameLimitChoice().load(std::memory_order_acquire);
+	if (choice == FRAME_LIMIT_DISABLED) return nullptr;
+	if (choice != FRAME_LIMIT_CUSTOM) return FRAME_LIMIT_LABELS[choice];
+
+	thread_local char label[16];
+	std::snprintf(label, sizeof(label), "%u FPS", g_custom_frame_limit.load(std::memory_order_relaxed));
+	return label;
+}
+
+void SetFrameLimit(uint32_t fps) {
+	const auto listed = std::ranges::find(FRAME_LIMITS, fps);
+	if (listed != FRAME_LIMITS.end()) {
+		FrameLimitChoice().store(static_cast<uint32_t>(listed - FRAME_LIMITS.begin()),
+		                         std::memory_order_release);
+	} else if (fps >= 10 && fps <= 240) {
+		auto& choice = FrameLimitChoice();
+		g_custom_frame_limit.store(fps, std::memory_order_relaxed);
+		choice.store(FRAME_LIMIT_CUSTOM, std::memory_order_release);
+	}
 }
 
 bool CycleFrameLimit() {
@@ -1027,6 +1039,7 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 	uint64_t abs_index   = 0;
 	uint32_t abs_refresh = 0;
 	uint32_t previous_limit = FRAME_LIMIT_DISABLED;
+	uint32_t previous_fps = 0;
 	uint64_t next_flip = 0;
 
 	GameStep game_step;
@@ -1056,16 +1069,17 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 		if ((++placement_count & 7u) == 0u) {
 			Common::SamplePlacement(Common::ThreadRole::Host);
 		}
-		const auto choice = FrameLimitChoice().load(std::memory_order_relaxed);
-		if (choice != previous_limit) {
-			previous_limit = choice;
-			next_flip = 0;
-		}
+		const auto choice = FrameLimitChoice().load(std::memory_order_acquire);
 		const bool limit_enabled = choice != FRAME_LIMIT_DISABLED;
 		const auto limit = limit_enabled ? (choice == FRAME_LIMIT_CUSTOM
 		                                        ? g_custom_frame_limit.load(std::memory_order_relaxed)
 		                                        : FRAME_LIMITS[choice])
 		                                 : 0u;
+		if (choice != previous_limit || limit != previous_fps) {
+			previous_limit = choice;
+			previous_fps = limit;
+			next_flip = 0;
+		}
 		const bool ready_flips = g_present_ready_flips.On();
 		const bool absolute = g_present_abs_vblank.On() || ready_flips ||
 		                      (limit_enabled && Config::GetPresentMode() == Config::PresentMode::Immediate);

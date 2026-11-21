@@ -2,6 +2,7 @@ LIBRARY kyty_gpu
 EXPORTS
     KytyGpuGetApi
     KytyGpuQueuePadAudio
+    KytyGpuPadVibrationGain
     "+kSrjIVxKFE"=kyty_gpu_nid_0
     "-HOOCn0JY48"=kyty_gpu_nid_1
     "-KRzWekV120"=kyty_gpu_nid_2

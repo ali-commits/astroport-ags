@@ -37,6 +37,7 @@
 #include "loader/symbolDatabase.h"
 #include "loader/timer.h"
 #include "loader/x64InstructionEmulator.h"
+#include "streaming/liveSettings.h"
 
 #include <SDL3/SDL.h>
 
@@ -970,6 +971,8 @@ static int ResolvePadAudioController(bool prefer_ps5) {
 	}
 	return controller > 0 ? controller : fallback;
 }
+
+extern "C" KYTY_GPU_EXPORT float KytyGpuPadVibrationGain() { return Streaming::PadVibrationGain(); }
 
 extern "C" KYTY_GPU_EXPORT uint64_t KytyGpuQueuePadAudio(uint32_t freq, int is_speaker,
                                                          const void* data, uint32_t frames,

@@ -799,11 +799,19 @@ if(LINUX)
 	target_link_libraries(hang_watchdog_tests Threads::Threads)
 
 	add_executable(session_socket_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SessionSocketTests.cpp"
-		"${KYTY_SOURCE_DIR}/streaming/protocol.cpp" "${KYTY_SOURCE_DIR}/streaming/transport.cpp")
+		"${KYTY_SOURCE_DIR}/streaming/protocol.cpp" "${KYTY_SOURCE_DIR}/streaming/transport.cpp"
+		"${KYTY_SOURCE_DIR}/streaming/liveSettings.cpp")
 	target_include_directories(session_socket_tests PRIVATE "${KYTY_SOURCE_DIR}")
 	target_link_libraries(session_socket_tests PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
 	add_test(NAME session_socket COMMAND session_socket_tests)
 	set_tests_properties(session_socket PROPERTIES TIMEOUT 30)
+
+	add_executable(live_settings_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/LiveSettingsTests.cpp"
+		"${KYTY_SOURCE_DIR}/streaming/liveSettings.cpp")
+	target_include_directories(live_settings_tests PRIVATE "${KYTY_SOURCE_DIR}")
+	target_link_libraries(live_settings_tests PRIVATE nlohmann_json::nlohmann_json)
+	add_test(NAME live_settings COMMAND live_settings_tests)
+	set_tests_properties(live_settings PROPERTIES TIMEOUT 30)
 endif()
 
 # Compile-wait console lines (common/compileWatch.h): blocked waits, the periodic summary, frame stalls.
