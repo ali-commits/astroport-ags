@@ -1,0 +1,7 @@
+{
+  "title_id": "PPSA21567",
+  "versions": [
+    {"version": "1.018", "content_version": "01.018.000", "eboot_sha256": null, "patches": "PPSA21567-1018.json"},
+    {"version": "1.019", "content_version": "01.019.000", "eboot_sha256": "e88e19a688289e1ea557a6100b9b7d89fb3041875a7aa8471b361bfedf59fa86", "patches": "PPSA21567-1019.json"}
+  ]
+}

@@ -1,0 +1,43 @@
+# AGS extension manifest (protocol 2). The copy at the tagged commit is what AGS reads.
+id = "astroport"
+name = "AstroPort"
+version = "0.1.0"
+license = "GPL-2.0-only"
+protocol = 2
+roles = ["launcher"]
+adapter = "bin/astroport-adapter"
+
+[assets]
+icon = "assets/icon.svg"
+logo = "assets/logo.svg"
+badge = "assets/badge.svg"
+
+[[channels]]
+id = "stable"
+name = "Stable"
+tag = '^v\d+\.\d+\.\d+$'
+prerelease = false
+default = true
+
+[[channels]]
+id = "testing"
+name = "Testing"
+tag = '^v\d+\.\d+\.\d+-testing\.\d+$'
+prerelease = true
+
+[install.release]
+asset = "astroport-{version}-linux-{arch}.tar.zst"
+sha256_asset = "{asset}.sha256"
+
+[install.source]
+depends = ["cmake", "ninja", "clang", "clang++", "gcc", "g++", "python3", "git", "cargo", "nm", "strip"]
+submodules = false
+build = [
+  ["scripts/build-engines.sh"],
+  ["cargo", "build", "--release", "--locked", "--manifest-path", "patcher/Cargo.toml"],
+  ["cargo", "build", "--release", "--locked", "--manifest-path", "adapter/Cargo.toml"],
+  ["cargo", "build", "--release", "--locked", "--manifest-path", "runner/Cargo.toml"],
+]
+stage = [
+  ["scripts/release/stage.sh", "{stage}"],
+]
