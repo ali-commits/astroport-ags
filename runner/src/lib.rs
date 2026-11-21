@@ -1,3 +1,4 @@
+pub mod layout;
 pub mod progress;
 pub mod unwrap;
 pub mod version;

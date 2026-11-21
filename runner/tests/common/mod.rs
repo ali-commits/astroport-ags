@@ -141,3 +141,37 @@ pub fn versions_json(path: &Path, eboot_1019_sha256: Option<&str>) {
     });
     fs::write(path, versions.to_string()).unwrap();
 }
+
+#[allow(dead_code)]
+pub fn fake_install(root: &Path) -> PathBuf {
+    for dir in ["anyps5/libs", "shims", "lib", "patches"] {
+        fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    for (dir, source, names) in [
+        (
+            "anyps5/libs",
+            "anyps5",
+            ["libkernel.prx", "libc.prx", "libSceAgc.prx"],
+        ),
+        (
+            "shims",
+            "shim",
+            ["libSceAgc.prx", "libSceAgcDriver.prx", "libSceVideoOut.prx"],
+        ),
+    ] {
+        for name in names {
+            fs::write(root.join(dir).join(name), format!("{source} {name}")).unwrap();
+        }
+    }
+    for (path, content) in [
+        ("anyps5/libAstroHybridHost.prx", "host"),
+        ("anyps5/relinker", ""),
+        ("lib/libkyty_gpu.so", "gpu"),
+        ("lib/libnvidia-ngx-dlss.so.310.9.16", "dlss"),
+        ("ags-extension.toml", "version = \"0.1.0\"\n"),
+    ] {
+        fs::write(root.join(path), content).unwrap();
+    }
+    versions_json(&root.join("patches/versions.json"), None);
+    root.to_path_buf()
+}
