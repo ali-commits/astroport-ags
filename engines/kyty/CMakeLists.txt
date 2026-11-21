@@ -3189,13 +3189,17 @@ if (CLANG AND NOT KYTY_CLANG_CL)
 endif()
 # dlopen/dlsym/dladdr for RenderDoc.
 target_link_libraries(kyty_emulator ${CMAKE_DL_LIBS})
-# AstroHybrid: NVIDIA DLSS Super Resolution through NGX (renderer/dlss.cpp). Set to the NGX SDK
-# folder (include/, lib/Windows_x86_64/nvsdk_ngx_d.lib) to build it in; empty: not built in.
+# AstroHybrid: NVIDIA DLSS Super Resolution through NGX (renderer/hybridDlss.cpp). Set to the NGX
+# SDK folder with include/ and lib/Windows_x86_64/nvsdk_ngx_d.lib or lib/Linux_x86_64/libnvsdk_ngx.a.
 set(KYTY_NGX_SDK_DIR "" CACHE PATH "NVIDIA NGX SDK folder (DLSS); empty to build without it")
 if(KYTY_NGX_SDK_DIR)
 	target_compile_definitions(kyty_emulator PRIVATE KYTY_NGX=1)
 	target_include_directories(kyty_emulator PRIVATE "${KYTY_NGX_SDK_DIR}/include")
-	target_link_libraries(kyty_emulator "${KYTY_NGX_SDK_DIR}/lib/Windows_x86_64/nvsdk_ngx_d.lib")
+	if(WIN32)
+		target_link_libraries(kyty_emulator "${KYTY_NGX_SDK_DIR}/lib/Windows_x86_64/nvsdk_ngx_d.lib")
+	else()
+		target_link_libraries(kyty_emulator "${KYTY_NGX_SDK_DIR}/lib/Linux_x86_64/libnvsdk_ngx.a" ${CMAKE_DL_LIBS})
+	endif()
 endif()
 # AstroHybrid: DLSS Frame Generation through Streamline (renderer/frameGen.cpp), headers only;
 # sl.interposer.dll is loaded at run time. Empty: not built in.

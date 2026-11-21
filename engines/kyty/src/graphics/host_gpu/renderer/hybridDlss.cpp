@@ -12,6 +12,10 @@
 #if KYTY_NGX
 #include <nvsdk_ngx_helpers_vk.h>
 #include <nvsdk_ngx_vk.h>
+#ifndef _WIN32
+#include <dlfcn.h>
+#include <filesystem>
+#endif
 #endif
 
 #ifdef _WIN32
@@ -461,17 +465,51 @@ bool RenderExecutor::TryDlssUpscale(CommandBuffer& buffer, PreparedBindings& pix
 	auto& graphics = m_context.GetGraphics();
 	if (!s.init_tried) {
 		s.init_tried = true;
-		const char*  path_value = std::getenv("ASTROHYBRID_DLSS_PATH");
-		std::wstring path       = path_value != nullptr
-		                              ? std::wstring(path_value, path_value + std::strlen(path_value))
-		                              : std::wstring(L"E:\\AstroHybrid-Work\\sdk\\streamline-v2.14.16\\bin\\x64");
-		const wchar_t*              paths[] = {path.c_str()};
+		const char* path_value = std::getenv("ASTROHYBRID_DLSS_PATH");
+#ifndef _WIN32
+		std::filesystem::path cache_dir;
+		if (const char* cache = std::getenv("XDG_CACHE_HOME"); cache != nullptr && *cache != '\0') {
+			cache_dir = cache;
+		} else if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+			cache_dir = std::filesystem::path(home) / ".cache";
+		}
+		if (!cache_dir.empty()) {
+			cache_dir /= "astroport/ngx";
+			std::error_code error;
+			std::filesystem::create_directories(cache_dir, error);
+		}
+		const auto& cache_string = cache_dir.native();
+		const std::wstring cache_path(cache_string.begin(), cache_string.end());
+		const wchar_t* data_path = cache_path.c_str();
+		std::wstring override_path;
+		std::wstring library_path;
+		const wchar_t* paths[2] {};
+		unsigned int path_count = 0;
+		if (path_value != nullptr && *path_value != '\0') {
+			override_path.assign(path_value, path_value + std::strlen(path_value));
+			paths[path_count++] = override_path.c_str();
+		}
+		Dl_info library {};
+		if (dladdr(reinterpret_cast<const void*>(&Get), &library) != 0 && library.dli_fname != nullptr) {
+			const auto folder = std::filesystem::path(library.dli_fname).parent_path();
+			const auto folder_string = folder.empty() ? std::string(".") : folder.native();
+			library_path.assign(folder_string.begin(), folder_string.end());
+			paths[path_count++] = library_path.c_str();
+		}
+#else
+		const std::wstring path = path_value != nullptr
+		                             ? std::wstring(path_value, path_value + std::strlen(path_value))
+		                             : std::wstring(L"E:\\AstroHybrid-Work\\sdk\\streamline-v2.14.16\\bin\\x64");
+		const wchar_t* paths[] = {path.c_str()};
+		constexpr unsigned int path_count = 1;
+		constexpr const wchar_t* data_path = L"E:\\AstroHybrid-Work\\ngx-data";
+#endif
 		NVSDK_NGX_FeatureCommonInfo info {};
 		info.PathListInfo.Path   = paths;
-		info.PathListInfo.Length = 1;
+		info.PathListInfo.Length = path_count;
 		const auto result = NVSDK_NGX_VULKAN_Init_with_ProjectID(
 		    "8e5a33f4-7e0f-4c5b-9a5c-1c2e7d4b3a10", NVSDK_NGX_ENGINE_TYPE_CUSTOM, "1.0",
-		    L"E:\\AstroHybrid-Work\\ngx-data", static_cast<VkInstance>(graphics.instance),
+		    data_path, static_cast<VkInstance>(graphics.instance),
 		    static_cast<VkPhysicalDevice>(graphics.physical_device),
 		    static_cast<VkDevice>(graphics.device), VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr,
 		    VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr, &info);
