@@ -1,3 +1,4 @@
+mod dump;
 mod rpc;
 
 use rpc::{read_frame, write_frame, RpcError};
