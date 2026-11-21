@@ -396,8 +396,89 @@ package_tests() {
   fi
 }
 
+preflight_tests() {
+  local repo="$T/repo" file scenario case_name check expected head
+  local -a git_fixture=(git -c core.hooksPath=/dev/null -c user.name=t -c user.email=t@example.invalid)
+
+  mkdir -p -- "$repo"/{scripts,adapter,runner}
+  if [[ -f "$ROOT/scripts/build-release.sh" ]]; then
+    install -m 0755 -- "$ROOT/scripts/build-release.sh" "$repo/scripts/build-release.sh"
+  fi
+  printf 'version = "0.1.0-testing.1"\n' >"$repo/ags-extension.toml"
+  for file in {adapter,runner}/{Cargo.toml,Cargo.lock}; do
+    printf 'fixture\n' >"$repo/$file"
+  done
+  git init -q -- "$repo"
+  git -C "$repo" add .
+  "${git_fixture[@]}" -C "$repo" commit --quiet --no-gpg-sign -m 'Release fixture'
+  git -C "$repo" tag --no-sign v0.1.0-testing.1
+  head=$(git -C "$repo" rev-parse HEAD)
+
+  for scenario in testing stable untagged dirty 'no runner crate' 'no adapter lock' 'bad version' 'no manifest'; do
+    cp -a -- "$repo" "$T/$scenario"
+    local copy="$T/$scenario"
+    case_name="preflight: $scenario"
+    check="$copy/scripts/build-release.sh"
+    case $scenario in
+      testing)
+        expected="release v0.1.0-testing.1: channel testing, asset astroport-0.1.0-testing.1-linux-x86_64.tar.zst, commit $head"
+        ;;
+      stable)
+        printf 'version = "0.2.0"\n' >"$copy/ags-extension.toml"
+        "${git_fixture[@]}" -C "$copy" commit --quiet --no-gpg-sign -am 'Stable version'
+        git -C "$copy" tag --no-sign v0.2.0
+        expected="release v0.2.0: channel stable, asset astroport-0.2.0-linux-x86_64.tar.zst, commit $(git -C "$copy" rev-parse HEAD)"
+        ;;
+      untagged)
+        git -C "$copy" tag -d v0.1.0-testing.1 >/dev/null
+        expected='HEAD is not tagged v0.1.0-testing.1'
+        ;;
+      dirty)
+        touch -- "$copy/x"
+        expected='uncommitted changes'
+        ;;
+      'no runner crate')
+        git -C "$copy" rm -qr -- runner
+        "${git_fixture[@]}" -C "$copy" commit --quiet --no-gpg-sign -m 'Remove runner'
+        expected='runner/Cargo.toml not found: the release needs the astroport-run crate (step 4)'
+        ;;
+      'no adapter lock')
+        git -C "$copy" rm -q -- adapter/Cargo.lock
+        "${git_fixture[@]}" -C "$copy" commit --quiet --no-gpg-sign -m 'Remove adapter lock'
+        expected='adapter/Cargo.lock not found'
+        ;;
+      'bad version')
+        printf 'version = "1.0"\n' >"$copy/ags-extension.toml"
+        expected='is neither X.Y.Z nor X.Y.Z-testing.N'
+        ;;
+      'no manifest')
+        git -C "$copy" rm -q -- ags-extension.toml
+        "${git_fixture[@]}" -C "$copy" commit --quiet --no-gpg-sign -m 'Remove manifest'
+        expected='ags-extension.toml not found (step 3)'
+        ;;
+    esac
+
+    case $scenario in
+      testing|stable)
+        if ! "$check" --check >"$T/stdout" 2>"$T/stderr"; then
+          bad "$case_name" "$(head -n 1 "$T/stderr")"
+        elif [[ $(head -n 1 "$T/stdout") != "$expected" ]]; then
+          bad "$case_name" 'unexpected release summary'
+        else
+          ok "$case_name"
+        fi
+        ;;
+      *)
+        if expect_fail "$case_name" "$expected" "$check" --check; then
+          ok "$case_name"
+        fi
+        ;;
+    esac
+  done
+}
+
 case ${1:-} in
-  ''|fetch|stage|package) ;;
+  ''|fetch|stage|package|preflight) ;;
   *) printf 'FAIL: unknown release test group %s\n' "$1" >&2; exit 1 ;;
 esac
 
@@ -408,7 +489,8 @@ case ${1:-} in
   fetch) fetch_tests ;;
   stage) stage_tests ;;
   package) package_tests ;;
-  '') fetch_tests; stage_tests; package_tests ;;
+  preflight) preflight_tests ;;
+  '') fetch_tests; stage_tests; package_tests; preflight_tests ;;
 esac
 
 if (( failed > 0 )); then
