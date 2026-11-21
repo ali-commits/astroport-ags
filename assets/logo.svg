@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>AstroPort logo</title>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#172345"/>
+  <circle cx="23" cy="19" r="1.5" fill="#79e4f3"/>
+  <circle cx="47" cy="23" r="1.5" fill="#79e4f3"/>
+  <g fill="none" stroke="#eff8ff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M25 40c0-11 3-19 12-24 6 8 6 17 0 27l-12-3zm0-9-7 5-2 9 9-4m15-4 4 8-3 8-6-10m-9 4-3 6"/>
+    <circle cx="34" cy="28" r="3.5"/>
+  </g>
+</svg>
