@@ -221,7 +221,7 @@ pub fn plan(l: &Launch, params: &Value) -> Result<Value, String> {
         "env": env,
         "cwd": run,
         "writable": [run, l.data.join("saves")],
-        "native_frames": false,
+        "native_frames": true,
         "controllers": ["dualsense"],
         "applied": {
             "display.fps": fps,

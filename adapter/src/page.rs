@@ -128,7 +128,9 @@ pub fn game_page(
         let id = item["id"].as_str().unwrap();
         item["default"] = defaults[id].clone();
         item["scope"] = json!("game_on_device");
-        item["restart"] = json!("next_launch");
+        if item.get("restart").is_none() {
+            item["restart"] = json!("next_launch");
+        }
         item
     };
     let mut sections = Vec::new();
@@ -225,6 +227,7 @@ pub fn game_page(
         "title": "Controller",
         "items": [value_item(json!({
             "id": "controller.haptics", "kind": "slider", "label": "Haptic strength",
+            "restart": "live",
             "min": 100, "max": 400, "step": 25, "unit": "%",
             "stops": [{"value": 100, "label": "As sent"}]
         }))]

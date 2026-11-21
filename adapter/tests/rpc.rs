@@ -43,14 +43,20 @@ fn hello_answers_protocol_2() {
     assert_eq!(r["result"]["roles"], json!(["launcher"]));
     assert_eq!(
         r["result"]["features"],
-        json!(["library", "page", "values", "jobs"])
+        json!(["library", "page", "values", "jobs", "live", "native_frames", "metrics"])
     );
     assert_eq!(
         r["result"]["controllers"],
         json!([{"kind": "dualsense",
             "features": ["gyro", "touchpad", "adaptive_triggers", "haptics"]}])
     );
-    assert_eq!(r["result"]["metrics"], json!([]));
+    assert_eq!(
+        r["result"]["metrics"],
+        json!([
+            {"key": "game_fps", "label": "Game FPS", "unit": "fps", "type": "number", "min_interval_ms": 1000},
+            {"key": "frame_time_ms", "label": "Frame time", "unit": "ms", "type": "number", "min_interval_ms": 1000}
+        ])
+    );
 }
 
 #[test]
@@ -272,8 +278,8 @@ fn game_page_supported_not_built() {
     assert_eq!(
         page["standard"],
         json!({
-            "display.resolution": {"level": "honoured", "live": "next_launch", "applier": "source"},
-            "display.fps": {"level": "honoured", "live": "next_launch", "applier": "source", "values": [30, 60]},
+            "display.resolution": {"level": "honoured", "live": "live", "applier": "source"},
+            "display.fps": {"level": "honoured", "live": "live", "applier": "source", "values": [30, 60]},
             "perf.low_latency": {"level": "honoured", "live": "next_launch", "applier": "source", "values": ["off", "on"]}
         })
     );
@@ -284,7 +290,7 @@ fn game_page_supported_not_built() {
         overlay["items"],
         json!([{
             "id": "controller.haptics", "kind": "slider", "label": "Haptic strength",
-            "scope": "game_on_device", "restart": "next_launch", "default": 250,
+            "scope": "game_on_device", "restart": "live", "default": 250,
             "min": 100, "max": 400, "step": 25, "unit": "%",
             "stops": [{"value": 100, "label": "As sent"}]
         }])
@@ -474,7 +480,7 @@ fn launch_env_matches_play_hybrid() {
         .any(|item| item["id"] == "graphics.dlss");
     assert_eq!(e["ASTROHYBRID_DLSS"], if dlss_offered { "1" } else { "0" });
     assert_eq!(r["writable"], json!([run, f.data.join("saves")]));
-    assert_eq!(r["native_frames"], false);
+    assert_eq!(r["native_frames"], true);
     assert_eq!(r["controllers"], json!(["dualsense"]));
     assert_eq!(
         r["applied"],
@@ -697,7 +703,7 @@ fn job_plan_build_returns_the_runner() {
     }
     assert_eq!(
         a.call("hello", json!({"protocol": 2, "ags": "0.20.0", "features": ["jobs"]}))["result"]["features"],
-        json!(["library", "page", "values", "jobs"])
+        json!(["library", "page", "values", "jobs", "live", "native_frames", "metrics"])
     );
 }
 
@@ -725,5 +731,5 @@ fn sheet_points_are_marked() {
     let s = include_str!("../src/sheet.rs");
     let n = |p: &str| s.lines().filter(|l| l.trim_start().starts_with(p)).count();
     assert!(n("// sheet §") >= 10);
-    assert_eq!(n("// SHEET:"), 2); // the overlay placement is resolved
+    assert_eq!(n("// SHEET:"), 2); // both unresolved points concern the library
 }

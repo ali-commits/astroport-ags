@@ -192,12 +192,15 @@ fn dispatch(state: &mut State, method: &str, params: &Value) -> Result<Value, Rp
             "protocol": 2,
             "version": env!("CARGO_PKG_VERSION"),
             "roles": ["launcher"],
-            "features": ["library", "page", "values", "jobs"],
+            "features": ["library", "page", "values", "jobs", "live", "native_frames", "metrics"],
             "controllers": [{
                 "kind": "dualsense",
                 "features": ["gyro", "touchpad", "adaptive_triggers", "haptics"]
             }],
-            "metrics": []
+            "metrics": [
+                {"key": "game_fps", "label": "Game FPS", "unit": "fps", "type": "number", "min_interval_ms": 1000},
+                {"key": "frame_time_ms", "label": "Frame time", "unit": "ms", "type": "number", "min_interval_ms": 1000}
+            ]
         })),
         "library.list" => Ok(state.library_list()),
         "launch.plan" => state.launch_plan(params),

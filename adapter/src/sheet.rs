@@ -44,8 +44,8 @@ pub fn job_plan(install: &Path, data: &Path, dump: &Path) -> Value {
 // sheet §2.2: perf.frame_generation absent = AGS offers lsfg for local play; not declaring it is "does not refuse it".
 pub fn standard_support() -> Value {
     json!({
-        "display.resolution": {"level": "honoured", "live": "next_launch", "applier": "source"},
-        "display.fps": {"level": "honoured", "live": "next_launch", "applier": "source", "values": [30, 60]},
+        "display.resolution": {"level": "honoured", "live": "live", "applier": "source"},
+        "display.fps": {"level": "honoured", "live": "live", "applier": "source", "values": [30, 60]},
         "perf.low_latency": {"level": "honoured", "live": "next_launch", "applier": "source", "values": ["off", "on"]}
     })
 }
