@@ -120,5 +120,13 @@ int main() {
         for (int index = 0; index < 8; index++) Require(out[index] == pad[index], "quad frames are the pad mix");
     }
 
+    Require(AudioOut2PadDeviceWanted("AGS Controller 1", "AGS Controller 1"), "the named sink is used");
+    Require(!AudioOut2PadDeviceWanted("DualSense Wireless Controller", "AGS Controller 1"), "a named sink excludes other pads");
+    Require(!AudioOut2PadDeviceWanted(nullptr, "AGS Controller 1"), "null name with a sink");
+    Require(AudioOut2PadDeviceWanted("DualSense Wireless Controller", ""), "empty sink is today's match");
+    Require(AudioOut2PadDeviceWanted("DualSense Wireless Controller", nullptr), "no sink is today's match");
+    Require(!AudioOut2PadDeviceWanted("HDMI Digital Stereo", nullptr), "no sink still skips other cards");
+    Require(AudioOut2HostVibrationGain(2.5f) == 2.5f, "without the renderer the launch value stays");
+
     return 0;
 }

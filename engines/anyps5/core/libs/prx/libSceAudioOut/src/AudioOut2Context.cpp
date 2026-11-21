@@ -160,7 +160,7 @@ static void OpenPadDevice(AudioOut2Context& context) {
     const int count = SDL_GetNumAudioDevices(0);
     for (int index = 0; index < count; index++) {
         const char* listed = SDL_GetAudioDeviceName(index, 0);
-        if (!AudioOut2IsPadAudioDevice(listed)) continue;
+        if (!AudioOut2PadDeviceWanted(listed, std::getenv("AGS_CONTROLLER_AUDIO_SINK"))) continue;
         const std::string name(listed);
         SDL_AudioSpec native{};
         if (SDL_GetAudioDeviceSpec(index, 0, &native) == 0 && native.channels != 0 && native.channels != AUDIO_OUT2_PAD_CHANNELS) continue;
@@ -232,13 +232,17 @@ static bool VibrationViaHost() {
 #endif
 }
 
-static float VibrationGain() {
+static float LaunchVibrationGain() {
     static const float gain = [] {
         const char* value = std::getenv("APS5_PAD_VIBRATION_GAIN");
         const float parsed = value != nullptr ? std::strtof(value, nullptr) : 1.0f;
         return std::isfinite(parsed) ? std::clamp(parsed, 0.0f, 4.0f) : 1.0f;
     }();
     return gain;
+}
+
+static float VibrationGain() {
+    return AudioOut2HostVibrationGain(LaunchVibrationGain());
 }
 
 class HostVibrationQueue {

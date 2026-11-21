@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -167,7 +168,7 @@ static bool openVibrationDevice(Port& port) {
     if (count < 0) throw std::runtime_error(std::string("AudioOut: could not enumerate controller sound cards: ") + SDL_GetError());
     for (int index = 0; index < count; ++index) {
         const char* name = SDL_GetAudioDeviceName(index, 0);
-        if (!AudioOut2IsPadAudioDevice(name)) continue;
+        if (!AudioOut2PadDeviceWanted(name, std::getenv("AGS_CONTROLLER_AUDIO_SINK"))) continue;
         const std::string controllerName(name);
         SDL_AudioSpec native{};
         if (SDL_GetAudioDeviceSpec(index, 0, &native) == 0 && native.channels != 0 && native.channels != AUDIO_OUT2_PAD_CHANNELS) continue;
