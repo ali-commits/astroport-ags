@@ -34,7 +34,7 @@ for d in "$ROOT"/engines/*/3rdparty/*; do
 done
 
 tracked=$("${G[@]}" ls-files)
-for f in .gitignore LICENSE engines/kyty/LICENSE engines/kyty/LICENSES/Kyty-MIT.txt engines/kyty/UPSTREAM.md \
+for f in .gitignore LICENSE README.md NOTICE.md engines/kyty/LICENSE engines/kyty/LICENSES/Kyty-MIT.txt engines/kyty/UPSTREAM.md \
   engines/anyps5/LICENSE engines/anyps5/UPSTREAM.md patcher/Cargo.toml patches/PPSA21567-1018.json \
   patches/PPSA21567-1019.json scripts/play-hybrid.sh scripts/prx-targets.txt tools/hidtap/Cargo.toml; do
   grep -qxF "$f" <<<"$tracked" || bad "missing tracked file: $f"
