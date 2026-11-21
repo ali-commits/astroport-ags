@@ -1,0 +1,18 @@
+# Whitelist: only the project's own folders are tracked. The run folder, game dumps, SDKs,
+# build output and logs stay local.
+/*
+!/.gitignore
+!/LICENSE
+!/NOTICE.md
+!/README.md
+!/engines/
+!/patcher/
+!/patches/
+!/tools/
+!/scripts/
+!/docs/
+# Build output of the port's own code (anchored: engine sources have folders named target, cache, build)
+/patcher/target/
+/tools/hidtap/target/
+/tools/**/__pycache__/
+/tools/PPSA21567-*.json
