@@ -38,6 +38,7 @@
 #include "graphics/host_gpu/renderer/frameGen.h"
 #include "graphics/presentation/window/f32FlushSelfTest.h"
 #include "graphics/presentation/window/windowInternal.h"
+#include "streaming/sessionEnv.h"
 #include "graphics/shader/recompiler/CodegenOptions.h"
 #include "graphics/shader/recompiler/ir/BindlessBindings.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
@@ -2458,6 +2459,19 @@ void WindowContext::CreateVulkan() {
 			    return graphic_ctx.physical_device.enumerateDeviceExtensionProperties(
 			        nullptr, count, values);
 		    });
+
+#if defined(__linux__)
+		if (Streaming::SessionSocket() != nullptr) {
+			if (HasExtension(available_extensions, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
+			    HasExtension(available_extensions, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME)) {
+				device_extensions.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+				device_extensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+				graphic_ctx.streaming_external_enabled = true;
+			} else {
+				LOGF("Session socket: Vulkan memory/semaphore FD extensions unavailable\n");
+			}
+		}
+#endif
 
 		if (HasExtension(available_extensions, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) {
 			device_extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);

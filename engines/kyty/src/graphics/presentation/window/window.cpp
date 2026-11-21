@@ -25,9 +25,6 @@
 #include "libs/wheelHost.h"
 #include "loader/systemContent.h"
 #include "streaming/liveSettings.h"
-#include "streaming/metricsSource.h"
-#include "streaming/sessionEnv.h"
-#include "streaming/transport.h"
 
 #include <SDL3/SDL.h>
 #include <cstdlib>
@@ -979,12 +976,12 @@ Presenter& WindowInit(uint32_t width, uint32_t height) {
 	window->graphic_ctx.screen_height = height;
 
 	WindowCreate(*window);
+	// The presenter starts the session worker during creation. A settings request that
+	// needs the window must wait until g_window is published.
+	std::lock_guard lock(g_window_lifetime_mutex);
 	window->CreateVulkan();
 	auto& presenter = *window->presenter;
-	{
-		std::lock_guard lock(g_window_lifetime_mutex);
-		g_window = std::move(window);
-	}
+	g_window = std::move(window);
 	return presenter;
 }
 
@@ -992,13 +989,6 @@ void WindowRun() {
 	KYTY_PROFILER_THREAD("Thread_Window");
 	EXIT_IF(g_window == nullptr);
 
-#if defined(__linux__)
-	std::optional<Streaming::Transport> session;
-	if (const char* path = Streaming::SessionSocket()) {
-		session.emplace(path, Streaming::Transport::Completion{},
-		                Streaming::MakeEmulatorMetricsHooks(), Streaming::ApplySettings, true);
-	}
-#endif
 	g_window->Run();
 	g_window->render_context->GetPipelineCache().Save();
 }
