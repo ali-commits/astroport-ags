@@ -1,3 +1,5 @@
+#[allow(dead_code)] // The game page and launch use device defaults in later tasks.
+mod device;
 mod dump;
 mod page;
 mod rpc;
@@ -5,11 +7,16 @@ mod rpc;
 mod settings;
 mod values;
 
+use device::Device;
 use dump::{Detected, HashCache, Versions};
 use page::GAME_ID;
 use rpc::{read_frame, write_frame, RpcError};
 use serde_json::{json, Value};
-use std::{env, fs, io, path::PathBuf, process::ExitCode};
+use std::{
+    env, fs, io,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 use values::Store;
 
 struct State {
@@ -20,10 +27,17 @@ struct State {
     map: Result<settings::SettingsMap, String>,
     store: Store,
     cache: HashCache,
+    device: Option<Device>,
     events: Vec<Value>,
 }
 
 impl State {
+    #[allow(dead_code)] // Used by the game page and launch tasks.
+    fn device(&mut self) -> &Device {
+        self.device
+            .get_or_insert_with(|| device::probe(Path::new("/sys"), device::nvidia_smi))
+    }
+
     fn detect(&mut self) -> Detected {
         dump::detect(
             self.store.dump_folder().as_deref(),
@@ -167,6 +181,7 @@ fn run() -> io::Result<()> {
         map,
         store,
         cache: HashCache::default(),
+        device: None,
         events: Vec::new(),
     };
 
