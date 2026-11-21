@@ -18,6 +18,9 @@ mod rpc;
 // Forking during a fixture copy can inherit its writable executable descriptor.
 static COPY_OR_SPAWN: Mutex<()> = Mutex::new(());
 
+pub const FIXTURE_EBOOT_SHA256: &str =
+    "f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d";
+
 pub struct Fixture {
     pub install: PathBuf,
     pub data: PathBuf,
@@ -48,9 +51,20 @@ impl Fixture {
         let versions_file = patches.join("versions.json");
         let mut versions: Value =
             serde_json::from_slice(&fs::read(&versions_file).unwrap()).unwrap();
-        versions["versions"][1]["eboot_sha256"] =
-            json!("f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d");
+        versions["versions"][1]["eboot_sha256"] = json!(FIXTURE_EBOOT_SHA256);
         fs::write(versions_file, serde_json::to_vec(&versions).unwrap()).unwrap();
+
+        let presets = install.path().join("presets");
+        fs::create_dir(&presets).unwrap();
+        let tools = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../engines/kyty/tools"
+        ));
+        for name in ["u59-preset.json", "u59-preset.PPSA21567.json"] {
+            fs::copy(tools.join(name), presets.join(name)).unwrap();
+        }
+        fs::create_dir(install.path().join("lib")).unwrap();
+        fs::write(install.path().join("lib/libastro_patcher.so"), []).unwrap();
 
         let sce_sys = dump.path().join("sce_sys");
         fs::create_dir(&sce_sys).unwrap();
@@ -71,6 +85,25 @@ impl Fixture {
             dump: dump.path().to_path_buf(),
             _dirs: vec![install, data, dump],
         }
+    }
+
+    pub fn built() -> Fixture {
+        let fixture = Self::new();
+        fixture.write_build_record("1.019", FIXTURE_EBOOT_SHA256);
+        fixture
+    }
+
+    pub fn write_build_record(&self, version: &str, eboot_sha256: &str) {
+        let run = self.data.join("generated").join(format!("run-{version}"));
+        fs::create_dir_all(&run).unwrap();
+        fs::write(run.join("AstroBot"), []).unwrap();
+        let record = json!({
+            "format": 1,
+            "version": version,
+            "eboot_sha256": eboot_sha256,
+            "release": env!("CARGO_PKG_VERSION")
+        });
+        fs::write(run.join("build.json"), record.to_string()).unwrap();
     }
 }
 

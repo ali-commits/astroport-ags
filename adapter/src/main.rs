@@ -1,9 +1,8 @@
-#[allow(dead_code)] // Launch uses the remaining device fields in a later task.
 mod device;
 mod dump;
+mod launch;
 mod page;
 mod rpc;
-#[allow(dead_code)] // Launch uses the remaining settings map fields in a later task.
 mod settings;
 mod sheet;
 mod values;
@@ -84,6 +83,51 @@ impl State {
         ))
     }
 
+    fn launch_plan(&mut self, params: &Value) -> Result<Value, RpcError> {
+        if params["game"] != GAME_ID {
+            return Err(RpcError::new("not-found", "AstroPort has no such game."));
+        }
+        let failed = |message: &str| RpcError::new("failed", message);
+        let (entry, eboot_sha256) = match self.detect() {
+            Detected::Supported {
+                entry,
+                eboot_sha256,
+                ..
+            } => (entry, eboot_sha256),
+            Detected::Unsupported { message, .. } => return Err(failed(&message)),
+            Detected::NotSet => return Err(failed("Choose the folder of your Astro Bot dump.")),
+            Detected::NotFound => return Err(failed("No Astro Bot dump in this folder.")),
+        };
+        if !dump::built(
+            &self.data,
+            &entry.version,
+            &eboot_sha256,
+            env!("CARGO_PKG_VERSION"),
+        ) {
+            return Err(failed("Build the game files first."));
+        }
+        let device = self.device();
+        let defaults = device::defaults(device);
+        let screen = device.screen;
+        let map = self
+            .map
+            .as_ref()
+            .map_err(|_| failed(DAMAGED_INSTALLATION))?;
+        let available = map
+            .available(&self.install.join("patches").join(&entry.patches))
+            .map_err(|_| failed(DAMAGED_INSTALLATION))?;
+        let launch = launch::Launch {
+            install: &self.install,
+            data: &self.data,
+            entry: &entry,
+            map,
+            available: &available,
+            defaults: page::item_defaults(map, &available, &defaults),
+            screen,
+        };
+        launch::plan(&launch, params).map_err(|message| failed(&message))
+    }
+
     fn library_list(&mut self) -> Value {
         let (directory, version, installed) = match self.detect() {
             Detected::Supported {
@@ -140,6 +184,7 @@ fn dispatch(state: &mut State, method: &str, params: &Value) -> Result<Value, Rp
             "metrics": []
         })),
         "library.list" => Ok(state.library_list()),
+        "launch.plan" => state.launch_plan(params),
         "values.get" => match params["scope"].as_str() {
             Some("machine") => Ok(json!({"values": state.store.machine()})),
             Some("game") => Ok(json!({"values": {}})),
