@@ -42,8 +42,20 @@ fn assets_exist_and_are_inert_svg() {
     for key in ["icon", "logo", "badge"] {
         assert!(assets.contains_key(key), "Missing {key} asset");
     }
+    // AGS (ags-extension manifest.rs `image`): icon and logo PNG or WebP, only the badge may be SVG;
+    // install.rs: each asset a regular file of at most 2 MiB.
+    for key in ["icon", "logo"] {
+        let path = assets[key].as_str().unwrap();
+        assert!(path.ends_with(".png"), "{key} must be a PNG, not {path}");
+        let png = fs::read(Path::new(ROOT).join(path)).unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "{path} is not a PNG");
+        assert!(png.len() <= 2 * 1024 * 1024, "{path} is larger than 2 MiB");
+    }
     for entry in assets.values() {
         let path = entry.as_str().unwrap();
+        if !path.ends_with(".svg") {
+            continue;
+        }
         let svg = fs::read_to_string(Path::new(ROOT).join(path)).unwrap();
         assert!(svg.len() < 4096, "{path} exceeds the SVG size limit");
         assert!(svg.starts_with("<svg "), "{path} has no SVG root");

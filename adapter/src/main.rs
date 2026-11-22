@@ -182,7 +182,8 @@ fn dispatch(state: &mut State, method: &str, params: &Value) -> Result<Value, Rp
     match method {
         "hello" => Ok(json!({
             "protocol": 2,
-            "version": env!("CARGO_PKG_VERSION"),
+            // AGS requires the installed manifest's version here (it refuses a mismatch at install).
+            "version": state.release.as_deref().unwrap_or(env!("CARGO_PKG_VERSION")),
             "roles": ["launcher"],
             "features": ["library", "page", "values", "jobs", "live", "native_frames", "metrics"],
             "controllers": [{

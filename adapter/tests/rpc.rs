@@ -330,6 +330,7 @@ fn build_release_matches_the_installed_manifest() {
     fs::write(path, record.to_string()).unwrap();
 
     let mut a = Adapter::spawn(&f);
+    assert_eq!(a.call("hello", json!({}))["result"]["version"], "9.0.0-testing.1");
     set_dump(&mut a, &f);
     assert_eq!(
         a.call("library.list", json!({}))["result"]["games"][0]["installed"],
