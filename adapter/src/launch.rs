@@ -75,6 +75,47 @@ pub struct Launch<'a> {
     pub available: &'a BTreeSet<String>,
     pub defaults: BTreeMap<String, Value>,
     pub screen: Option<(u32, u32)>,
+    pub nvidia: bool,
+}
+
+/// Heights of the game's fixed render patches (`graphics.render` in settings.json).
+const RENDER_HEIGHTS: [u32; 4] = [1080, 1368, 1872, 2160];
+
+/// The render patch whose height is nearest `target` (the lower one on a tie).
+fn nearest_render(target: u32) -> String {
+    let height = RENDER_HEIGHTS
+        .into_iter()
+        .min_by_key(|h| h.abs_diff(target))
+        .unwrap();
+    format!("{height}p")
+}
+
+/// `graphics.render` and `graphics.dlss` from the sheet §2.8 upscaling keys (decision 0052).
+/// A host that sends no `perf.upscaling` gets the values saved for the old page items, else
+/// 100% of the output height without DLSS.
+fn upscaling(nvidia: bool, standard: &Value, values: &Value, output_height: u32) -> (String, bool) {
+    if let Some(on) = standard["perf.upscaling"].as_bool() {
+        // DLSS is the only upscaler declared, so anything but "none" (or a missing key) means DLSS.
+        let on = on && nvidia && standard["perf.upscaler"] != "none";
+        let percent = if on {
+            standard["perf.render_scale"]
+                .as_u64()
+                .filter(|p| (1..=100).contains(p))
+                .unwrap_or(63) as u32
+        } else {
+            100
+        };
+        let target = u64::from(output_height) * u64::from(percent) / 100;
+        return (nearest_render(target.min(u64::from(u32::MAX)) as u32), on);
+    }
+    let render = values["graphics.render"]
+        .as_str()
+        .filter(|value| RENDER_HEIGHTS.iter().any(|h| format!("{h}p") == *value))
+        .map_or_else(|| nearest_render(output_height), str::to_owned);
+    (
+        render,
+        nvidia && values["graphics.dlss"].as_bool() == Some(true),
+    )
 }
 
 fn resolution(value: &str) -> Option<(u32, u32)> {
@@ -103,11 +144,19 @@ pub fn plan(l: &Launch, params: &Value) -> Result<Value, String> {
         Some("off") => "off",
         _ => "on",
     };
+    let (width, height) = standard["display.resolution"]
+        .as_str()
+        .and_then(resolution)
+        .or(l.screen)
+        .unwrap_or((3840, 2160));
     let fullscreen = standard["fullscreen"].as_bool().unwrap_or(true);
+    let (render, dlss) = upscaling(l.nvidia, standard, values, height);
     let mut chosen = BTreeMap::from([
         ("display.fps".to_owned(), fps.to_string()),
         ("perf.low_latency".to_owned(), low_latency.to_owned()),
         ("fullscreen".to_owned(), fullscreen.to_string()),
+        ("graphics.render".to_owned(), render),
+        ("graphics.dlss".to_owned(), dlss.to_string()),
     ]);
     for (key, setting) in &l.map.settings {
         if chosen.contains_key(key) {
@@ -119,10 +168,7 @@ pub fn plan(l: &Launch, params: &Value) -> Result<Value, String> {
                 .filter(|value| setting.values.contains_key(*value))
                 .unwrap_or(default)
                 .to_owned(),
-            Some(Value::Bool(default)) if key != "graphics.dlss" || *default => {
-                values[key].as_bool().unwrap_or(*default).to_string()
-            }
-            Some(Value::Bool(_)) => "false".to_owned(),
+            Some(Value::Bool(default)) => values[key].as_bool().unwrap_or(*default).to_string(),
             None if key == "graphics.ultrawide" => "false".to_owned(),
             _ => return Err(DAMAGED_INSTALLATION.into()),
         };
@@ -144,11 +190,6 @@ pub fn plan(l: &Launch, params: &Value) -> Result<Value, String> {
         .map_err(|_| DAMAGED_INSTALLATION)?;
     let (enable, skip) = l.map.patch_env(&selection);
 
-    let (width, height) = standard["display.resolution"]
-        .as_str()
-        .and_then(resolution)
-        .or(l.screen)
-        .unwrap_or((3840, 2160));
     let haptics = values["controller.haptics"]
         .as_u64()
         .filter(|value| (100..=400).contains(value))
@@ -233,6 +274,65 @@ pub fn plan(l: &Launch, params: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upscaling_maps_to_render_patches() {
+        let on = |p: u64| json!({"perf.upscaling": true, "perf.upscaler": "dlss", "perf.render_scale": p});
+        let off =
+            json!({"perf.upscaling": false, "perf.upscaler": "none", "perf.render_scale": 100});
+        let none = json!({});
+        // 4K output: 50% -> 1080, 63% -> 1361 -> 1368, 87% -> 1879 -> 1872, off -> 2160.
+        assert_eq!(
+            upscaling(true, &on(50), &none, 2160),
+            ("1080p".into(), true)
+        );
+        assert_eq!(
+            upscaling(true, &on(63), &none, 2160),
+            ("1368p".into(), true)
+        );
+        assert_eq!(
+            upscaling(true, &on(87), &none, 2160),
+            ("1872p".into(), true)
+        );
+        assert_eq!(upscaling(true, &off, &none, 2160), ("2160p".into(), false));
+        // 1440p output, off: nearest patch to 1440 is 1368.
+        assert_eq!(upscaling(true, &off, &none, 1440), ("1368p".into(), false));
+        // No DLSS without NVIDIA, even if a host sends it on.
+        assert_eq!(
+            upscaling(false, &on(50), &none, 2160),
+            ("2160p".into(), false)
+        );
+        // Old hosts: the saved page values carry over, else 100% without DLSS.
+        let old = json!({"graphics.render": "1872p", "graphics.dlss": true});
+        assert_eq!(upscaling(true, &none, &old, 2160), ("1872p".into(), true));
+        assert_eq!(upscaling(false, &none, &old, 2160), ("1872p".into(), false));
+        assert_eq!(
+            upscaling(true, &none, &json!({"graphics.render": "4320p"}), 1080),
+            ("1080p".into(), false)
+        );
+        // Edge cases: missing upscaler means DLSS, "none" means off, bad percents fall back to 63.
+        let no_upscaler = json!({"perf.upscaling": true, "perf.render_scale": 50});
+        assert_eq!(
+            upscaling(true, &no_upscaler, &none, 2160),
+            ("1080p".into(), true)
+        );
+        let upscaler_none = json!({"perf.upscaling": true, "perf.upscaler": "none"});
+        assert_eq!(
+            upscaling(true, &upscaler_none, &none, 2160),
+            ("2160p".into(), false)
+        );
+        assert_eq!(upscaling(true, &on(0), &none, 2160), ("1368p".into(), true));
+        assert_eq!(
+            upscaling(true, &on(101), &none, 2160),
+            ("1368p".into(), true)
+        );
+        assert_eq!(upscaling(true, &on(87), &none, 2), ("1080p".into(), true));
+        assert_eq!(upscaling(true, &off, &none, 8192), ("2160p".into(), false));
+        assert_eq!(
+            upscaling(true, &off, &none, u32::MAX),
+            ("2160p".into(), false)
+        );
+    }
 
     #[test]
     fn languages() {

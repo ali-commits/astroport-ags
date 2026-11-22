@@ -67,11 +67,9 @@ pub fn item_defaults(
         .map(|entry| &entry.id)
         .collect();
     let mut defaults = BTreeMap::from([
-        ("graphics.render".into(), json!(d.render)),
         ("graphics.lighting".into(), json!(d.lighting)),
         ("graphics.detail".into(), json!("medium")),
         ("graphics.textures".into(), json!("soft")),
-        ("graphics.dlss".into(), json!(d.dlss)),
         ("controller.haptics".into(), json!(250)),
         ("controller.rumble".into(), json!(true)),
         ("game.skip_intro".into(), json!(true)),
@@ -144,17 +142,6 @@ pub fn game_page(
 
     let mut graphics = vec![
         choice(
-            "graphics.render",
-            "Render resolution",
-            &[
-                ("1080p", "1080p"),
-                ("1368p", "1368p"),
-                ("1872p", "1872p"),
-                ("2160p", "2160p"),
-            ],
-            false,
-        ),
-        choice(
             "graphics.lighting",
             "Lighting",
             &[("fast", "Fast"), ("original", "Original")],
@@ -181,11 +168,6 @@ pub fn game_page(
         graphics.push(json!({
             "id": "graphics.ultrawide", "kind": "switch", "label": "Ultrawide (21:9)",
             "help": "Renders at 3440x1440."
-        }));
-    }
-    if d.dlss {
-        graphics.push(json!({
-            "id": "graphics.dlss", "kind": "switch", "label": "DLSS", "help": "NVIDIA upscaling."
         }));
     }
     sections.push(panel(
@@ -232,7 +214,7 @@ pub fn game_page(
             "stops": [{"value": 100, "label": "As sent"}]
         }))]
     }));
-    json!({"sections": sections, "standard": sheet::standard_support()})
+    json!({"sections": sections, "standard": sheet::standard_support(d.dlss)})
 }
 
 pub fn check_limits(page: &Value) -> Result<(), String> {
@@ -305,7 +287,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test]
-    fn dlss_only_on_nvidia() {
+    fn upscaling_only_on_nvidia() {
         let patches = Path::new(env!("CARGO_MANIFEST_DIR")).join("../patches");
         let map = settings::load(&patches.join("settings.json")).unwrap();
         let patch_file = "PPSA21567-1018.json";
@@ -320,22 +302,26 @@ mod tests {
             },
             eboot_sha256: String::new(),
         };
-        for dlss in [true, false] {
+        for nvidia in [true, false] {
             let device = Defaults {
-                render: "1080p",
                 lighting: "fast",
-                dlss,
+                dlss: nvidia,
             };
             let page = game_page(&detected, false, &map, &available, &device);
             check_limits(&page).unwrap();
-            let graphics = page["sections"][1]["items"].as_array().unwrap();
-            let dlss_item = graphics.iter().find(|item| item["id"] == "graphics.dlss");
-            assert_eq!(
-                dlss_item.map(|item| &item["default"]),
-                dlss.then_some(&json!(true))
-            );
+            let ids: Vec<_> = page["sections"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|section| section["items"].as_array().unwrap())
+                .map(|item| item["id"].as_str().unwrap())
+                .collect();
+            assert!(!ids.contains(&"graphics.render") && !ids.contains(&"graphics.dlss"));
+            let standard = page["standard"].as_object().unwrap();
+            for key in ["perf.upscaling", "perf.upscaler", "perf.render_scale"] {
+                assert_eq!(standard.contains_key(key), nvidia, "{key}");
+            }
             let defaults = item_defaults(&map, &available, &device);
-            assert_eq!(defaults["graphics.dlss"], dlss);
             assert!(!defaults.contains_key("graphics.ultrawide"));
         }
     }

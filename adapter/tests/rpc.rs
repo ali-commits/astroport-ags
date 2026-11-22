@@ -4,14 +4,17 @@ use common::{Adapter, Fixture, FIXTURE_EBOOT_SHA256};
 use serde_json::{json, Value};
 use std::fs;
 
-fn item<'a>(page: &'a Value, id: &str) -> &'a Value {
+fn find_item<'a>(page: &'a Value, id: &str) -> Option<&'a Value> {
     page["sections"]
         .as_array()
         .unwrap()
         .iter()
         .flat_map(|section| section["items"].as_array().unwrap())
         .find(|item| item["id"] == id)
-        .unwrap_or_else(|| panic!("no item {id} in {page}"))
+}
+
+fn item<'a>(page: &'a Value, id: &str) -> &'a Value {
+    find_item(page, id).unwrap_or_else(|| panic!("no item {id} in {page}"))
 }
 
 fn set_dump(a: &mut Adapter, f: &Fixture) {
@@ -43,7 +46,15 @@ fn hello_answers_protocol_2() {
     assert_eq!(r["result"]["roles"], json!(["launcher"]));
     assert_eq!(
         r["result"]["features"],
-        json!(["library", "page", "values", "jobs", "live", "native_frames", "metrics"])
+        json!([
+            "library",
+            "page",
+            "values",
+            "jobs",
+            "live",
+            "native_frames",
+            "metrics"
+        ])
     );
     assert_eq!(
         r["result"]["controllers"],
@@ -259,12 +270,10 @@ fn game_page_supported_not_built() {
     );
     assert_eq!(item(&page, "build")["job"], true);
     assert!(item(&page, "graphics.ultrawide").is_object());
-    let render = item(&page, "graphics.render");
-    assert!(render["options"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|option| option["value"] == render["default"]));
+    assert!(
+        find_item(&page, "graphics.render").is_none()
+            && find_item(&page, "graphics.dlss").is_none()
+    );
     assert_eq!(
         item(&page, "advanced.patches")["default"],
         json!([
@@ -275,14 +284,23 @@ fn game_page_supported_not_built() {
             "video.speed"
         ])
     );
-    assert_eq!(
-        page["standard"],
-        json!({
-            "display.resolution": {"level": "honoured", "live": "live", "applier": "source"},
-            "display.fps": {"level": "honoured", "live": "next_launch", "applier": "source", "values": [30, 60]},
-            "perf.low_latency": {"level": "honoured", "live": "next_launch", "applier": "source", "values": ["off", "on"]}
-        })
-    );
+    let mut expected = json!({
+        "display.resolution": {"level": "honoured", "live": "live", "applier": "source"},
+        "display.fps": {"level": "honoured", "live": "next_launch", "applier": "source", "values": [30, 60]},
+        "perf.low_latency": {"level": "honoured", "live": "next_launch", "applier": "source", "values": ["off", "on"]}
+    });
+    // sheet §2.8: the three upscaling keys only on an NVIDIA GPU (this machine's GPU decides).
+    if page["standard"].get("perf.upscaler").is_some() {
+        expected["perf.upscaling"] = json!({"level": "honoured", "default": false});
+        expected["perf.upscaler"] =
+            json!({"level": "honoured", "values": ["dlss"], "method": "dlss"});
+        expected["perf.render_scale"] = json!({"level": "honoured", "choices": [
+            {"value": 50, "label": "Performance"},
+            {"value": 63, "label": "Balanced"},
+            {"value": 87, "label": "Quality"}
+        ], "default": 63});
+    }
+    assert_eq!(page["standard"], expected);
     let overlay = &sections[5];
     assert_eq!(overlay["surface"], "overlay");
     assert!(overlay.get("tab").is_none());
@@ -330,7 +348,10 @@ fn build_release_matches_the_installed_manifest() {
     fs::write(path, record.to_string()).unwrap();
 
     let mut a = Adapter::spawn(&f);
-    assert_eq!(a.call("hello", json!({}))["result"]["version"], "9.0.0-testing.1");
+    assert_eq!(
+        a.call("hello", json!({}))["result"]["version"],
+        "9.0.0-testing.1"
+    );
     set_dump(&mut a, &f);
     assert_eq!(
         a.call("library.list", json!({}))["result"]["games"][0]["installed"],
@@ -525,14 +546,13 @@ fn launch_env_matches_play_hybrid() {
         .unwrap()
         .contains("precise frame cap 60 fps"));
     assert!(e.get("LD_PRELOAD").is_none() && e.get("LD_LIBRARY_PATH").is_none());
-    let page = describe_game(&mut a);
-    let dlss_offered = page["sections"]
-        .as_array()
+    // No upscaling keys and no old saved values: 100% of the output size, DLSS off.
+    assert_eq!(e["ASTROHYBRID_DLSS"], "0");
+    assert!(e["ASTRO_PATCH_ENABLE"]
+        .as_str()
         .unwrap()
-        .iter()
-        .flat_map(|section| section["items"].as_array().unwrap())
-        .any(|item| item["id"] == "graphics.dlss");
-    assert_eq!(e["ASTROHYBRID_DLSS"], if dlss_offered { "1" } else { "0" });
+        .split(',')
+        .any(|patch| patch == "fixed render resolution 3840x2160"));
     assert_eq!(r["writable"], json!([run, f.data.join("saves")]));
     assert_eq!(r["native_frames"], true);
     assert_eq!(r["controllers"], json!(["dualsense"]));
@@ -602,17 +622,10 @@ fn stale_values_take_defaults() {
     let f = Fixture::built();
     let mut a = Adapter::spawn(&f);
     set_dump(&mut a, &f);
-    let default_render = item(&describe_game(&mut a), "graphics.render")["default"].clone();
-    let resolution = match default_render.as_str().unwrap() {
-        "1080p" => "1920x1080",
-        "1368p" => "2432x1368",
-        "1872p" => "3328x1872",
-        "2160p" => "3840x2160",
-        other => panic!("unexpected default: {other}"),
-    };
+    let resolution = "3840x2160";
     let reply = launch(
         &mut a,
-        json!({}),
+        json!({"display.resolution": resolution}),
         json!({
             "advanced.patches": ["pad.r1x", "gone.patch"],
             "graphics.render": "4320p", "controller.haptics": "loud"
@@ -640,6 +653,53 @@ fn stale_values_take_defaults() {
         .as_str()
         .unwrap()
         .contains("havok contact query"));
+}
+
+#[test]
+fn upscaling_picks_the_render_patch_and_dlss() {
+    let f = Fixture::built();
+    let mut a = Adapter::spawn(&f);
+    set_dump(&mut a, &f);
+    let nvidia = describe_game(&mut a)["standard"]
+        .get("perf.upscaler")
+        .is_some();
+    let mut patches = |standard: Value| {
+        let reply = launch(&mut a, standard, json!({}));
+        let env = reply["result"]["env"].clone();
+        let enabled: Vec<String> = env["ASTRO_PATCH_ENABLE"]
+            .as_str()
+            .unwrap()
+            .split(',')
+            .map(str::to_owned)
+            .collect();
+        (
+            enabled,
+            env["ASTROHYBRID_DLSS"].as_str().unwrap().to_owned(),
+        )
+    };
+    let (enabled, dlss) = patches(json!({
+        "display.resolution": "3840x2160",
+        "perf.upscaling": true, "perf.upscaler": "dlss", "perf.render_scale": 50
+    }));
+    let (render, want_dlss) = if nvidia {
+        ("1920x1080", "1")
+    } else {
+        ("3840x2160", "0")
+    };
+    assert!(
+        enabled.contains(&format!("fixed render resolution {render}")),
+        "{enabled:?}"
+    );
+    assert_eq!(dlss, want_dlss);
+    let (enabled, dlss) = patches(json!({
+        "display.resolution": "3840x2160",
+        "perf.upscaling": false, "perf.upscaler": "none", "perf.render_scale": 100
+    }));
+    assert!(
+        enabled.contains(&"fixed render resolution 3840x2160".to_owned()),
+        "{enabled:?}"
+    );
+    assert_eq!(dlss, "0");
 }
 
 #[test]
@@ -710,13 +770,26 @@ fn job_plan_build_returns_the_runner() {
     assert_eq!(r["label"], "Build game files");
     assert_eq!(
         r["argv"],
-        json!([f.install.join("bin/astroport-run"), "build", "--dump", f.dump,
-            "--install", f.install, "--data", f.data])
+        json!([
+            f.install.join("bin/astroport-run"),
+            "build",
+            "--dump",
+            f.dump,
+            "--install",
+            f.install,
+            "--data",
+            f.data
+        ])
     );
     assert_eq!(
         r["steps"],
-        json!(["Check the game dump", "Unwrap the game files", "Convert for Linux",
-            "Set up the game folder", "Record the result"])
+        json!([
+            "Check the game dump",
+            "Unwrap the game files",
+            "Convert for Linux",
+            "Set up the game folder",
+            "Record the result"
+        ])
     );
     assert!(r["steps"]
         .as_array()
@@ -743,7 +816,10 @@ fn job_plan_build_returns_the_runner() {
         (Some(true), Some(false), Some(false))
     );
     assert_eq!(
-        a.call("job.plan", json!({"job": "other", "game": "PPSA21567", "params": {}}))["error"],
+        a.call(
+            "job.plan",
+            json!({"job": "other", "game": "PPSA21567", "params": {}})
+        )["error"],
         json!({"code": "not-found", "message": "AstroPort has no such job."})
     );
     for params in [
@@ -756,8 +832,19 @@ fn job_plan_build_returns_the_runner() {
         );
     }
     assert_eq!(
-        a.call("hello", json!({"protocol": 2, "ags": "0.20.0", "features": ["jobs"]}))["result"]["features"],
-        json!(["library", "page", "values", "jobs", "live", "native_frames", "metrics"])
+        a.call(
+            "hello",
+            json!({"protocol": 2, "ags": "0.20.0", "features": ["jobs"]})
+        )["result"]["features"],
+        json!([
+            "library",
+            "page",
+            "values",
+            "jobs",
+            "live",
+            "native_frames",
+            "metrics"
+        ])
     );
 }
 
@@ -772,7 +859,10 @@ fn job_plan_refuses_an_unsupported_dump() {
     let mut a = Adapter::spawn(&f);
     set_dump(&mut a, &f);
     assert_eq!(
-        a.call("job.plan", json!({"job": "build", "game": "PPSA21567", "params": {}}))["error"],
+        a.call(
+            "job.plan",
+            json!({"job": "build", "game": "PPSA21567", "params": {}})
+        )["error"],
         json!({
             "code": "failed",
             "message": "Version 1.020 is not supported. AstroPort runs 1.018 and 1.019."

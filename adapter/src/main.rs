@@ -137,6 +137,7 @@ impl State {
             available: &available,
             defaults: page::item_defaults(map, &available, &defaults),
             screen,
+            nvidia: defaults.dlss,
         };
         launch::plan(&launch, params).map_err(|message| failed(&message))
     }

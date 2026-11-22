@@ -127,20 +127,13 @@ pub fn nvidia_smi() -> Option<String> {
 
 #[derive(Debug, PartialEq)]
 pub struct Defaults {
-    pub render: &'static str,
     pub lighting: &'static str,
     pub dlss: bool,
 }
 
 pub fn defaults(d: &Device) -> Defaults {
     let vram = d.vram_mib.unwrap_or(0);
-    let screen_height = d.screen.map_or(1080, |(_, height)| height);
-    let render = [(2160, 16, "2160p"), (1872, 12, "1872p"), (1368, 8, "1368p")]
-        .into_iter()
-        .find(|(height, gib, _)| *height <= screen_height && gib * 1024 <= vram)
-        .map_or("1080p", |(_, _, name)| name);
     Defaults {
-        render,
         lighting: if vram >= 16 * 1024 {
             "original"
         } else {
@@ -197,7 +190,6 @@ mod tests {
         assert_eq!(
             defaults(&d),
             Defaults {
-                render: "1872p",
                 lighting: "fast",
                 dlss: true,
             }
@@ -226,7 +218,6 @@ mod tests {
         assert_eq!(
             defaults(&d),
             Defaults {
-                render: "2160p",
                 lighting: "original",
                 dlss: false,
             }
@@ -234,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn screen_caps_render() {
+    fn largest_connected_screen() {
         let sys = fake(
             &[("card0", "0x1002", Some(24 * 1024 * 1024 * 1024))],
             &[
@@ -244,7 +235,6 @@ mod tests {
         );
         let d = probe(sys.path(), || None);
         assert_eq!(d.screen, Some((2560, 1440)));
-        assert_eq!(defaults(&d).render, "1368p");
     }
 
     #[test]
@@ -259,7 +249,6 @@ mod tests {
             }
         );
         let safe = Defaults {
-            render: "1080p",
             lighting: "fast",
             dlss: false,
         };
@@ -275,6 +264,5 @@ mod tests {
         );
         let d = probe(sys.path(), || None);
         assert_eq!(d.screen, None);
-        assert_eq!(defaults(&d).render, "1080p");
     }
 }
