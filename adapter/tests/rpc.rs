@@ -295,9 +295,9 @@ fn game_page_supported_not_built() {
         expected["perf.upscaler"] =
             json!({"level": "honoured", "values": ["dlss"], "method": "dlss"});
         expected["perf.render_scale"] = json!({"level": "honoured", "choices": [
-            {"value": 50, "label": "Performance"},
-            {"value": 63, "label": "Balanced"},
-            {"value": 87, "label": "Quality"}
+            {"value": 50, "label": "Performance", "render": "1920x1080"},
+            {"value": 63, "label": "Balanced", "render": "2432x1368"},
+            {"value": 87, "label": "Quality", "render": "3328x1872"}
         ], "default": 63});
     }
     assert_eq!(page["standard"], expected);

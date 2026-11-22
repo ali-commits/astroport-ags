@@ -40,6 +40,7 @@ pub fn job_plan(install: &Path, data: &Path, dump: &Path) -> Value {
 // sheet §6.6: With Step 5 live support, controller.haptics appears once, in the game overlay with no tab (m1 §1.2.2 and §1.3).
 // sheet §1.2, §2.2: standard is a map key -> Support {level, live, applier, values, min, max, requires, method}; level honoured|override|fixed|unsupported, live a restart word, applier source|ags.
 // sheet §2.8 (decision 0052): upscaling is perf.upscaling, perf.upscaler and perf.render_scale; declared on NVIDIA only (DLSS), omitted elsewhere.
+// 0052 addendum: each step names its fixed render patch ("render"); launch maps the percent of the output height to the nearest patch, so the size is exact at 4K output.
 // sheet §2.5: perf.low_latency reaches launch.plan standard from M4 (honoured, applier source); its registry default is "off".
 // sheet §2.8: Support.default is allowed only for the three upscaling keys, so low latency cannot default to "on" from here.
 // sheet §2.2: perf.frame_generation absent = AGS offers lsfg for local play; not declaring it is "does not refuse it".
@@ -54,9 +55,9 @@ pub fn standard_support(nvidia: bool) -> Value {
         standard["perf.upscaler"] =
             json!({"level": "honoured", "values": ["dlss"], "method": "dlss"});
         standard["perf.render_scale"] = json!({"level": "honoured", "choices": [
-            {"value": 50, "label": "Performance"},
-            {"value": 63, "label": "Balanced"},
-            {"value": 87, "label": "Quality"}
+            {"value": 50, "label": "Performance", "render": "1920x1080"},
+            {"value": 63, "label": "Balanced", "render": "2432x1368"},
+            {"value": 87, "label": "Quality", "render": "3328x1872"}
         ], "default": 63});
     }
     standard
