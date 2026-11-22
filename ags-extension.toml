@@ -1,7 +1,7 @@
 # AGS extension manifest (protocol 2). The copy at the tagged commit is what AGS reads.
 id = "astroport"
 name = "AstroPort"
-version = "0.1.0-testing.2"
+version = "0.1.0-testing.3"
 license = "GPL-2.0-only"
 protocol = 2
 roles = ["launcher"]
@@ -10,7 +10,7 @@ adapter = "bin/astroport-adapter"
 [assets]
 icon = "assets/icon.png"
 logo = "assets/logo.png"
-badge = "assets/badge.svg"
+badge = "assets/badge.png"
 
 [[channels]]
 id = "stable"

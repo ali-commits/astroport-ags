@@ -40,7 +40,7 @@ for f in .gitignore LICENSE README.md NOTICE.md engines/kyty/LICENSE engines/kyt
   scripts/build-release.sh scripts/release/dlss.env scripts/release/fetch-dlss.sh scripts/release/stage.sh \
   scripts/release/package.sh scripts/release/inside.sh scripts/release/Containerfile scripts/release/test.sh docs/release.md \
   ags-extension.toml adapter/Cargo.toml adapter/Cargo.lock adapter/src/main.rs patches/settings.json patches/versions.json \
-  assets/icon.svg assets/logo.svg assets/icon.png assets/logo.png assets/badge.svg runner/Cargo.toml runner/Cargo.lock \
+  assets/icon.svg assets/logo.svg assets/icon.png assets/logo.png assets/badge.png assets/badge.svg runner/Cargo.toml runner/Cargo.lock \
   engines/kyty/src/streaming/transport.cpp patcher/src/lib.rs; do
   grep -qxF "$f" <<<"$tracked" || bad "missing tracked file: $f"
 done
