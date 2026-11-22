@@ -81,10 +81,12 @@ pub struct Launch<'a> {
 /// Heights of the game's fixed render patches (`graphics.render` in settings.json).
 const RENDER_HEIGHTS: [u32; 4] = [1080, 1368, 1872, 2160];
 
-/// The render patch whose height is nearest `target` (the lower one on a tie).
+/// The render patch whose height is nearest `target`, the larger one on a tie (as AGS snaps
+/// the Render quality label to `render_sizes`).
 fn nearest_render(target: u32) -> String {
     let height = RENDER_HEIGHTS
         .into_iter()
+        .rev()
         .min_by_key(|h| h.abs_diff(target))
         .unwrap();
     format!("{height}p")
@@ -332,6 +334,8 @@ mod tests {
             upscaling(true, &off, &none, u32::MAX),
             ("2160p".into(), false)
         );
+        // Ties go to the larger patch: 1224 is halfway between 1080 and 1368.
+        assert_eq!(nearest_render(1224), "1368p");
     }
 
     #[test]

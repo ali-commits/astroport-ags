@@ -287,7 +287,7 @@ fn game_page_supported_not_built() {
     let mut expected = json!({
         "display.resolution": {"level": "honoured", "live": "live", "applier": "source"},
         "display.fps": {"level": "honoured", "live": "next_launch", "applier": "source", "values": [30, 60]},
-        "perf.low_latency": {"level": "honoured", "live": "next_launch", "applier": "source", "values": ["off", "on"]}
+        "perf.low_latency": {"level": "honoured", "live": "next_launch", "applier": "source", "values": ["off", "on"], "default": "on"}
     });
     // sheet §2.8: the three upscaling keys only on an NVIDIA GPU (this machine's GPU decides).
     if page["standard"].get("perf.upscaler").is_some() {
@@ -295,10 +295,10 @@ fn game_page_supported_not_built() {
         expected["perf.upscaler"] =
             json!({"level": "honoured", "values": ["dlss"], "method": "dlss"});
         expected["perf.render_scale"] = json!({"level": "honoured", "choices": [
-            {"value": 50, "label": "Performance", "render": "1920x1080"},
-            {"value": 63, "label": "Balanced", "render": "2432x1368"},
-            {"value": 87, "label": "Quality", "render": "3328x1872"}
-        ], "default": 63});
+            {"value": 50, "label": "Performance"},
+            {"value": 63, "label": "Balanced"},
+            {"value": 87, "label": "Quality"}
+        ], "default": 63, "render_sizes": ["1920x1080", "2432x1368", "3328x1872", "3840x2160"]});
     }
     assert_eq!(page["standard"], expected);
     let overlay = &sections[5];
