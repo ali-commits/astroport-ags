@@ -67,22 +67,25 @@ fn sce_module_link_is_replaced_not_followed() {
 }
 
 #[test]
-fn shims_win_over_anyps5_modules() {
-    let root = temp_dir("shims");
+fn forwarders_replace_the_anyps5_graphics_libraries() {
+    let root = temp_dir("forwarders");
     let install = fake_install(&root.join("install"));
     let run = root.join("run");
-    assert_eq!(install_libs(&install, &run).unwrap(), 8);
+    assert_eq!(install_libs(&install, &run).unwrap(), 9);
     let libs = run.join("libs");
     assert_eq!(
         fs::read_to_string(libs.join("libSceAgc.prx")).unwrap(),
-        "shim libSceAgc.prx"
+        "forwarder libSceAgc.prx"
     );
     assert_eq!(
         fs::read_to_string(libs.join("libkernel.prx")).unwrap(),
         "anyps5 libkernel.prx"
     );
-    assert!(libs.join("libAstroHybridHost.prx").is_file());
-    assert!(libs.join("libkyty_gpu.so").is_file());
+    for name in ["libAstroportHost.prx", "libkyty_renderer.so", "libastroport_bridge.so", "libSceVideoOut.prx"] {
+        assert!(libs.join(name).is_file(), "missing {name}");
+    }
+    fs::remove_file(install.join("anyps5/libs/libAstroportHost.prx")).unwrap();
+    assert!(install_libs(&install, &run).is_err());
     assert_eq!(
         fs::read(libs.join("libnvidia-ngx-dlss.so.310.9.16")).unwrap(),
         b"dlss"
@@ -99,7 +102,7 @@ fn no_dlss_runtime_is_fine() {
     let stale = run.join("libs/libnvidia-ngx-dlss.so.1");
     fs::create_dir_all(stale.parent().unwrap()).unwrap();
     fs::write(&stale, b"old dlss").unwrap();
-    assert_eq!(install_libs(&install, &run).unwrap(), 7);
+    assert_eq!(install_libs(&install, &run).unwrap(), 8);
     assert!(!stale.exists());
     fs::remove_dir_all(root).unwrap();
 }

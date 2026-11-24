@@ -16,6 +16,7 @@
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
 #include "kernel/eventQueue.h"
+#include "kernel/fileSystem.h"
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
 #include "libs/agc.h"
@@ -133,6 +134,9 @@ int Run(const KytyEmbedConfig* config, const KytyEmbedHooks* hooks) {
 	subsystems.Initialize<Profiler::Lifecycle>();
 	subsystems.Initialize<Libs::LibKernel::Memory::Lifecycle>();
 	if (hooks->reserved != nullptr) hooks->reserved();
+	// The pipeline journal reads the boot level from /app0/args.txt through Kyty's mounts.
+	subsystems.Initialize<Libs::LibKernel::FileSystem::Lifecycle>();
+	Libs::LibKernel::FileSystem::Mount(app0, "/app0");
 	subsystems.Initialize<Libs::Controller::Lifecycle>();
 	subsystems.Initialize<Libs::Graphics::Lifecycle>();
 

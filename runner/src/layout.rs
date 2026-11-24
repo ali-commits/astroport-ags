@@ -33,6 +33,10 @@ pub const NOTO_FONTS: [&str; 24] = [
     "NotoSansArabic-Bold.ttf",
 ];
 
+/// The game's three graphics libraries: thunks into the bridge (design.md 1.1).
+pub const FORWARDERS: [&str; 3] = ["libSceAgc.prx", "libSceAgcDriver.prx", "libSceVideoOut.prx"];
+pub const RENDERER_LIBS: [&str; 2] = ["libastroport_bridge.so", "libkyty_renderer.so"];
+
 pub fn default_font_roots() -> Vec<PathBuf> {
     let mut roots = vec![
         PathBuf::from("/usr/share/fonts"),
@@ -175,17 +179,17 @@ pub fn install_libs(install: &Path, run: &Path) -> io::Result<usize> {
         Ok(())
     };
 
-    for (dir, required) in [
-        ("anyps5/libs", "anyps5/libAstroHybridHost.prx"),
-        ("shims", "lib/libkyty_gpu.so"),
-    ] {
-        for entry in fs::read_dir(install.join(dir))? {
-            let path = entry?.path();
-            if path.extension().is_some_and(|ext| ext == "prx") && path.is_file() {
-                copy(&path)?;
-            }
+    // AnyPS5's own graphics libraries are replaced by the forwarders to the bridge.
+    for entry in fs::read_dir(install.join("anyps5/libs"))? {
+        let path = entry?.path();
+        let forwarded = FORWARDERS.iter().any(|name| path.file_name().is_some_and(|file| file == *name));
+        if path.extension().is_some_and(|ext| ext == "prx") && !forwarded && path.is_file() {
+            copy(&path)?;
         }
-        copy(&install.join(required))?;
+    }
+    copy(&install.join("anyps5/libs/libAstroportHost.prx"))?; // required: fails when it is missing
+    for name in FORWARDERS.into_iter().chain(RENDERER_LIBS) {
+        copy(&install.join("lib").join(name))?;
     }
     for entry in fs::read_dir(install.join("lib"))? {
         let entry = entry?;

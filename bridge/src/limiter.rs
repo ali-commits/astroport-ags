@@ -116,6 +116,8 @@ pub unsafe extern "C" fn present_gate(now: i64, _ticks_per_s: i64, _flip_ready: 
 
 /// `KytyEmbedHooks.presented`.
 pub unsafe extern "C" fn presented(now: i64, ticks_per_s: i64) {
+    static FIRST: std::sync::Once = std::sync::Once::new();
+    FIRST.call_once(|| eprintln!("astroport: first frame presented after {} ms", crate::uptime_ms()));
     let mut state = STATE.lock().unwrap();
     follow_limit(&mut state);
     state.presented(now, ticks_per_s);

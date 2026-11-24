@@ -2,19 +2,16 @@
   "format": 1,
   "fixed_env": {
     "GLIBC_TUNABLES": "glibc.rtld.optional_static_tls=0x200000",
-    "APS5_GPU_ENGINE": "kyty",
-    "KYTY_GPU_LIBRARY": "{run}/libs/libkyty_gpu.so",
-    "KYTY_GPU_HOST_MODULE": "{run}/libs/libAstroHybridHost.prx",
     "KYTY_HANG_WATCHDOG": "0",
-    "ASTROHYBRID_CACHE_TITLE_ID": "PPSA21567",
-    "APS5_PAD_TRIGGER_STATE": "1", "ASTROHYBRID_PAD_MOTION": "1", "KYTY_CP_PRIORITY": "2",
-    "KYTY_DRAW_PREP_PRIORITY": "2", "KYTY_DRAW_PREP_SPIN_US": "10", "KYTY_DRAW_PREP_COLD_SPIN_US": "5",
+    "APS5_PAD_TRIGGER_EFFECT_STATE": "1", "KYTY_CP_PRIORITY": "2",
+    "KYTY_DRAW_PREP_SPIN_US": "10", "KYTY_DRAW_PREP_COLD_SPIN_US": "5",
     "KYTY_AGC_DONE_MODE": "bounded",
-    "ASTROHYBRID_PAD_PREFER": "auto", "ASTROHYBRID_RUMBLE_SCALE": "100", "ASTROHYBRID_RUMBLE_SWITCH_FLOOR": "96",
-    "ASTROHYBRID_WINDOW_TITLE": "Astro Bot",
-    "ASTROHYBRID_COMMIT_EPOCH_FASTPATH": "0", "KYTY_BUFFER_RANGE_FIXES": "1",
-    "APS5_SAVEDATA_TRANSFER_FALLBACK": "1",
-    "KYTY_WAYLAND_NATIVE": "1",
+    "ASTROPORT_PAD_PREFER": "auto", "ASTROPORT_RUMBLE_SCALE": "100", "ASTROPORT_RUMBLE_SWITCH_FLOOR": "96",
+    "ASTROPORT_WINDOW_TITLE": "Astro Bot",
+    "KYTY_BUFFER_RANGE_FIXES": "1", "KYTY_PRESENT_ABS_VBLANK": "1",
+    "APS5_SAVEDATA_TRANSFER_AS_MOUNT": "1",
+    "ASTROPORT_WAYLAND_NATIVE": "1",
+    "ASTROPORT_APP0": "{run}/app0", "ASTROPORT_DLSS_PASS": "2936e5eca99d75e7",
     "LD_AUDIT": "{install}/lib/libastro_patcher.so",
     "ASTRO_PATCH_PROCESS": "AstroBot"
   },
@@ -45,10 +42,10 @@
     "display.fps": {"values": {
       "30": {"on": ["cap.30", "timing.decouple", "timing.no_sleep", "dt.20", "physics.rope", "physics.cloth", "physics.jack"],
              "off": ["cap.60", "cap.90", "cap.120", "cap.144", "dt.30"],
-             "env": {"ASTROHYBRID_FPS_LIMIT": "30", "ASTROHYBRID_LOW_LATENCY_INTERVAL_US": "33333"}},
+             "env": {"ASTROPORT_FPS_LIMIT": "30"}},
       "60": {"on": ["cap.60", "timing.decouple", "timing.no_sleep", "dt.20"],
              "off": ["cap.30", "cap.90", "cap.120", "cap.144", "dt.30", "physics.rope", "physics.cloth", "physics.jack"],
-             "env": {"ASTROHYBRID_FPS_LIMIT": "60", "ASTROHYBRID_LOW_LATENCY_INTERVAL_US": "16666"}}}},
+             "env": {"ASTROPORT_FPS_LIMIT": "60"}}}},
     "graphics.render": {"values": {
       "1080p": {"on": ["render.1080"], "off": ["render.1368", "render.1872", "render.2160"]},
       "1368p": {"on": ["render.1368"], "off": ["render.1080", "render.1872", "render.2160"]},
@@ -66,17 +63,17 @@
       "balanced": {"on": ["mip.1080"], "off": ["mip.low"]},
       "soft": {"on": ["mip.low"], "off": ["mip.1080"]}}},
     "graphics.ultrawide": {"values": {
-      "true": {"on": ["ultrawide"], "env": {"KYTY_GPU_WIDTH": "3440", "KYTY_GPU_HEIGHT": "1440"}},
+      "true": {"on": ["ultrawide"], "env": {"ASTROPORT_WIDTH": "3440", "ASTROPORT_HEIGHT": "1440"}},
       "false": {"off": ["ultrawide"]}}},
     "game.skip_intro": {"values": {"true": {"on": ["intro.skip"]}, "false": {"off": ["intro.skip"]}}},
     "controller.rumble": {"values": {
-      "true": {"env": {"ASTROHYBRID_DUALSENSE_RUMBLE": "1"}}, "false": {"env": {"ASTROHYBRID_DUALSENSE_RUMBLE": "0"}}}},
+      "true": {"env": {"ASTROPORT_DS_RUMBLE": "1"}}, "false": {"env": {"ASTROPORT_DS_RUMBLE": "0"}}}},
     "perf.low_latency": {"values": {
-      "on": {"env": {"ASTROHYBRID_LOW_LATENCY": "1"}}, "off": {"env": {"ASTROHYBRID_LOW_LATENCY": "0"}}}},
+      "on": {"env": {"ASTROPORT_LOW_LATENCY": "1"}}, "off": {"env": {"ASTROPORT_LOW_LATENCY": "0"}}}},
     "fullscreen": {"values": {
-      "true": {"env": {"KYTY_GPU_FULLSCREEN": "1"}}, "false": {"env": {"KYTY_GPU_FULLSCREEN": "0"}}}},
+      "true": {"env": {"ASTROPORT_FULLSCREEN": "1"}}, "false": {"env": {"ASTROPORT_FULLSCREEN": "0"}}}},
     "graphics.dlss": {"values": {
-      "true": {"env": {"ASTROHYBRID_DLSS": "1"}}, "false": {"env": {"ASTROHYBRID_DLSS": "0"}}}}
+      "true": {"env": {"ASTROPORT_DLSS": "1"}}, "false": {"env": {"ASTROPORT_DLSS": "0"}}}}
   },
   "advanced": [
     {"id": "pad.r1x", "label": "R1 + X switches the game timing", "default": true},

@@ -162,7 +162,7 @@ fn build_lays_out_the_run_folder() {
     );
     assert_eq!(
         fs::read(run.join("libs/libSceAgc.prx")).unwrap(),
-        b"shim libSceAgc.prx"
+        b"forwarder libSceAgc.prx"
     );
     assert_eq!(
         fs::read_link(run.join("_sd_mem")).unwrap(),
@@ -287,8 +287,8 @@ fn changed_install_makes_it_stale() {
         "stale"
     );
     fs::write(
-        fixture.args.install.join("lib/libkyty_gpu.so"),
-        b"updated gpu",
+        fixture.args.install.join("lib/libkyty_renderer.so"),
+        b"updated renderer",
     )
     .unwrap();
     assert_eq!(fixture.status(), "stale");
@@ -333,4 +333,29 @@ fn binary_status_and_usage() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(output.stdout, b"{\"state\":\"missing\"}\n");
     assert_eq!(binary().output().unwrap().status.code(), Some(2));
+}
+
+#[test]
+fn missing_imports_names_what_the_renderer_lacks() {
+    let registry = r#"[{"nid":"23LRUSvYu1M#w#w","library":"libSceAgc.prx","weak":false},
+                       {"nid":"-Ozn0F1AFRg","library":"libSceAgcDriver.prx"},
+                       {"nid":"rTXw65xmLIA#v#v","library":"libSceVideoOut.prx"},
+                       {"nid":"unknown#s#s","library":"libc.prx"}]"#;
+    let exports = "0 23LRUSvYu1M libSceAgc Gen5::AgcInit\n1 -Ozn0F1AFRg libSceVideoOut VideoOut::X\n\
+                   2 rTXw65xmLIA libkernel Memory::KernelAllocateDirectMemory\n";
+    assert_eq!(
+        astroport_run::build::missing_imports(registry, exports).unwrap(),
+        ["rTXw65xmLIA (libSceVideoOut)"]
+    );
+    assert!(astroport_run::build::missing_imports("{}", exports).is_err());
+}
+
+#[test]
+fn build_fails_on_an_import_the_renderer_lacks() {
+    let fixture = Fixture::new("01.019.000");
+    fs::write(fixture.args.install.join("lib/astroport-exports.txt"), "0 other libSceAgc X\n").unwrap();
+    let Err(error) = fixture.build() else { panic!("the build must fail") };
+    assert_eq!(error.category, "unsupported");
+    assert!(error.message.contains("23LRUSvYu1M (libSceAgc)"), "{}", error.message);
+    assert!(!fixture.run().join("build.json").exists());
 }

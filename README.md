@@ -14,7 +14,7 @@ contains no game code or assets, no PlayStation firmware, and no keys.
 Works on the author's PC (Linux, NVIDIA, 4K with frame generation): game version 1.019, about 30 FPS in the
 heaviest level before frame generation, DualSense haptics and adaptive triggers.
 
-The AGS install is coming. Until then `scripts/play-hybrid.sh` is a developer script: it starts an existing run
+The AGS install is coming. Until then `scripts/play.sh` is a developer script: it starts an existing run
 folder (`RUN_DIR`), and the step that turns a game dump into that folder is not automated here yet.
 
 ## Layout
@@ -31,7 +31,7 @@ folder (`RUN_DIR`), and the step that turns a game dump into that folder is not 
 | `runner/` | `astroport-run`, the AGS build job that turns a game dump into a run folder. |
 | `assets/` | Icon, logo and badge for the AGS extension. |
 | `ags-extension.toml` | AGS extension manifest. |
-| `scripts/` | `build-engines.sh`, `play-hybrid.sh`, `check-repo.sh` and `prx-targets.txt`. |
+| `scripts/` | `build-engines.sh`, `play.sh`, `check-repo.sh` and `prx-targets.txt`. |
 
 ## Install through AGS
 

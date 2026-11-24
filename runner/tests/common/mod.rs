@@ -144,29 +144,22 @@ pub fn versions_json(path: &Path, eboot_1019_sha256: Option<&str>) {
 
 #[allow(dead_code)]
 pub fn fake_install(root: &Path) -> PathBuf {
-    for dir in ["anyps5/libs", "shims", "lib", "patches"] {
+    for dir in ["anyps5/libs", "lib", "patches"] {
         fs::create_dir_all(root.join(dir)).unwrap();
     }
     for (dir, source, names) in [
-        (
-            "anyps5/libs",
-            "anyps5",
-            ["libkernel.prx", "libc.prx", "libSceAgc.prx"],
-        ),
-        (
-            "shims",
-            "shim",
-            ["libSceAgc.prx", "libSceAgcDriver.prx", "libSceVideoOut.prx"],
-        ),
+        ("anyps5/libs", "anyps5", ["libkernel.prx", "libc.prx", "libSceAgc.prx", "libAstroportHost.prx"].as_slice()),
+        ("lib", "forwarder", ["libSceAgc.prx", "libSceAgcDriver.prx", "libSceVideoOut.prx"].as_slice()),
     ] {
         for name in names {
             fs::write(root.join(dir).join(name), format!("{source} {name}")).unwrap();
         }
     }
     for (path, content) in [
-        ("anyps5/libAstroHybridHost.prx", "host"),
         ("anyps5/relinker", ""),
-        ("lib/libkyty_gpu.so", "gpu"),
+        ("lib/libkyty_renderer.so", "renderer"),
+        ("lib/libastroport_bridge.so", "bridge"),
+        ("lib/astroport-exports.txt", "0 23LRUSvYu1M libSceAgc Gen5::AgcInit\n"),
         ("lib/libnvidia-ngx-dlss.so.310.9.16", "dlss"),
         ("ags-extension.toml", "version = \"0.1.0\"\n"),
     ] {
@@ -204,13 +197,13 @@ out=$(dirname "$output")
 [ -f "$input" ]
 mkdir -p "$out/app0/sce_module"
 printf 'fake executable\n' > "$output"
-printf '{}\n' > "$output.registry.json"
+printf '[{"nid":"23LRUSvYu1M#w#w","library":"libSceAgc.prx"},{"nid":"x#s#s","library":"libc.prx"}]\n' > "$output.registry.json"
 printf '{}\n' > "$output.needed.json"
 for module in "$(dirname "$input")"/sce_module/*.prx; do
     [ -f "$module" ] || continue
     name=${module##*/}
     cp "$module" "$out/app0/sce_module/$name.guest.prx"
-    printf '{}\n' > "$output.$name.guest.prx.registry.json"
+    printf '[]\n' > "$output.$name.guest.prx.registry.json"
 done
 SCRIPT
 "#,

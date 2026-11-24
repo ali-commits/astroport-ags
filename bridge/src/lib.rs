@@ -40,6 +40,11 @@ pub fn die(message: impl std::fmt::Display) -> ! {
     std::process::abort()
 }
 
+/// Milliseconds since the bridge started; 0 in a process without engines.
+pub fn uptime_ms() -> u128 {
+    STARTED.get().map_or(0, |start| start.elapsed().as_millis())
+}
+
 /// Kyty's table. Valid after `set_engines`.
 pub fn kyty() -> &'static KytyEmbedApi {
     let table = KYTY.load(Ordering::Acquire);
@@ -270,7 +275,7 @@ unsafe extern "C" fn ready() {
         entry::bind(index, target);
     }
     entry::publish_ready();
-    eprintln!("astroport: renderer ready in {} ms", STARTED.get().map_or(0, |start| start.elapsed().as_millis()));
+    eprintln!("astroport: renderer ready in {} ms", uptime_ms());
 }
 
 /// Registered with the host's shutdown list: stop our threads and flush Kyty, once.

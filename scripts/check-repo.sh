@@ -36,7 +36,7 @@ done
 tracked=$("${G[@]}" ls-files)
 for f in .gitignore LICENSE README.md NOTICE.md engines/kyty/LICENSE engines/kyty/LICENSES/Kyty-MIT.txt engines/kyty/UPSTREAM.md \
   engines/anyps5/LICENSE engines/anyps5/UPSTREAM.md patcher/Cargo.toml patches/PPSA21567-1018.json \
-  patches/PPSA21567-1019.json scripts/play-hybrid.sh scripts/prx-targets.txt tools/hidtap/Cargo.toml \
+  patches/PPSA21567-1019.json scripts/play.sh scripts/prx-targets.txt tools/hidtap/Cargo.toml \
   scripts/build-release.sh scripts/release/dlss.env scripts/release/fetch-dlss.sh scripts/release/stage.sh \
   scripts/release/package.sh scripts/release/inside.sh scripts/release/Containerfile scripts/release/test.sh docs/release.md \
   ags-extension.toml adapter/Cargo.toml adapter/Cargo.lock adapter/src/main.rs patches/settings.json patches/versions.json \

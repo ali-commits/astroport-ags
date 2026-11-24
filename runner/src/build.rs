@@ -1,10 +1,13 @@
-use crate::layout::{find_fonts, install_libs, link_app0, link_fonts, link_saves, place_outputs};
+use crate::layout::{
+    find_fonts, install_libs, link_app0, link_fonts, link_saves, place_outputs, FORWARDERS, RENDERER_LIBS,
+};
 use crate::progress::{Progress, STEPS};
 use crate::unwrap::unwrap_file;
 use crate::version::{detect, sha256_file};
 use crate::JobError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io;
@@ -35,16 +38,9 @@ pub fn run_dir(data: &Path, version: &str) -> PathBuf {
 }
 
 pub fn inputs_sha256(install: &Path) -> io::Result<String> {
-    let mut paths = vec![
-        PathBuf::from("anyps5/relinker"),
-        PathBuf::from("anyps5/libAstroHybridHost.prx"),
-        PathBuf::from("lib/libkyty_gpu.so"),
-    ];
-    for (dir, matches) in [
-        ("anyps5/libs", is_prx as fn(&Path) -> bool),
-        ("shims", is_prx),
-        ("lib", is_dlss),
-    ] {
+    let mut paths = vec![PathBuf::from("anyps5/relinker"), PathBuf::from(EXPORTS)];
+    paths.extend(FORWARDERS.into_iter().chain(RENDERER_LIBS).map(|name| Path::new("lib").join(name)));
+    for (dir, matches) in [("anyps5/libs", is_prx as fn(&Path) -> bool), ("lib", is_dlss)] {
         for entry in fs::read_dir(install.join(dir))? {
             let path = Path::new(dir).join(entry?.file_name());
             if matches(&path) && install.join(&path).is_file() {
@@ -72,6 +68,66 @@ fn is_dlss(path: &Path) -> bool {
     path.file_name().is_some_and(|name| {
         name.as_encoded_bytes()
             .starts_with(b"libnvidia-ngx-dlss.so.")
+    })
+}
+
+/// Written by the engine build: one line per export, "index NID library function".
+const EXPORTS: &str = "lib/astroport-exports.txt";
+
+/// NIDs the game imports from the three graphics libraries that no forwarder exports
+/// (design.md 4.2). `registry` is a file the relinker wrote; a `#` suffix of a NID is not part of it.
+/// Which of the three libraries exports a NID does not matter: the loader resolves symbols by
+/// name alone, and Kyty files some NIDs under another library than the game imports them from.
+pub fn missing_imports(registry: &str, exports: &str) -> Result<Vec<String>, serde_json::Error> {
+    #[derive(Deserialize)]
+    struct Import {
+        nid: String,
+        library: String,
+    }
+    let forwarded = |library: &str| FORWARDERS.iter().any(|name| name.strip_suffix(".prx") == Some(library));
+    let exported: HashSet<&str> = exports
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split(' ').skip(1);
+            let nid = fields.next()?;
+            forwarded(fields.next()?).then_some(nid)
+        })
+        .collect();
+    let mut missing = BTreeSet::new();
+    for import in serde_json::from_str::<Vec<Import>>(registry)? {
+        let nid = import.nid.split('#').next().unwrap_or_default();
+        if let Some(library) = import.library.strip_suffix(".prx").filter(|library| forwarded(library)) {
+            if !exported.contains(nid) {
+                missing.insert(format!("{nid} ({library})"));
+            }
+        }
+    }
+    Ok(missing.into_iter().collect())
+}
+
+/// Every `AstroBot*.registry.json` of the run folder against the installed export list.
+fn check_imports(install: &Path, run: &Path) -> Result<(), JobError> {
+    let exports = fs::read_to_string(install.join(EXPORTS))?;
+    let mut missing = BTreeSet::new();
+    for entry in fs::read_dir(run)? {
+        let path = entry?.path();
+        if path.to_string_lossy().ends_with(".registry.json") {
+            let found = missing_imports(&fs::read_to_string(&path)?, &exports).map_err(|error| JobError {
+                category: "internal",
+                message: format!("{}: {error}", path.display()),
+            })?;
+            missing.extend(found);
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(JobError {
+        category: "unsupported",
+        message: format!(
+            "This game version uses graphics functions the renderer does not have: {}.",
+            missing.into_iter().collect::<Vec<_>>().join(", ")
+        ),
     })
 }
 
@@ -177,6 +233,7 @@ pub fn build(
     progress.step(3, 0, 1, "steps", STEPS[3]);
     link_app0(&args.dump, &run)?;
     place_outputs(&output, &run)?;
+    check_imports(&args.install, &run)?;
     install_libs(&args.install, &run)?;
     link_fonts(&fonts, &run)?;
     link_saves(&args.data, &run)?;
