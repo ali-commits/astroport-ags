@@ -15,6 +15,7 @@
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "common/timer.h"
+#include "embed/embedOptions.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/tile.h"
@@ -228,6 +229,7 @@ public:
 	void Complete(uint64_t request_id);
 	void WaitForSubmitSlot(VideoOutConfig& cfg);
 	bool     Flip();
+	bool     Ready(); // a complete flip group is queued (it may not be due yet)
 	void     Wait(VideoOutConfig& cfg, int index, uint64_t before);
 	bool     IsPending(VideoOutConfig& cfg, int index, uint64_t before);
 	uint64_t NextRequestId() {
@@ -852,6 +854,14 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 		return true;
 	};
 
+	// The embedding host's frame limiter (embed/embedOptions.h): 0 presents now, otherwise the tick
+	// before which no flip is presented. Always 0 in the stand-alone emulator.
+	// The host hears of a presented flip with the tick its gate was asked at, not the tick the
+	// present ended at.
+	const auto present_gate = [this](uint64_t now) -> uint64_t {
+		return Embed::HasPresentGate() ? Embed::PresentGate(now, m_flip_queue.Ready()) : 0;
+	};
+
 	// Default (relative) timeline.
 	int64_t total_wait = 0;
 	// Absolute timeline (KYTY_PRESENT_ABS_VBLANK).
@@ -896,15 +906,20 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 			if (ready_flips || Config::GetPresentMode() == Config::PresentMode::Immediate) {
 				// Present each ready flip as it arrives; the guest's vblank events keep their clock.
 				while (!token.stop_requested() && now_ticks() < deadline) {
-					if (m_flip_queue.Flip()) {
+					const auto asked = now_ticks();
+					const auto gate  = present_gate(asked);
+					if (gate == 0 && m_flip_queue.Flip()) {
+						Embed::Presented(asked);
 						continue;
 					}
 					const auto current = now_ticks();
 					if (current >= deadline) {
 						break;
 					}
+					// A gated flip: sleep no further than the tick the host allows it at.
+					const auto until = gate > current ? std::min(deadline, gate) : deadline;
 					const auto remaining_us =
-					    ((deadline - current) * 1000000u + frequency - 1) / frequency;
+					    ((until - current) * 1000000u + frequency - 1) / frequency;
 					Common::Thread::SleepMicro(
 					    static_cast<uint32_t>(std::clamp<uint64_t>(remaining_us, 1, 500)));
 				}
@@ -939,7 +954,13 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 		}
 
 		VblankBegin();
-		bool presented = m_flip_queue.Flip();
+		// The gate is asked once per vblank here: a host limit finer than the vblank needs the polling
+		// loop above (KYTY_PRESENT_ABS_VBLANK=1 with the Immediate present mode).
+		const auto asked     = now_ticks();
+		bool       presented = present_gate(asked) == 0 && m_flip_queue.Flip();
+		if (presented) {
+			Embed::Presented(asked);
+		}
 		if (!presented && m_presenter.NeedsSystemOverlayRefresh()) {
 			if (!m_presenter.PresentLastFrame()) {
 				m_presenter.Present(m_presenter.PrepareBlankFrame(width, height, true));
@@ -1293,6 +1314,21 @@ static bool TakeFrameHold() {
 		shown    = std::min(shown + 1u, 8u);
 	}
 	return hold;
+}
+
+bool FlipQueue::Ready() {
+	Common::LockGuard lock(m_mutex);
+	const auto owner = std::find_if(m_requests.begin(), m_requests.end(),
+	                               [](const auto& r) { return r.group == r.id; });
+	if (owner == m_requests.end()) {
+		return false;
+	}
+	const uint64_t group = owner->id;
+	return std::none_of(m_cpu_requests.begin(), m_cpu_requests.end(),
+	                    [group](const auto& r) { return r.group == group; }) &&
+	       std::none_of(m_requests.begin(), m_requests.end(), [group](const auto& r) {
+		       return r.group == group && r.state != RequestState::Ready;
+	       });
 }
 
 bool FlipQueue::Flip() {

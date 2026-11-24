@@ -3217,6 +3217,18 @@ if(LINUX)
     )
 endif()
 
+# The renderer as a shared library for a host process (src/embed/kytyEmbed.h): the emulator's
+# objects without main.cpp. Its only exported symbol is kyty_embed_api.
+if(LINUX)
+	add_library(kyty_renderer SHARED EXCLUDE_FROM_ALL ${kyty_emulator_src}
+		"${KYTY_SOURCE_DIR}/embed/kytyEmbed.cpp")
+	target_sources(kyty_renderer PRIVATE $<TARGET_OBJECTS:kyty_cpu_check>)
+	target_link_libraries(kyty_renderer PRIVATE ${kyty_emulator_link_libraries})
+	target_include_directories(kyty_renderer PRIVATE ${inc_headers})
+	target_link_options(kyty_renderer PRIVATE -Wl,-Bsymbolic -Wl,--no-undefined
+		"-Wl,--version-script=${KYTY_SOURCE_DIR}/embed/kytyEmbed.map")
+endif()
+
 if(APPLE)
 	# The emulator writes x86-64 trampolines/PLT stubs into memory and executes them, and
 	# runs guest code under Rosetta. That requires the JIT / unsigned-executable-memory

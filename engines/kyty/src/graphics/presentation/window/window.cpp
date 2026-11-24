@@ -10,6 +10,7 @@
 #include "common/systemInfo.h"
 #include "common/threads.h"
 #include "common/timer.h"
+#include "embed/embedOptions.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -49,15 +50,7 @@
 
 namespace Streaming {
 OutputState ReadLiveOutput() {
-	// Until Task 4 owns live display state, only the launch configuration is available.
-	uint32_t fps = 60;
-	if (const char* value = std::getenv("ASTROHYBRID_FPS_LIMIT")) {
-		char* end = nullptr;
-		const auto parsed = std::strtoul(value, &end, 10);
-		if (end != value && *end == '\0' && parsed >= 10 && parsed <= 240)
-			fps = static_cast<uint32_t>(parsed);
-	}
-	return {Config::GetScreenWidth(), Config::GetScreenHeight(), fps};
+	return {Config::GetScreenWidth(), Config::GetScreenHeight(), Embed::FrameLimit()};
 }
 } // namespace Streaming
 
@@ -1057,6 +1050,10 @@ void WindowContext::UpdateIcon() {
 }
 
 void WindowContext::UpdateTitle(uint64_t frame_num, double current_fps) {
+	if (const auto& fixed = Embed::GetOptions().window_title; !fixed.empty()) {
+		SDL_SetWindowTitle(window, fixed.c_str());
+		return;
+	}
 	static char title[128];
 	static char title_id[12];
 	static char app_ver[12];
