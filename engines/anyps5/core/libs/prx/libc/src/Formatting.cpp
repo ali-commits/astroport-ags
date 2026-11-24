@@ -16,6 +16,7 @@
 #include "prx/libc/include/General.hpp"
 #include "SceTypes.hpp"
 #include "prx/libc/include/FileStream.hpp"
+#include "prx/libc/include/ArchiveStream.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
 
 #include "prx/libc/include/WindowsFormatting.hpp"
@@ -155,6 +156,8 @@ public:
     int Scan(const char* directive, bool suppress, void* target, int* consumed) const {
         return suppress ? HostSscanf(position, directive, consumed) : HostSscanf(position, directive, target, consumed);
     }
+
+    static void Store(void* target, const void* source, std::size_t bytes) { std::memcpy(target, source, bytes); }
 };
 
 class StreamSource {
@@ -183,6 +186,8 @@ public:
     int Scan(const char* directive, bool suppress, void* target, int* count) const {
         return suppress ? HostFscanf(file, directive, count) : HostFscanf(file, directive, target, count);
     }
+
+    static void Store(void* target, const void* source, std::size_t bytes) { std::memcpy(target, source, bytes); }
 };
 
 template <typename TSource, typename NextPointer, typename NextCapacity>
@@ -230,14 +235,12 @@ int ScanSource(TSource source, const char* format, bool secure, NextPointer next
             if (!suppress) {
                 void* target = nextPointer();
                 if (target == nullptr) return EOF;
-                const auto count = source.Consumed();
-                if (length == "hh") *static_cast<signed char*>(target) = static_cast<signed char>(count);
-                else if (length == "h") *static_cast<short*>(target) = static_cast<short>(count);
-                else if (length.empty()) *static_cast<int*>(target) = static_cast<int>(count);
-                else if (length == "l" || length == "ll" || length == "j" || length == "z" || length == "t") {
-                    const std::int64_t value = count;
-                    std::memcpy(target, &value, sizeof(value));
-                } else throw std::invalid_argument("Invalid scan count length");
+                const std::int64_t count = source.Consumed();
+                if (length == "hh") TSource::Store(target, &count, 1);
+                else if (length == "h") TSource::Store(target, &count, 2);
+                else if (length.empty()) TSource::Store(target, &count, 4);
+                else if (length == "l" || length == "ll" || length == "j" || length == "z" || length == "t") TSource::Store(target, &count, 8);
+                else throw std::invalid_argument("Invalid scan count length");
             }
             continue;
         }
@@ -312,7 +315,7 @@ int ScanSource(TSource source, const char* format, bool secure, NextPointer next
             const unsigned long limit = conversion == 'c' ? capacity : (capacity == 0 ? 0 : capacity - 1);
             const unsigned long wanted = conversion == 'c' ? (width == 0 ? 1 : width) : width;
             if (limit == 0 || (conversion == 'c' && wanted > limit)) {
-                if (capacity != 0) static_cast<char*>(target)[0] = '\0';
+                if (capacity != 0) TSource::Store(target, "", 1);
                 return finish(assigned);
             }
             capped = wanted == 0 || wanted > limit;
@@ -324,6 +327,7 @@ int ScanSource(TSource source, const char* format, bool secure, NextPointer next
         directive += "%n";
         int consumed = -1;
         const int matched = source.Scan(directive.c_str(), suppress, target, &consumed);
+        if (consumed == -2) return finish(assigned);
         if (consumed < 0 || (!suppress && matched != 1)) return finish(!converted && source.Peek() == EOF ? EOF : assigned);
         source.Advance(consumed);
         if (capped && conversion != 'c') {
@@ -337,7 +341,7 @@ int ScanSource(TSource source, const char* format, bool secure, NextPointer next
                 overflow = std::sscanf(text, test.c_str(), probe) == 1;
             }
             if (overflow) {
-                static_cast<char*>(target)[0] = '\0';
+                TSource::Store(target, "", 1);
                 return finish(assigned);
             }
         }
@@ -354,9 +358,24 @@ int ScanGuest(const char* buffer, const char* format, bool secure, NextPointer n
 }
 
 template <typename NextPointer, typename NextCapacity>
+int ScanArchive(FileStream* stream, const char* format, bool secure, NextPointer nextPointer, NextCapacity nextCapacity) {
+    const ArchiveStream::Lock lock(stream);
+    ArchiveStream::RequireScanFormat(format);
+    try {
+        const int result = ScanSource(ArchiveStream::Source(stream), format, secure, nextPointer, nextCapacity);
+        ArchiveStream::EndScan(stream);
+        return result;
+    } catch (...) {
+        ArchiveStream::EndScan(stream);
+        throw;
+    }
+}
+
+template <typename NextPointer, typename NextCapacity>
 int ScanGuestStream(FileStream* stream, const char* format, NextPointer nextPointer, NextCapacity nextCapacity) {
     if (stream == nullptr || format == nullptr) return EOF;
     if (!stream->IsOpen()) { errno = 9; return EOF; }
+    if (ArchiveStream::Is(stream)) return ScanArchive(stream, format, true, nextPointer, nextCapacity);
     auto* native = GetNativeStream(stream);
     if (!stream->SwitchToReading()) return EOF;
 #ifndef _WIN32
@@ -408,6 +427,7 @@ int APS5_VABI vasprintf_nid_postfix(char** destination, const char* format, VaLi
 
 int APS5_VABI vfprintf_nid_postfix(FileStream* stream, const char* format, VaList* args) {
     if (stream && !stream->IsOpen()) { errno = 9; return -1; }
+    if (ArchiveStream::Is(stream)) return ArchiveStream::RefuseWrite(stream);
     auto* native = GetNativeStream(stream);
     if (!stream->SwitchToWriting()) return -1;
 #ifdef _WIN32
@@ -450,23 +470,19 @@ int APS5_VABI fprintf_nid_postfix(FileStream* stream, const char* format, ...) {
 }
 
 int APS5_VABI fscanf_nid_postfix(FileStream* stream, const char* format, ...) {
-    if (stream && !stream->IsOpen()) { errno = 9; return -1; }
-    auto* native = GetNativeStream(stream);
-    if (!stream->SwitchToReading()) return EOF;
 #ifdef _WIN32
     __builtin_sysv_va_list args;
     __builtin_sysv_va_start(args, format);
-    const int result = LibcDetail::ScanFileWindows_nid_no_patch(native, format, args);
-    __builtin_sysv_va_end(args);
 #else
-    RejectGuestWideScan(format);
     std::va_list args;
     va_start(args, format);
-    const int result = HostVfscanf(native, format, args);
+#endif
+    const int result = vfscanf_nid_postfix(stream, format, reinterpret_cast<VaList*>(args));
+#ifdef _WIN32
+    __builtin_sysv_va_end(args);
+#else
     va_end(args);
 #endif
-    stream->SyncStatus();
-    stream->KeepDirectoryReadError(result == -1);
     return result;
 }
 
@@ -661,6 +677,7 @@ int APS5_VABI vsnprintf_s_nid_postfix(char* buffer, size_t size, const char* for
 static int WriteSecure(FileStream* stream, const char* format, const void* args) {
     if (stream == nullptr || format == nullptr || args == nullptr) return -1;
     if (!stream->IsOpen()) { errno = 9; return -1; }
+    if (ArchiveStream::Is(stream)) return ArchiveStream::RefuseWrite(stream);
     auto* native = GetNativeStream(stream);
     if (!stream->SwitchToWriting()) return -1;
     std::string text;
@@ -779,6 +796,10 @@ extern FileStream* __stdinp_nid_postfix;
 
 int APS5_VABI vfscanf_nid_postfix(FileStream* stream, const char* format, VaList* args) {
     if (stream && !stream->IsOpen()) { errno = 9; return -1; }
+    if (format != nullptr && ArchiveStream::Is(stream)) {
+        LibcDetail::FormatArguments arguments(args);
+        return ScanArchive(stream, format, false, [&] { return arguments.Next<void*>(); }, [] { return 0u; });
+    }
     auto* native = GetNativeStream(stream);
     if (!stream->SwitchToReading()) return EOF;
 #ifdef _WIN32

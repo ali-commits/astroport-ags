@@ -49,6 +49,7 @@ target_sources(libc PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/Export.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/General.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/AppArchive.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/ArchiveStream.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/CreationMask.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/FailureReport.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/specifics/gcc/StackGuard.cpp
@@ -245,7 +246,7 @@ if(BUILD_TESTING)
     target_include_directories(guest_app_archive_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_app_archive_tests PRIVATE libc zarchive)
     configure_windows_unwind(guest_app_archive_tests)
-    foreach(mode present absent damaged invalid)
+    foreach(mode present absent damaged invalid wrapped)
         add_test(NAME guest_app_archive_${mode} COMMAND guest_app_archive_tests ${mode})
         set_tests_properties(guest_app_archive_${mode} PROPERTIES TIMEOUT 20)
         if(WIN32)

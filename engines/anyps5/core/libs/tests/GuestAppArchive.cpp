@@ -38,6 +38,19 @@ constexpr std::size_t BigSize = 200 * 1024 + 123;
 
 std::map<std::string, std::vector<char>> Contents() {
     return {
+        {"Assets/Both.odx", {'e', 'x', 'a', 'c', 't'}},
+        {"Assets/Both.odxb", {'c', 'o', 'm', 'p', 'i', 'l', 'e', 'd'}},
+        {"Assets/Dir.odxb/Inner.bin", {'i'}},
+        {"Assets/Folder.odxb", {'f'}},
+        {"Assets/Icon.odxb", {'i', 'c', 'o', 'n', '!'}},
+        {"Assets/Loose.odxb", {'l'}},
+        {"Assets/Mid.odxb/File.bin", {'m'}},
+        {"Assets/Note.txtb", {'n'}},
+        {"Assets/Pack.odx/Inner.bin", {'p'}},
+        {"Assets/Pack.odxb", {'p', 'a', 'c', 'k'}},
+        {"Assets/Shadow.odxb", {'s'}},
+        {"Assets/Tail.odx.binb", {'t'}},
+        {"app0/Nested.bin", {'n', 'e', 's', 't'}},
         {"Data/Big.bin", AppArchiveFixture::Pattern(BigSize)},
         {"Data/Empty.txt", {}},
         {"Data/Sub/Deep.txt", {'d', 'e', 'e', 'p'}},
@@ -126,8 +139,49 @@ void Present(const std::filesystem::path& root) {
     Require(rejected, "a directory was read as a file");
 }
 
+void Aliases(const std::filesystem::path& root) {
+    AppArchiveNode node{};
+    char bytes[8] = {};
+    Require(Lookup("/app0/app0/Nested.bin", node) && node.Size == 4, "an app0 directory beside other root entries was not legal");
+    Require(Lookup("/app0/assets/ICON.ODX", node) && !node.Directory && node.Size == 5, "a missing .odx did not fall back to the .odxb entry");
+    Require(AppArchiveRead_nid_no_patch(node.Handle, 0, bytes, sizeof(bytes)) == 5 && std::memcmp(bytes, "icon!", 5) == 0, "the .odxb entry did not read back through the alias");
+    Require(AppArchiveOnly_nid_no_patch(ResolveArchivedPath_nid_no_patch("/app0/Assets/Icon.odx")), "an aliased path was not archive-only");
+    Require(GuardRefuses("/app0/Assets/Icon.odx"), "an aliased archive-only path resolved through an unaware call");
+    Require(Lookup("/app0/Assets/Both.odx", node) && !node.Directory && node.Size == 5, "an exact .odx entry did not win over the .odxb one");
+    Require(Lookup("/app0/Assets/Pack.odx", node) && node.Directory, "an exact .odx directory did not win over the .odxb file");
+    Require(!Lookup("/app0/Assets/Dir.odx", node), "a directory named .odxb was used as an alias");
+    Require(!Lookup("/app0/Assets/Mid.odx/File.bin", node), "a middle path component was aliased");
+    Require(!Lookup("/app0/Assets/Note.txt", node), "another extension was aliased");
+    Require(!Lookup("/app0/Assets/Tail.odx.bin", node), "a name with .odx before its extension was aliased");
+    Require(!AppArchiveLookup_nid_no_patch(root / "app0" / "Assets" / "Icon.odx" / "", &node), "a path with a trailing separator was aliased");
+    Require(!Lookup("/app0x/Assets/Icon.odx", node) && !Lookup("/Assets/Icon.odx", node), "a path outside app0 was aliased");
+    std::set<std::string> names;
+    for (const auto& entry : AppArchiveListDirectory_nid_no_patch(ResolveArchivedPath_nid_no_patch("/app0/Assets"))) names.insert(entry.Name);
+    Require(names.contains("Icon.odxb") && !names.contains("Icon.odx"), "a directory listing showed an alias");
+
+    std::filesystem::create_directories(root / "app0" / "Assets" / "FOLDER.ODXB");
+    { std::ofstream loose(root / "app0" / "Assets" / "Loose.odx"); loose << "disk"; }
+    { std::ofstream shadow(root / "app0" / "Assets" / "SHADOW.odxb"); shadow << "disk"; }
+    Require(Lookup("/app0/Assets/Icon.odx", node) && node.Size == 5, "unrelated loose files stopped the alias");
+    Require(!Lookup("/app0/Assets/Loose.odx", node), "a loose .odx file did not have priority over the alias");
+    Require(!AppArchiveOnly_nid_no_patch(ResolveArchivedPath_nid_no_patch("/app0/Assets/Loose.odx")), "a loose .odx file was archive-only");
+    Require(!Lookup("/app0/Assets/Shadow.odx", node), "a loose .odxb file of another case did not shadow the alias");
+    Require(!Lookup("/app0/Assets/Folder.odx", node), "a loose .odxb directory did not shadow the alias");
+}
+
+void Wrapped(const std::filesystem::path& root) {
+    AppArchiveFixture::WriteArchive(root / "app0.zar", {{"APP0/eboot.bin", {'e'}}, {"APP0/sce_sys/param.sfx", {'p'}}});
+    AppArchiveNode node{};
+    std::string message;
+    try { (void)Lookup("/app0/eboot.bin", node); } catch (const std::runtime_error& error) { message = error.what(); }
+    Require(message.find("wrapped app0/ root") != std::string::npos && message.find("without an app0/ prefix") != std::string::npos &&
+        message.find((root / "app0.zar").string()) != std::string::npos, "a wrapped archive was not reported with its path");
+}
+
 void Absent() {
     AppArchiveNode node{};
+    { std::ofstream loose("app0/Icon.odxb"); loose << "disk"; }
+    Require(!Lookup("/app0/Icon.odx", node) && !std::filesystem::exists(ResolvePath_nid_no_patch("/app0/Icon.odx")), "a loose .odxb answered for .odx without an archive");
     Require(AppArchivePath_nid_no_patch().empty(), "an archive was reported without app0.zar");
     Require(!Lookup("/app0/Readme.TXT", node), "a path was found without an archive");
     Require(ResolvePath_nid_no_patch("/app0/Readme.TXT").filename() == "Readme.TXT", "resolution changed without an archive");
@@ -147,6 +201,10 @@ void Damaged(const std::filesystem::path& root) {
     bool thrown = false;
     try { (void)AppArchiveRead_nid_no_patch(node.Handle, 0, buffer.data(), buffer.size()); } catch (const std::runtime_error& error) { thrown = std::strstr(error.what(), "damaged") != nullptr; }
     Require(thrown, "a damaged block did not fail the read");
+    Require(Lookup("/app0/Assets/Icon.odx", node) && node.Size == 5, "the damaged archive's alias was not found");
+    thrown = false;
+    try { (void)AppArchiveRead_nid_no_patch(node.Handle, 0, buffer.data(), 5); } catch (const std::runtime_error& error) { thrown = std::strstr(error.what(), "damaged") != nullptr; }
+    Require(thrown, "a damaged block did not fail the aliased read");
 }
 
 void Invalid(const std::filesystem::path& root) {
@@ -161,12 +219,15 @@ void Invalid(const std::filesystem::path& root) {
 
 int main(int argc, char** argv) {
     if (argc != 2) {
-        std::cerr << "usage: guest_app_archive_tests present|absent|damaged|invalid\n";
+        std::cerr << "usage: guest_app_archive_tests present|absent|damaged|invalid|wrapped\n";
         return 2;
     }
     const std::string mode = argv[1];
     const auto root = AppArchiveFixture::EnterFreshRoot("anyps5-app-archive");
-    if (mode == "present") Present(root);
+    if (mode == "present") {
+        Present(root);
+        Aliases(root);
+    } else if (mode == "wrapped") Wrapped(root);
     else if (mode == "absent") Absent();
     else if (mode == "damaged") Damaged(root);
     else if (mode == "invalid") Invalid(root);

@@ -13,6 +13,7 @@
 
 #include "SceTypes.hpp"
 #include "prx/libc/include/FileStream.hpp"
+#include "prx/libc/include/ArchiveStream.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/WindowsFormatting.hpp"
 
@@ -520,12 +521,14 @@ extern FileStream* __stdinp_nid_postfix;
 
 int APS5_VABI vfwscanf_nid_postfix(FileStream* stream, const char16_t* format, VaList* args) {
     if (stream == nullptr || format == nullptr) return EOF;
+    if (ArchiveStream::Is(stream)) NotImplemented_nid_no_patch("vfwscanf on an app0.zar stream");
     const LockedStream lock(stream);
     return WideScanner("vfwscanf", false, WideInput(stream), format, args).Run();
 }
 
 int APS5_VABI vfwscanf_s_nid_postfix(FileStream* stream, const char16_t* format, VaList* args) {
     if (stream == nullptr || format == nullptr) return EOF;
+    if (ArchiveStream::Is(stream)) NotImplemented_nid_no_patch("vfwscanf_s on an app0.zar stream");
     const LockedStream lock(stream);
     return WideScanner("vfwscanf_s", true, WideInput(stream), format, args).Run();
 }

@@ -1,5 +1,6 @@
 #include "prx/libc/include/Api.hpp"
 #include "prx/libc/include/FileStream.hpp"
+#include "prx/libc/include/ArchiveStream.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <cerrno>
 #include <cstdio>
@@ -21,6 +22,7 @@ public:
 
 extern "C" int APS5_VABI fpurge_nid_postfix(FileStream* stream) {
     if (stream && !stream->IsOpen()) { errno = 9; return -1; }
+    if (ArchiveStream::Is(stream)) return ArchiveStream::Purge(stream);
     auto* native = GetStreamHandle(stream);
     const LockedStream lock(stream);
 #ifdef _WIN32

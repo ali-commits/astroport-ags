@@ -409,7 +409,7 @@ void Refusals() {
     Directories();
     const int fd = sceKernelOpen("/app0/Data/Small.txt", SCE_KERNEL_O_RDONLY, 0);
     Check(fd >= 0);
-    Check(NotImplemented([fd] { (void)fdopen_nid_postfix(fd, "r"); }));
+    Check(fdopen_nid_postfix(fd, "w") == nullptr);
     Check(NotImplemented([fd] { (void)flock_nid_postfix(fd, 1); }));
     Check(NotImplemented([fd] { alignas(8) char statfs[512]; (void)_fstatfs_nid_postfix(fd, reinterpret_cast<KernelStatfs*>(statfs)); }));
     Check(NotImplemented([fd] { (void)ftruncate_nid_postfix(fd, 0); }));

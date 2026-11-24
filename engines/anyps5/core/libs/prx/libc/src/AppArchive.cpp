@@ -44,6 +44,14 @@ Archive& Opened() {
     if (std::filesystem::is_regular_file(candidate, error)) {
         archive.reader.reset(ZArchiveReader::OpenFromFile(candidate));
         if (!archive.reader) throw std::runtime_error("app0.zar is not a readable ZArchive: " + candidate.string());
+        std::unique_ptr<ZArchiveReader> reader(std::move(archive.reader));
+        const auto root = reader->LookUp("");
+        ZArchiveReader::DirEntry entry{};
+        if (root == ZARCHIVE_INVALID_NODE || !reader->IsDirectory(root) || (reader->GetDirEntryCount(root) != 0 && !reader->GetDirEntry(root, 0, entry)))
+            throw std::runtime_error("app0.zar is damaged: its root directory cannot be read: " + candidate.string());
+        if (reader->GetDirEntryCount(root) == 1 && entry.isDirectory && SameComponent(entry.name, "app0"))
+            throw std::runtime_error("app0.zar has a wrapped app0/ root: the contents of app0 must be stored at the archive root without an app0/ prefix: " + candidate.string());
+        archive.reader = std::move(reader);
         archive.path = candidate;
     }
     archive.app0 = app0;
@@ -67,6 +75,23 @@ bool ArchiveRelative(const Archive& archive, const std::filesystem::path& hostPa
         relative += name;
     }
     return true;
+}
+
+bool OnDisk(const std::filesystem::path& hostPath) {
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(hostPath, error);
+    return std::filesystem::exists(status) || (error && error != std::errc::no_such_file_or_directory);
+}
+
+ZArchiveNodeHandle CompiledAlias(Archive& archive, const std::filesystem::path& hostPath, const std::string& relative) {
+    const auto name = hostPath.lexically_normal().filename().generic_string();
+    if (name.size() < 4 || !SameComponent(std::string_view(name).substr(name.size() - 4), ".odx") || OnDisk(hostPath)) return ZARCHIVE_INVALID_NODE;
+    const auto handle = archive.reader->LookUp(relative + 'b');
+    if (handle == ZARCHIVE_INVALID_NODE || !archive.reader->IsFile(handle)) return ZARCHIVE_INVALID_NODE;
+    std::error_code error;
+    for (std::filesystem::directory_iterator entry(hostPath.lexically_normal().parent_path(), error), end; !error && entry != end; entry.increment(error))
+        if (SameComponent(entry->path().filename().generic_string(), name + 'b')) return ZARCHIVE_INVALID_NODE;
+    return error && error != std::errc::no_such_file_or_directory ? ZARCHIVE_INVALID_NODE : handle;
 }
 
 struct OpenFile {
@@ -100,7 +125,8 @@ bool AppArchiveLookup_nid_no_patch(const std::filesystem::path& hostPath, AppArc
     if (!archive.reader) return false;
     std::string relative;
     if (!ArchiveRelative(archive, hostPath, relative)) return false;
-    const auto handle = archive.reader->LookUp(relative);
+    auto handle = archive.reader->LookUp(relative);
+    if (handle == ZARCHIVE_INVALID_NODE) handle = CompiledAlias(archive, hostPath, relative);
     if (handle == ZARCHIVE_INVALID_NODE) return false;
     node->Handle = handle;
     node->Directory = archive.reader->IsDirectory(handle);
@@ -190,9 +216,7 @@ std::filesystem::path AppArchivePath_nid_no_patch() {
 bool AppArchiveOnly_nid_no_patch(const std::filesystem::path& hostPath) {
     auto& archive = Opened();
     if (!archive.reader) return false;
-    std::error_code error;
-    const auto status = std::filesystem::symlink_status(hostPath, error);
-    if (std::filesystem::exists(status) || (error && error != std::errc::no_such_file_or_directory)) return false;
+    if (OnDisk(hostPath)) return false;
     AppArchiveNode node{};
     return AppArchiveLookup_nid_no_patch(hostPath, &node);
 }

@@ -27,6 +27,7 @@
 
 #include "prx/libc/include/SonyCrt.hpp"
 #include "prx/libc/include/FileStream.hpp"
+#include "prx/libc/include/ArchiveStream.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/FilesystemError.hpp"
@@ -306,7 +307,7 @@ FileStream* APS5_VABI fdopen_nid_postfix(int descriptor, const char* mode) {
     const auto parsed = ParseFileMode(mode);
     if (!parsed) { errno = 22; return nullptr; }
     if (descriptor < 0) return nullptr;
-    AppArchiveRefuseDescriptor_nid_no_patch(descriptor, "fdopen");
+    if (parsed->writes && AppArchiveDescriptor_nid_no_patch(descriptor, nullptr, nullptr)) { errno = 9; return nullptr; }
     try {
         auto nativeMode = parsed->native;
         std::erase(nativeMode, 'x');
@@ -323,8 +324,39 @@ FileStream* APS5_VABI fdopen_nid_postfix(int descriptor, const char* mode) {
         if (!native) return nullptr;
         auto* stream = new (storage.get()) FileStream(native, true);
         storage.release();
+        ArchiveStream::Is(stream);
         return stream;
     } catch (const std::bad_alloc&) { errno = 12; return nullptr; }
+}
+
+static int CloseStream(FileStream* stream) {
+#ifdef _WIN32
+    AppArchiveDetach_nid_no_patch(::_fileno(stream->GetHandle()));
+#else
+    AppArchiveDetach_nid_no_patch(::fileno(stream->GetHandle()));
+#endif
+    return stream->Close();
+}
+
+static FileStream* OpenArchiveStream(const std::filesystem::path& path, const GuestFileMode& mode) {
+    if (mode.exclusive) { errno = 17; return nullptr; }
+    if (mode.writes) { errno = 30; return nullptr; }
+    AppArchiveNode node{};
+    if (!AppArchiveLookup_nid_no_patch(path, &node)) throw std::logic_error("fopen: " + path.string() + " left app0.zar while opening");
+    if (node.Directory) { errno = 21; return nullptr; }
+#ifdef _WIN32
+    std::unique_ptr<std::FILE, int (*)(std::FILE*)> device(std::fopen("NUL", "rb"), std::fclose);
+    const int descriptor = device ? ::_fileno(device.get()) : -1;
+#else
+    std::unique_ptr<std::FILE, int (*)(std::FILE*)> device(std::fopen("/dev/null", "rb"), std::fclose);
+    const int descriptor = device ? ::fileno(device.get()) : -1;
+#endif
+    if (!device) { errno = GuestErrnoFromHost_nid_no_patch(errno); return nullptr; }
+    auto stream = std::make_unique<FileStream>(device.get(), true);
+    device.release();
+    AppArchiveAttach_nid_no_patch(descriptor, node);
+    ArchiveStream::Is(stream.get());
+    return stream.release();
 }
 
 static int OpenFailure(const std::filesystem::path& path, bool writes, int hostError) {
@@ -382,12 +414,26 @@ FileStream* APS5_VABI freopen_nid_postfix(const char* filename, const char* mode
     if (!parsed) { errno = 22; return nullptr; }
     try {
         std::filesystem::path path;
-        if (const int error = *filename ? ResolvePathError_nid_no_patch(filename, path) : 2) {
+        if (const int error = *filename ? ResolvePathError_nid_no_patch(filename, path, false, true) : 2) {
             if (stream->IsHostStandard()) stream->Detach();
-            else if (stream->IsOpen()) stream->Close();
+            else if (stream->IsOpen()) CloseStream(stream);
             if (stream->IsDynamic()) delete stream;
             errno = error;
             return nullptr;
+        }
+        if (ArchiveStream::Is(stream) || AppArchiveOnly_nid_no_patch(path)) {
+            std::unique_ptr<FileStream> opened(fopen_nid_postfix(filename, mode));
+            const int error = errno;
+            if (stream->IsHostStandard()) stream->Detach();
+            else if (stream->IsOpen()) CloseStream(stream);
+            if (!opened) {
+                if (stream->IsDynamic()) delete stream;
+                errno = error;
+                return nullptr;
+            }
+            stream->Take(*opened);
+            ArchiveStream::Is(stream);
+            return stream;
         }
         if (stream->Reopen(path, parsed->native.c_str(), OpenNative)) {
 #ifdef _WIN32
@@ -433,7 +479,8 @@ FileStream* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode) 
         return stream.release();
     }
     std::filesystem::path fpath;
-    if (const int error = ResolvePathError_nid_no_patch(filename, fpath)) { errno = error; return nullptr; }
+    if (const int error = ResolvePathError_nid_no_patch(filename, fpath, false, true)) { errno = error; return nullptr; }
+    if (AppArchiveOnly_nid_no_patch(fpath)) return OpenArchiveStream(fpath, *parsed);
     std::unique_ptr<std::FILE, int (*)(std::FILE*)> handle(OpenNative(fpath, parsed->native), std::fclose);
     if (!handle) {
         const int hostError = errno;
@@ -480,7 +527,7 @@ int APS5_VABI fclose_nid_postfix(FileStream* stream) {
     }
     GetStreamHandle(stream);
     std::unique_ptr<FileStream> owner(stream->IsDynamic() ? stream : nullptr);
-    return stream->Close();
+    return CloseStream(stream);
 }
 
 FileStream* APS5_VABI _ZSt7_FiopenPKcNSt5_IosbIiE9_OpenmodeEi_nid_postfix(const char* filename, int mode, int protection) {
@@ -508,6 +555,7 @@ FileStream* APS5_VABI _ZSt7_FiopenPKcNSt5_IosbIiE9_OpenmodeEi_nid_postfix(const 
 }
 
 size_t APS5_VABI fread_nid_postfix(void* buffer, size_t size, size_t count, FileStream* stream) {
+    if (ArchiveStream::Is(stream)) return ArchiveStream::ReadElements(stream, buffer, size, count);
     if (size != 0 && count > std::numeric_limits<std::size_t>::max() / size) { errno = EINVAL; return 0; }
     if (stream && !stream->IsOpen()) { errno = 9; return 0; }
     auto* handle = GetStreamHandle(stream);
@@ -531,6 +579,10 @@ size_t APS5_VABI fread_nid_postfix(void* buffer, size_t size, size_t count, File
 
 size_t APS5_VABI fwrite_nid_postfix(const void* buffer, size_t size, size_t count, FileStream* stream) {
     if (stream && !stream->IsOpen()) { errno = 9; return 0; }
+    if (ArchiveStream::Is(stream)) {
+        if (size != 0 && count != 0) ArchiveStream::RefuseWrite(stream);
+        return 0;
+    }
     auto* handle = GetNativeStream(stream);
     if (size == 0 || count == 0) return 0;
     if (!buffer) throw std::runtime_error("fwrite: null buffer");
@@ -547,6 +599,7 @@ size_t APS5_VABI fwrite_nid_postfix(const void* buffer, size_t size, size_t coun
 int APS5_VABI fseeko_nid_postfix(FileStream* stream, std::int64_t offset, int origin) {
     if (stream && !stream->IsOpen()) { errno = 9; return -1; }
     if (origin != SEEK_SET && origin != SEEK_CUR && origin != SEEK_END) { errno = 22; return -1; }
+    if (ArchiveStream::Is(stream)) return ArchiveStream::Seek(stream, offset, origin);
 #ifdef _WIN32
     auto* native = GetNativeStream(stream);
     if (IsPipeStream(native)) { errno = 29; return -1; }
@@ -563,6 +616,7 @@ int APS5_VABI fseeko_nid_postfix(FileStream* stream, std::int64_t offset, int or
 
 std::int64_t APS5_VABI ftello_nid_postfix(FileStream* stream) {
     if (stream && !stream->IsOpen()) { errno = 9; return -1; }
+    if (ArchiveStream::Is(stream)) return ArchiveStream::Tell(stream);
 #ifdef _WIN32
     auto* native = GetNativeStream(stream);
     if (IsPipeStream(native)) { errno = 29; return -1; }
@@ -603,6 +657,7 @@ void APS5_VABI rewind_nid_postfix(FileStream* stream) {
 int APS5_VABI fputs_nid_postfix(const char* str, FileStream* stream) {
     if (!str) throw std::runtime_error("fputs: null string");
     if (stream && !stream->IsOpen()) { errno = 9; return -1; }
+    if (ArchiveStream::Is(stream)) return ArchiveStream::RefuseWrite(stream);
     auto* native = GetNativeStream(stream);
     if (*str != '\0' && !stream->SwitchToWriting()) return -1;
     const int result = std::fputs(str, native);
@@ -612,6 +667,7 @@ int APS5_VABI fputs_nid_postfix(const char* str, FileStream* stream) {
 
 int APS5_VABI fflush_nid_postfix(FileStream* stream) {
     if (stream && !stream->IsOpen()) { errno = 9; return -1; }
+    if (ArchiveStream::Is(stream)) return ArchiveStream::Flush(stream);
     std::FILE* native = stream ? GetStreamHandle(stream) : nullptr;
     if (stream && (stream->IsRandomDevice() || stream->IsDirectory())) return 0;
 #ifdef __linux__

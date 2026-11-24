@@ -51,6 +51,13 @@ static_assert(offsetof(GuestFilePrefix, descriptor) == 18);
 static_assert(offsetof(GuestFilePrefix, buffer) == 24);
 static_assert(offsetof(GuestFilePrefix, lineBufferSize) == 40);
 
+struct ArchiveStreamState {
+    int descriptor = -1;
+    int pushed = -1;
+    bool end = false;
+    bool peeked = false;
+};
+
 static constexpr const char* FOPEN_EXT_VERT = ".vert";
 static constexpr const char* FOPEN_MSG_NULL_ARG = "null argument";
 static constexpr const char* FOPEN_MSG_NOT_FOUND = "file not found";
@@ -70,6 +77,7 @@ class FileStream {
     bool guestError = false;
     bool randomDevice = false;
     bool directory = false;
+    ArchiveStreamState archive{};
 
 public:
     explicit FileStream(std::FILE* handle, bool dynamic = false) : _handle(handle), _dynamic(dynamic) {
@@ -107,7 +115,21 @@ public:
         return _handle == stdin || _handle == stdout || _handle == stderr;
     }
 
+    ArchiveStreamState& Archive() { return archive; }
+
+    bool IsArchiveCached() const {
+        return archive.descriptor >= 0;
+    }
+
+    void SetArchive(int descriptor) {
+        archive = {descriptor};
+        _guest = {};
+        _guest.flags = descriptor >= 0 ? 4 : 0x10;
+        if (descriptor >= 0 && descriptor <= 32767) _guest.descriptor = static_cast<std::int16_t>(descriptor);
+    }
+
     void Detach() {
+        archive = {};
         _handle = nullptr;
         _guest.flags = 0;
         _guest.descriptor = -1;
@@ -146,6 +168,7 @@ public:
     }
 
     bool Adopt(std::FILE* handle) {
+        archive = {};
         _handle = handle;
         _guest = {};
         guestError = false;
@@ -159,6 +182,12 @@ public:
 #endif
         _guest.descriptor = descriptor >= 0 && descriptor <= 32767 ? static_cast<std::int16_t>(descriptor) : -1;
         return true;
+    }
+
+    void Take(FileStream& other) {
+        Adopt(std::exchange(other._handle, nullptr));
+        if (other.randomDevice) MarkRandomDevice();
+        directory = other.directory;
     }
 
     bool Reopen(const std::filesystem::path& filename, const char* mode,
@@ -241,11 +270,13 @@ public:
     }
     void SyncStatus() {
         if (!_handle) return;
+        if (IsArchiveCached()) return PublishStatus(archive.end, guestError);
         PublishStatus(std::feof(GetHandle()) != 0, std::ferror(GetHandle()) != 0 || guestError);
     }
 
     void SyncUnlockedStatus() {
         if (!_handle) return;
+        if (IsArchiveCached()) return PublishStatus(archive.end, guestError);
 #ifdef _WIN32
         const bool endOfFile = std::feof(GetHandle()) != 0;
         const bool error = std::ferror(GetHandle()) != 0;
@@ -346,6 +377,7 @@ public:
         if (!_handle) return;
         std::clearerr(GetHandle());
         guestError = false;
+        archive.end = false;
         SyncStatus();
     }
 
@@ -355,6 +387,7 @@ public:
         GuestFileLockForget_nid_no_patch(::_fileno(_handle));
         if (std::exchange(directory, false)) ForgetDirectoryStream_nid_no_patch(::_fileno(_handle));
 #endif
+        archive = {};
         const int result = std::fclose(std::exchange(_handle, nullptr));
         _guest.flags = 0;
         _guest.descriptor = -1;
@@ -371,6 +404,7 @@ inline std::FILE* GetStreamHandle(FileStream* stream) {
 inline std::FILE* GetNativeStream(FileStream* stream) {
     auto* handle = GetStreamHandle(stream);
     if (stream->IsRandomDevice()) throw std::runtime_error("FileStream: this function is not implemented on a /dev/random or /dev/urandom stream");
+    if (stream->IsArchiveCached()) throw std::runtime_error("FileStream: this function is not implemented on an app0.zar stream");
     return handle;
 }
 
