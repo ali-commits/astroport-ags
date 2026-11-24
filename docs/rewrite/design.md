@@ -402,6 +402,21 @@ Possible simplification, decided by the M0 constructor test: if a start-up const
 block on a thread that loads `libvulkan.so.1`, the constructor waits for `ready` and the wait stub is
 deleted (slots then point at a loud abort before start).
 
+**M0 constructor experiment, 2026-11-25** (`bridge/tests/ctor_experiment.sh`; glibc 2.44, NVIDIA
+RTX 3090). A stub library's constructor spawned a thread that did `dlopen("libvulkan.so.1")`,
+`vkCreateInstance` and `vkEnumeratePhysicalDevices` (so the GPU drivers were loaded too). With the
+stub as a `DT_NEEDED` of the program and the constructor waiting for the thread: the thread finished
+in 67 to 373 ms, the constructor returned and `main` ran; the same with an `LD_AUDIT` library
+present. Without waiting: also fine. Control case, the stub loaded by `dlopen` and the constructor
+waiting: deadlock (the wait timed out after 10 s, the thread's `dlopen` completed only after the
+constructor returned). Conclusion: start-up constructors do not run under the loader lock, so a
+start-up constructor may block on a thread that loads libraries. Risk 1 does not occur, the
+**[unverified]** note in 3.4 is moot (a lifecycle that loads a library before `reserved` cannot
+block), and the simplification above is permitted: the constructor may wait for `ready` and the
+wait stub can go. This holds only while the bridge is loaded by `DT_NEEDED` at program start; it
+must never be loaded with `dlopen`. Cost of taking the simplification: the game's start-up no
+longer overlaps the renderer's.
+
 ### 3.6 GPU events and flips
 
 All in `bridge/src/events.rs`, using the direct function addresses of `KytyEmbedFns`.

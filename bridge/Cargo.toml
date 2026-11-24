@@ -1,0 +1,20 @@
+[package]
+name = "astroport-bridge"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+description = "AstroPort bridge between AnyPS5 (host) and Kyty's renderer"
+
+[lib]
+name = "astroport_bridge"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "nidgen"
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = 2
+panic = "abort"
