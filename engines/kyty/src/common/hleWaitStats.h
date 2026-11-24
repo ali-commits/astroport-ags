@@ -6,10 +6,8 @@
 #include <atomic>
 #include <cstdint>
 
-#if defined(_MSC_VER)
+#if defined(_M_X64) || defined(__x86_64__)
 #include <intrin.h>
-#elif defined(__x86_64__)
-#include <x86intrin.h>
 #endif
 
 // wholecp measurement branch. KYTY_HLE_WAIT_STATS=1 (default off): time (TSC ticks) and calls per

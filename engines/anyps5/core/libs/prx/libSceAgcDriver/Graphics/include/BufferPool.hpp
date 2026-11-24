@@ -34,7 +34,6 @@ struct SlabSlot {
     VkDeviceMemory memory;
     VkDeviceSize offset;
     void* mapping;
-    std::uint32_t memoryType = 0;
 };
 
 // Released buffer allocations kept for reuse, since creating, binding and mapping one costs tens of
@@ -77,7 +76,7 @@ public:
     VkDeviceSize ReclaimIdleDevice(VkDeviceSize bytes, std::chrono::steady_clock::time_point now);
     static bool SlabEligible(std::size_t capacity, VkDeviceSize alignment, VkDeviceSize size, VkDeviceSize atom);
     static VkDeviceSize SlabBlockBytes(std::size_t capacity);
-    SlabSlot TakeSlot(const Context& context, std::uint32_t memoryType, std::size_t capacity, bool addressable, std::optional<std::uint32_t> hostType = std::nullopt);
+    SlabSlot TakeSlot(const Context& context, std::uint32_t memoryType, std::size_t capacity, bool addressable);
     VkDeviceSize PutSlot(VkDeviceMemory memory, VkDeviceSize offset) noexcept;
     std::size_t SlabBlocks();
 
@@ -89,7 +88,6 @@ private:
         std::vector<std::uint32_t> free;
         std::uint32_t used = 0;
         std::uint64_t slab = 0;
-        std::uint32_t memoryType = 0;
     };
     struct Slab {
         std::vector<SlabBlock*> available;

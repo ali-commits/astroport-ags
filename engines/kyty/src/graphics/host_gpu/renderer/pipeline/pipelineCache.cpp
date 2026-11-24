@@ -229,28 +229,12 @@ std::string PipelineCacheTitleId() {
 	return title_id;
 }
 
-// The hybrid renderer has no standalone loader metadata. This override identifies only
-// cache files; it does not imply that Kyty owns the title's filesystem or loader.
-std::string PipelineCacheFileTitleId() {
-	auto title_id = PipelineCacheTitleId();
-	if (!title_id.empty()) {
-		return title_id;
-	}
-	const auto* value = std::getenv("ASTROHYBRID_CACHE_TITLE_ID");
-	const std::string_view id = value != nullptr ? value : "";
-	if (id.size() != 9 || !id.starts_with("PPSA") ||
-	    !std::ranges::all_of(id.substr(4), [](char c) { return c >= '0' && c <= '9'; })) {
-		return {};
-	}
-	return std::string(id);
-}
-
 // The stem of the cache files written under _PipelineCache. Under --rd, RenderDoc reports another
 // Vulkan version (1.4.0) and wraps the device, so the program and driver caches are rejected and
 // would be overwritten: a RenderDoc session keeps its own set ("<title>.renderdoc.*") and the
 // normal play cache stays untouched.
 static std::string PipelineCacheFileStem() {
-	auto stem = PipelineCacheFileTitleId();
+	auto stem = PipelineCacheTitleId();
 	if (!stem.empty() && Config::RenderDocEnabled()) {
 		stem += ".renderdoc";
 	}
@@ -1255,50 +1239,6 @@ private:
 	bool m_valid = false;
 	bool m_recordable = false;
 };
-
-// ASTROHYBRID_SHADER_DUMP=<hex hash>,<hex hash>,... (diagnostic, default off): the guest code and
-// its RDNA2 disassembly of those shaders are written to ASTROHYBRID_SHADER_DUMP_DIR (default
-// E:/AstroHybrid-Work/shaderdump) when they are compiled (run with KYTY_PROGRAM_CACHE=0 so they are).
-static bool AstroShaderDumpWanted(uint64_t shader_hash) {
-	static const std::vector<uint64_t> hashes = [] {
-		std::vector<uint64_t> list;
-		const char* value = std::getenv("ASTROHYBRID_SHADER_DUMP");
-		while (value != nullptr && *value != '\0') {
-			char* end = nullptr;
-			const auto hash = std::strtoull(value, &end, 16);
-			if (end == value) {
-				break;
-			}
-			list.push_back(hash);
-			value = *end == ',' ? end + 1 : end;
-		}
-		return list;
-	}();
-	return std::find(hashes.begin(), hashes.end(), shader_hash) != hashes.end();
-}
-
-static void AstroShaderDump(const char* stage_name, uint64_t shader_hash,
-                            std::span<const uint32_t> code, const std::string& decoded_dump) {
-	if (!AstroShaderDumpWanted(shader_hash)) {
-		return;
-	}
-	const char* dir_value = std::getenv("ASTROHYBRID_SHADER_DUMP_DIR");
-	const std::filesystem::path dir = dir_value != nullptr ? dir_value : "E:/AstroHybrid-Work/shaderdump";
-	std::error_code error;
-	std::filesystem::create_directories(dir, error);
-	const auto base = dir / fmt::format("{}_{:016x}", stage_name, shader_hash);
-	if (auto* file = std::fopen((base.string() + ".bin").c_str(), "wb"); file != nullptr) {
-		std::fwrite(code.data(), 1, code.size_bytes(), file);
-		std::fclose(file);
-	}
-	if (auto* file = std::fopen((base.string() + ".rdna2.txt").c_str(), "wb"); file != nullptr) {
-		std::fwrite(decoded_dump.data(), 1, decoded_dump.size(), file);
-		std::fclose(file);
-	}
-	std::printf("AstroShaderDump: %s %016llx -> %s\n", stage_name,
-	            static_cast<unsigned long long>(shader_hash), base.string().c_str());
-	std::fflush(stdout);
-}
 
 void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
                      const std::vector<uint32_t>& spirv) {

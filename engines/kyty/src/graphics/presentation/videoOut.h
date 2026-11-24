@@ -55,10 +55,6 @@ private:
                                            Graphics::Presenter& presenter);
 void                          VideoOutShutdown();
 
-[[nodiscard]] const char* FrameLimitLabel();
-bool CycleFrameLimit();
-void SetFrameLimit(uint32_t fps);
-
 KYTY_SYSV_ABI int  VideoOutOpen(int user_id, int bus_type, int index, const void* param);
 KYTY_SYSV_ABI int  VideoOutClose(int handle);
 KYTY_SYSV_ABI int  VideoOutSetFlipMaster(int slave_handle, int master_handle);

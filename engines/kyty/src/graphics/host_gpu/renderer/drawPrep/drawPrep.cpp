@@ -10,7 +10,6 @@
 #include "common/hangWatchdog.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
-#include "common/threads.h"
 #include "common/helperPriority.h"
 #include "common/spinGate.h"
 #include "graphics/guest_gpu/command_processor/cpOps.h"
@@ -1967,7 +1966,6 @@ struct Engine::Workers {
 		char name[32];
 		std::snprintf(name, sizeof(name), "DrawPrep#%u", index + 1u);
 		Profiler::SetThreadName(name);
-		Common::RaiseDrawPrepThreadPriority();
 		t_worker_thread = true;
 		uint32_t placement_count = 0; // placement samples (common/cpuPlacement.h), every 64th slot
 		t_worker_number = index + 1u;
@@ -2660,7 +2658,7 @@ void Engine::ExecuteIndirect(uint64_t position, const std::function<void()>& dra
 	executor.m_run_parts           = commit && slot.run_parts_valid ? &slot.run_parts : nullptr;
 	executor.m_in_engine_commit    = commit;
 	{
-		const CpGaps::DrawCommitScope gap;
+		const CpGaps::Scope gap(CpGaps::Cat::Commit);
 		CommitStats::BeginDraw();
 		draw();
 		CommitStats::EndDraw();
@@ -2988,7 +2986,7 @@ void PrintDrawPrepSummary() {
 
 void Engine::Commit(Slot& slot) {
 	Profiler::ScopedFrameWait commit_time(Profiler::FrameWait::DrawPrepCommit);
-	const CpGaps::DrawCommitScope gap;
+	const CpGaps::Scope       gap(CpGaps::Cat::Commit);
 	if (!CommitStats::IndirectOnly()) {
 		CommitStats::BeginDraw();
 	}

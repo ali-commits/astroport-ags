@@ -45,8 +45,6 @@ namespace AgcDriver::Graphics {
 namespace {
 
 Recorder* activeRecorder = nullptr;
-std::atomic<std::uint64_t> laneSwitchCount{0};
-thread_local std::uint8_t threadLane = 0;
 
 bool DrawProfiled() {
     static const bool profiled = std::getenv("APS5_PROFILE_DRAW") != nullptr;
@@ -1577,44 +1575,8 @@ void Recorder::recordKeyStores(bool forWriter) {
     if (forWriter) keyStoreRunsForWriter.fetch_add(1, std::memory_order_relaxed);
 }
 
-bool Recorder::ComputeLanesEnabled() {
-    static const bool enabled = [] {
-        const char* text = std::getenv("APS5_COMPUTE_LANE");
-        return text != nullptr && text[0] != '0' && text[0] != 0;
-    }();
-    return enabled;
-}
-
-std::uint8_t Recorder::CallerLane() {
-    return threadLane;
-}
-
-void Recorder::SetThreadLane(std::uint8_t lane) {
-    threadLane = lane;
-}
-
-bool Recorder::ComputeQueueEnabled() {
-    static const bool enabled = [] {
-        const char* text = std::getenv("APS5_COMPUTE_QUEUE");
-        return ComputeLanesEnabled() && text != nullptr && text[0] != '0' && text[0] != 0;
-    }();
-    return enabled;
-}
-
-bool Recorder::NewestTimelinePoint(VkSemaphore* semaphore, std::uint64_t* value) const {
-    if (timeline == VK_NULL_HANDLE || submissions == 0) return false;
-    *semaphore = timeline;
-    *value = submissions;
-    return true;
-}
-
 void Recorder::ensureOpen() {
     GuestMemory::AssertGpuLockHeld("Recorder::Commands");
-    if (open != nullptr && ComputeLanesEnabled() && open->lane != threadLane) {
-        open->lane = threadLane;
-        laneSwitchCount.fetch_add(1, std::memory_order_relaxed);
-        Submit();
-    }
     if (open == nullptr) {
         auto batch = std::make_unique<Batch>();
         try {
@@ -1639,7 +1601,6 @@ void Recorder::ensureOpen() {
             throw;
         }
         batch->queue = GuestMemory::GpuLockThreadTag();
-        batch->lane = threadLane;
         if (countingSamples && !segmentMode()) beginSamples(*batch);
         dropStaleHoldKept();
         batch->kept.insert(batch->kept.end(), holdKept.begin(), holdKept.end());
@@ -2832,7 +2793,7 @@ Recorder::UploadSlice Recorder::DrawUpload(std::size_t bytes) {
     const VkDeviceSize alignment = std::max<VkDeviceSize>(context.limits.minStorageBufferOffsetAlignment, 16);
     auto offset = (drawUploadUsed + alignment - 1) & ~(alignment - 1);
     if (drawUpload == nullptr || offset + bytes > drawUpload->Bytes().size()) {
-        drawUpload = std::make_shared<Buffer>(context, std::max(DrawUploadChunk, bytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, context.SnapshotProperties());
+        drawUpload = std::make_shared<Buffer>(context, std::max(DrawUploadChunk, bytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
         offset = 0;
     }
     drawUploadUsed = offset + bytes;
@@ -2937,7 +2898,7 @@ bool Recorder::refreshDrawSnapshot(DrawSnapshot& entry, std::uint64_t address, s
         spans.push_back({held.data() + offset, reinterpret_cast<const void*>(from), static_cast<std::size_t>(to - from)});
     }
     equal.assign(spans.size(), 0);
-    if ((entry.buffer->Properties() & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == 0) CompareSpans(spans, equal);
+    CompareSpans(spans, equal);
     for (std::size_t k = 0; k < spans.size(); ++k) {
         if (equal[k] != 0) continue;
         const auto offset = static_cast<std::size_t>(static_cast<const std::byte*>(spans[k].first) - held.data());
@@ -3718,30 +3679,13 @@ void Recorder::Submit() {
     VkTimelineSemaphoreSubmitInfoKHR timelineInfo{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO_KHR};
     const VkSemaphore hold = std::exchange(submitHold, VK_NULL_HANDLE);
     const std::uint64_t holdValue = submitHoldValue;
-    std::array<VkSemaphore, 2> waitSemaphores{};
-    std::array<std::uint64_t, 2> waitValues{};
-    std::array<VkPipelineStageFlags, 2> waitStages{};
-    std::uint32_t waitCount = 0;
+    VkPipelineStageFlags holdStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
     if (hold != VK_NULL_HANDLE) {
-        waitSemaphores[waitCount] = hold;
-        waitValues[waitCount] = holdValue;
-        waitStages[waitCount++] = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-    }
-    VkQueue targetQueue = context.queue;
-    if (ComputeQueueEnabled() && context.computeQueue != VK_NULL_HANDLE && timeline != VK_NULL_HANDLE) {
-        if (batch->lane == 1) targetQueue = context.computeQueue;
-        if (submissions != 0 && lastSubmittedLane != batch->lane) {
-            waitSemaphores[waitCount] = timeline;
-            waitValues[waitCount] = submissions;
-            waitStages[waitCount++] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-        }
-    }
-    if (waitCount != 0) {
-        submission.waitSemaphoreCount = waitCount;
-        submission.pWaitSemaphores = waitSemaphores.data();
-        submission.pWaitDstStageMask = waitStages.data();
-        timelineInfo.waitSemaphoreValueCount = waitCount;
-        timelineInfo.pWaitSemaphoreValues = waitValues.data();
+        submission.waitSemaphoreCount = 1;
+        submission.pWaitSemaphores = &hold;
+        submission.pWaitDstStageMask = &holdStage;
+        timelineInfo.waitSemaphoreValueCount = 1;
+        timelineInfo.pWaitSemaphoreValues = &holdValue;
     }
     if (timeline != VK_NULL_HANDLE) {
         timelineInfo.signalSemaphoreValueCount = 1;
@@ -3749,10 +3693,10 @@ void Recorder::Submit() {
         submission.signalSemaphoreCount = 1;
         submission.pSignalSemaphores = &timeline;
     }
-    if (waitCount != 0 || timeline != VK_NULL_HANDLE) submission.pNext = &timelineInfo;
+    if (hold != VK_NULL_HANDLE || timeline != VK_NULL_HANDLE) submission.pNext = &timelineInfo;
     DestroyDeferredAtIdle(context);
     const auto submitStart = std::chrono::steady_clock::now();
-    const auto result = function(queueSubmit, "vkQueueSubmit")(targetQueue, 1, &submission, batch->fence);
+    const auto result = function(queueSubmit, "vkQueueSubmit")(context.queue, 1, &submission, batch->fence);
     if (result == VK_ERROR_DEVICE_LOST) {
         const auto idle = context.Function<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(context.device);
         if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) std::terminate();
@@ -3760,7 +3704,6 @@ void Recorder::Submit() {
     Check(result, "vkQueueSubmit recorder");
     batch->submitted = true;
     batch->serial = ++submissions;
-    lastSubmittedLane = batch->lane;
     batch->submittedAt = std::chrono::steady_clock::now();
     CaptureTrace::Log("submit-confirmed batch=%llu tokens=%s", static_cast<unsigned long long>(batch->serial), tokensStr.c_str());
     if (DrawProfiled()) {
@@ -4230,7 +4173,7 @@ void Recorder::finish(std::unique_ptr<Batch> batch, bool wait, int source, bool 
                     const auto& h = holdCounters;
                     AgcDriver::ProfilePrint_nid_no_patch("[recorder] %llu syncs waited %.1f s for the GPU in total (sources, count/wait: idle %llu/%.1fs, pending write %llu/%.1fs, recorded store %llu/%.1fs, address-based %llu/%.1fs, other %llu/%.1fs); hook %llu calls, %llu locked; %llu targeted syncs left %llu batches in flight; snapshot %llu rebuilds %.0f ms, %llu notes covered; %llu unlocked timeline waits %.1f s; %llu submissions, %zu label entries, %llu completion labels pending; fence waits by thread (count/wait):%s; top sync sites (source@caller syncs/batches/wait):%s; under holds (cumulative): %llu completions ran %.0f ms (kept objects released %.0f ms), pending-write syncs from completions: %llu skipped, %llu waited %.0f ms; %llu reaps (%llu with work) retired %llu batches in %.0f ms; hook waits unlocked %llu / %.0f ms GPU (pending write %llu / %.0f ms, recorded store %llu / %.0f ms) + %.0f ms relock (%llu found the recorder torn down), locked %llu; deferred releases: on the release thread %llu batches (%llu objects) in %.0f ms, inline %llu batches (%llu objects) in %.0f ms (%llu batches over the queue bound of %zu), queue max %llu batches, %llu pending\n",static_cast<unsigned long long>(waits), waitedMs / 1000, static_cast<unsigned long long>(syncCounts[0]), syncWaitedMs[0] / 1000, static_cast<unsigned long long>(syncCounts[1]), syncWaitedMs[1] / 1000, static_cast<unsigned long long>(syncCounts[2]), syncWaitedMs[2] / 1000, static_cast<unsigned long long>(syncCounts[3]), syncWaitedMs[3] / 1000, static_cast<unsigned long long>(syncCounts[4]), syncWaitedMs[4] / 1000, static_cast<unsigned long long>(hookCalls.load()), static_cast<unsigned long long>(hookLocks.load()), static_cast<unsigned long long>(targetedSyncs.load()), static_cast<unsigned long long>(batchesLeftInFlight.load()), static_cast<unsigned long long>(snapshotRebuilds), snapshotRebuildMs, static_cast<unsigned long long>(snapshotCovered), static_cast<unsigned long long>(unlockedWaits.load()), unlockedWaitedUs.load() / 1e6, static_cast<unsigned long long>(recorder.submissions), recorder.PendingLabels(), static_cast<unsigned long long>(completionLabels.load()), ThreadSyncReport().c_str(), SyncSiteReport().c_str(), static_cast<unsigned long long>(h.completions), h.completionMs, h.keptReleaseMs, static_cast<unsigned long long>(h.completionSyncsSkipped), static_cast<unsigned long long>(h.completionSyncsWaited), h.completionSyncWaitMs, static_cast<unsigned long long>(h.reaps), static_cast<unsigned long long>(h.reapsWithWork), static_cast<unsigned long long>(h.reapBatches), h.reapMs, static_cast<unsigned long long>(h.hookUnlockedWaits), h.hookUnlockedWaitMs, static_cast<unsigned long long>(h.hookUnlockedWaitsBySource[1]), h.hookUnlockedWaitMsBySource[1], static_cast<unsigned long long>(h.hookUnlockedWaitsBySource[2]), h.hookUnlockedWaitMsBySource[2], h.hookRelockMs, static_cast<unsigned long long>(h.hookUnlockedTornDown), static_cast<unsigned long long>(h.hookLockedWaits), static_cast<unsigned long long>(threadReleases.load()), static_cast<unsigned long long>(threadObjects.load()), threadReleaseUs.load() / 1000.0, static_cast<unsigned long long>(inlineReleases.load()), static_cast<unsigned long long>(inlineObjects.load()), inlineReleaseUs.load() / 1000.0, static_cast<unsigned long long>(inlineOverBound.load()), ReleaseQueueBound(), static_cast<unsigned long long>(releaseQueueMax.load()), static_cast<unsigned long long>(deferredPending.load()));
                     AgcDriver::ProfilePrint_nid_no_patch("[recorder] completion label stores: %llu run, %llu skipped (no CPU write-back overlapped them); %llu counted pending at a write-back; %llu write-backs over a tracked label; %llu write-back completions pending\n", static_cast<unsigned long long>(completionStoresRun.load()), static_cast<unsigned long long>(completionStoresSkipped.load()), static_cast<unsigned long long>(completionLabelsCountedLate.load()), static_cast<unsigned long long>(writeBacksOverLabels.load()), static_cast<unsigned long long>(writeBackCompletions.load()));
-                    AgcDriver::ProfilePrint_nid_no_patch("[recorder] submits %llu, vkQueueSubmit mean %.1f us, max %.1f us, lane switches %llu\n", static_cast<unsigned long long>(submitCount), submitCount != 0 ? submitUs / static_cast<double>(submitCount) : 0.0, submitMaxUs, static_cast<unsigned long long>(laneSwitchCount.load(std::memory_order_relaxed)));
+                    AgcDriver::ProfilePrint_nid_no_patch("[recorder] submits %llu, vkQueueSubmit mean %.1f us, max %.1f us\n", static_cast<unsigned long long>(submitCount), submitCount != 0 ? submitUs / static_cast<double>(submitCount) : 0.0, submitMaxUs);
                     const auto reads = Recorder::ReadCounts();
                     AgcDriver::ProfilePrint_nid_no_patch("[recorder] in-place reads: %llu noted, %llu queries, hits by reader: dispatch element %llu, gpu copy %llu, address-based %llu, indirect %llu, storage upload %llu, copy source %llu, draw input %llu; %llu hits on signaled batches ignored\n", static_cast<unsigned long long>(reads.noted), static_cast<unsigned long long>(reads.queries), static_cast<unsigned long long>(reads.hits[0]), static_cast<unsigned long long>(reads.hits[1]), static_cast<unsigned long long>(reads.hits[2]), static_cast<unsigned long long>(reads.hits[3]), static_cast<unsigned long long>(reads.hits[4]), static_cast<unsigned long long>(reads.hits[5]), static_cast<unsigned long long>(reads.hits[6]), static_cast<unsigned long long>(reads.staleIgnored));
                 }

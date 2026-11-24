@@ -17,14 +17,13 @@
 #include "graphics/presentation/performanceOverlay.h"
 #include "graphics/presentation/renderDoc.h"
 #include "graphics/presentation/systemOverlay.h"
-#include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window/hostInput.h"
 #include "graphics/presentation/window/windowInternal.h"
 #include "kytyGitVersion.h"
 #include "libs/controller.h"
 #include "libs/wheelHost.h"
 #include "loader/systemContent.h"
-#include "streaming/liveSettings.h"
+#include "streaming/transport.h"
 
 #include <SDL3/SDL.h>
 #include <cstdlib>
@@ -47,6 +46,20 @@
 // IWYU pragma: no_include <intrin.h>
 
 #define KYTY_DBG_INPUT
+
+namespace Streaming {
+OutputState ReadLiveOutput() {
+	// Until Task 4 owns live display state, only the launch configuration is available.
+	uint32_t fps = 60;
+	if (const char* value = std::getenv("ASTROHYBRID_FPS_LIMIT")) {
+		char* end = nullptr;
+		const auto parsed = std::strtoul(value, &end, 10);
+		if (end != value && *end == '\0' && parsed >= 10 && parsed <= 240)
+			fps = static_cast<uint32_t>(parsed);
+	}
+	return {Config::GetScreenWidth(), Config::GetScreenHeight(), fps};
+}
+} // namespace Streaming
 
 namespace Libs::Graphics {
 
@@ -152,14 +165,6 @@ uint64_t PresentedFrames() {
 	return g_window ? g_window->loop.presented_frames.load(std::memory_order_relaxed) : 0;
 }
 
-void WindowRequestSize(uint32_t width, uint32_t height) {
-	std::lock_guard lock(g_window_lifetime_mutex);
-	if (g_window) {
-		g_window->pending_size.store((static_cast<uint64_t>(width) << 32) | height,
-		                             std::memory_order_relaxed);
-	}
-}
-
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 // A factory caches output descriptions, so each query creates a new one.
 static bool GetOutputDesc(HMONITOR monitor, DXGI_OUTPUT_DESC1* desc) {
@@ -215,11 +220,6 @@ static void GameEventTerminate(WindowLoopState& game) {
 	game.need_exit = true;
 }
 
-static void SetFullscreenState(WindowContext& context, bool fullscreen) {
-	context.fullscreen.store(fullscreen, std::memory_order_relaxed);
-	Streaming::Live().Update([=](Streaming::LiveState& state) { state.fullscreen = fullscreen; });
-}
-
 static void ToggleDesktopFullscreen() {
 	if (g_window == nullptr || g_window->window == nullptr) {
 		return;
@@ -229,8 +229,6 @@ static void ToggleDesktopFullscreen() {
 	const bool fullscreen = (flags & SDL_WINDOW_FULLSCREEN) != 0u;
 	if (!SDL_SetWindowFullscreen(g_window->window, !fullscreen)) {
 		LOGF("Toggle fullscreen failed: %s\n", SDL_GetError());
-	} else {
-		SetFullscreenState(*g_window, !fullscreen);
 	}
 }
 
@@ -392,9 +390,6 @@ static void GameEventController([[maybe_unused]] const EventController& f) {
 		}
 	}
 
-	if (f.down) {
-		Controller::PadPressed(f.id);
-	}
 	if (f.down || f.up) {
 		HostInputPadButton(f.id, f.button, f.down);
 	}
@@ -456,10 +451,6 @@ void WindowContext::RefreshSizeFromWindow() {
 void WindowContext::ProcessWindowEvent(const SDL_WindowEvent& event) {
 	const auto& window_event = event;
 	switch (window_event.type) {
-		case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
-		case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
-			SetFullscreenState(*this, window_event.type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN);
-			break;
 		case SDL_EVENT_WINDOW_SHOWN: {
 			LOGF("Window %" PRIu32 " shown\n", window_event.windowID);
 			RefreshSizeFromWindow();
@@ -598,11 +589,7 @@ void WindowContext::ProcessEvent(double time_s) {
 #endif
 			case SDLK_F2:
 				if (pressed) {
-					if ((event->key.mod & SDL_KMOD_CTRL) != 0 && VideoOut::CycleFrameLimit()) {
-						if (!PerformanceOverlayEnabled()) {
-							TogglePerformanceOverlay();
-						}
-					} else if ((event->key.mod & SDL_KMOD_SHIFT) != 0) {
+					if ((event->key.mod & SDL_KMOD_SHIFT) != 0) {
 						TogglePerformanceOverlayDetails();
 					} else {
 						TogglePerformanceOverlay();
@@ -873,13 +860,6 @@ void WindowContext::Run() {
 			title_frames = frames;
 		}
 		const auto wait_ms = static_cast<int>(title_interval_ms - (now - title_time));
-		if (const auto size = pending_size.exchange(0, std::memory_order_relaxed)) {
-			const auto width = static_cast<int>(size >> 32);
-			const auto height = static_cast<int>(static_cast<uint32_t>(size));
-			if (!SDL_SetWindowSize(window, width, height)) {
-				LOGF("Window resize failed: %s\n", SDL_GetError());
-			}
-		}
 		if (!HostInputWaitEvent(&loop.event, wait_ms)) {
 			continue;
 		}
@@ -899,12 +879,6 @@ static void WindowCreate(WindowContext& context) {
 	// RenderDoc can hide Wayland Vulkan surface support; prefer X11 for captures.
 	if (Config::RenderDocEnabled()) {
 		SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "x11,wayland");
-	} else if (const char* native = std::getenv("KYTY_WAYLAND_NATIVE");
-	           native != nullptr && std::strcmp(native, "1") == 0) {
-		// KYTY_WAYLAND_NATIVE=1: a Wayland window at the display's real resolution under desktop
-		// scaling (KDE at 150% otherwise gives a 4K screen a stretched 2560x1440 surface).
-		SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "wayland,x11");
-		SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY, "1");
 	}
 #endif
 	if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
@@ -945,12 +919,6 @@ static void WindowCreate(WindowContext& context) {
 		EXIT("%s\n", SDL_GetError());
 	}
 
-	SetFullscreenState(context, (SDL_GetWindowFlags(context.window) & SDL_WINDOW_FULLSCREEN) != 0u);
-	Streaming::Live().Update([&](Streaming::LiveState& state) {
-		state.width = static_cast<uint32_t>(width);
-		state.height = static_cast<uint32_t>(height);
-	});
-
 	RefreshDisplayLuminance(context.window);
 	SDL_SetWindowPosition(context.window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 	HostInputInit(context.window);
@@ -976,12 +944,12 @@ Presenter& WindowInit(uint32_t width, uint32_t height) {
 	window->graphic_ctx.screen_height = height;
 
 	WindowCreate(*window);
-	// The presenter starts the session worker during creation. A settings request that
-	// needs the window must wait until g_window is published.
-	std::lock_guard lock(g_window_lifetime_mutex);
 	window->CreateVulkan();
 	auto& presenter = *window->presenter;
-	g_window = std::move(window);
+	{
+		std::lock_guard lock(g_window_lifetime_mutex);
+		g_window = std::move(window);
+	}
 	return presenter;
 }
 
@@ -1107,14 +1075,6 @@ void WindowContext::UpdateTitle(uint64_t frame_num, double current_fps) {
 	    (has_title ? title : ""), (has_title ? ", " : ""), (has_title_id ? title_id : ""),
 	    (has_title_id ? ", " : ""), (has_app_ver ? app_ver : ""), (has_app_ver ? " " : ""),
 	    device_name, processor_name, frame_num, current_fps);
-	if (const auto* limit = VideoOut::FrameLimitLabel()) {
-		text += fmt::format(" | FPS limit: {}", limit);
-	}
-	// ASTROHYBRID_WINDOW_TITLE (default unset): a fixed window title instead of the diagnostic one.
-	static const char* fixed_title = std::getenv("ASTROHYBRID_WINDOW_TITLE");
-	if (fixed_title != nullptr && fixed_title[0] != '\0') {
-		text = fixed_title;
-	}
 
 	SDL_SetWindowTitle(window, text.c_str());
 }

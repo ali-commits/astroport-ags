@@ -67,49 +67,30 @@ SDL_hid_device* OpenDevice(int controller) {
 	SDL_LockJoysticks();
 	auto*      pad      = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(controller));
 	const bool wireless = pad != nullptr && SDL_GetGamepadType(pad) == SDL_GAMEPAD_TYPE_PS5 &&
-	                      SDL_GetGamepadConnectionState(pad) != SDL_JOYSTICK_CONNECTION_WIRED;
+	                      SDL_GetGamepadConnectionState(pad) == SDL_JOYSTICK_CONNECTION_WIRELESS;
 	const auto vendor  = wireless ? SDL_GetGamepadVendor(pad) : 0;
 	const auto product = wireless ? SDL_GetGamepadProduct(pad) : 0;
 	const auto address = wireless ? Address(SDL_GetGamepadSerial(pad)) : std::string {};
 	SDL_UnlockJoysticks();
-	if (vendor != 0x054c || (product != 0x0ce6 && product != 0x0df2)) {
+	if (vendor != 0x054c || (product != 0x0ce6 && product != 0x0df2) || address.empty()) {
 		return nullptr;
 	}
-	auto*       devices            = SDL_hid_enumerate(vendor, product);
-	std::string path               = {};
-	std::string fallback_path      = {};
-	bool        ambiguous          = false;
-	bool        fallback_ambiguous = false;
+	auto*       devices = SDL_hid_enumerate(vendor, product);
+	std::string path;
+	bool        ambiguous = false;
 	for (auto* device = devices; device != nullptr; device = device->next) {
-		const bool is_bt =
-		    device->bus_type == SDL_HID_API_BUS_BLUETOOTH ||
-		    (device->path != nullptr &&
-		     (SDL_strcasestr(device->path, "00001124-0000-1000-8000-00805f9b34fb") != nullptr ||
-		      SDL_strcasestr(device->path, "bthenum") != nullptr));
-		if (is_bt && device->path != nullptr &&
+		if (device->bus_type == SDL_HID_API_BUS_BLUETOOTH && device->path != nullptr &&
+		    Address(device->serial_number) == address &&
 		    (device->usage_page == 0 || (device->usage_page == 1 && device->usage == 5))) {
-			const auto dev_address = Address(device->serial_number);
-			if (!address.empty() && dev_address == address) {
-				if (!path.empty()) {
-					ambiguous = true;
-					break;
-				}
-				path = device->path;
+			if (!path.empty()) {
+				ambiguous = true;
+				break;
 			}
-			if (address.empty() || dev_address.empty() ||
-			    SDL_strcasestr(device->path, address.c_str()) != nullptr) {
-				if (!fallback_path.empty()) {
-					fallback_ambiguous = true;
-				} else {
-					fallback_path = device->path;
-				}
-			}
+			path = device->path;
 		}
 	}
 	SDL_hid_free_enumeration(devices);
-	const std::string& chosen =
-	    (!ambiguous && !path.empty()) ? path : (!fallback_ambiguous ? fallback_path : std::string {});
-	return !chosen.empty() ? SDL_hid_open_path(chosen.c_str()) : nullptr;
+	return !ambiguous && !path.empty() ? SDL_hid_open_path(path.c_str()) : nullptr;
 }
 
 void FinishReport(std::array<uint8_t, REPORT_BYTES>& report) {

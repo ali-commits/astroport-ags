@@ -29,10 +29,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/drawPrep/bindingPlan.h"
-#include "graphics/host_gpu/renderer/hybridDlss.h"
-#include "graphics/host_gpu/renderer/frameGen.h"
 #include "graphics/host_gpu/renderer/drawPrep/commitStats.h"
-#include "graphics/host_gpu/renderer/drawPrep/cpGaps.h"
 #include "graphics/host_gpu/renderer/drawPrep/drawPrep.h"
 #include "graphics/host_gpu/renderer/drawPrep/drawRun.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
@@ -2058,7 +2055,7 @@ RenderExecutor::OffloadJob* RenderExecutor::OffloadBindings(CommandBuffer& buffe
 	job->known_miss = DrawEncode::FreshSkipEnabled() && job->built.fresh;
 	EXIT_IF(!job->scratch.writes.empty() && (!job->known_miss || pipeline.descriptor_set_layout == nullptr));
 	if (!job->scratch.writes.empty() && !job->verify && DrawEncode::OffsetAuditEnabled()) [[unlikely]] {
-		NoteDescriptorOffsetAudit(pipeline, job->scratch.writes, true);
+		NoteDescriptorOffsetAudit(pipeline, job->scratch.writes);
 	}
 	job->bindless     = pipeline.uses_bindless;
 	job->bindless_set = pipeline.uses_bindless ? m_context.GetBindlessTable().Set() : vk::DescriptorSet {};
@@ -7556,28 +7553,6 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 	}
 	CommitStats::StepMark(CommitStats::Step::LateCheck);
-
-	// ASTROHYBRID_DLSS (dlss.h): depth attachments by colour target, and the game's temporal
-	// upscale replaced by DLSS Super Resolution. A replaced draw records nothing else; like a
-	// skipped one (KYTY_PIPELINE_SKIP below) no run record may be continued across it.
-	if (Dlss::Requested() || FrameGen::Requested()) [[unlikely]] {
-		NoteDlssTargets(std::span<const RenderColorInfo> {state.color_info, state.color_count},
-		                state.depth_info.image_id);
-		if (FrameGen::Active() && state.ps_active && bindings.pixel.has_value()) {
-			NoteFrameGenCamera(*bindings.pixel);
-			TagFrameGen(buffer, *bindings.pixel);
-		}
-		if (Dlss::Requested() && state.ps_active && bindings.pixel.has_value() && state.color_count != 0 &&
-		    TryDlssUpscale(buffer, *bindings.pixel, state.color_info[0].image_id)) {
-			m_run.valid        = false;
-			m_run_active       = false;
-			m_run_targets_kept = false;
-			for (auto& record: m_run_kept) {
-				record.valid = false;
-			}
-			return;
-		}
-	}
 
 	// KYTY_LOD_STATS_PLAIN_VARIANT: without a mip-statistics counter on any image the pixel
 	// program's feedback records nothing; its feedback-free variant then gives the same results

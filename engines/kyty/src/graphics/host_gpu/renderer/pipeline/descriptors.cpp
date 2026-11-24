@@ -26,14 +26,12 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/hostMemory.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
-#include "graphics/host_gpu/renderer/passTrace.h"
 #include "graphics/host_gpu/renderer/cache/bufferLookupStats.h"
 #include "graphics/host_gpu/renderer/cpCommit.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/drawPrep/bindingPlan.h"
 #include "graphics/host_gpu/renderer/drawPrep/commitStats.h"
-#include "graphics/host_gpu/renderer/drawPrep/cpGaps.h"
 #include "graphics/host_gpu/renderer/drawPrep/imgSide.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/host_gpu/renderer/drawPrep/xframeReuse.h"
@@ -2816,7 +2814,7 @@ void LogBindlessHeapStats(BindlessTable& table, uint64_t frame) {
 		const char* value = std::getenv("KYTY_BINDLESS_HEAP_STATS");
 		if (value == nullptr) return uint64_t {0};
 		const auto n = std::strtoull(value, nullptr, 10);
-		return n > 1 ? static_cast<uint64_t>(n) : uint64_t {300};
+		return n > 1 ? n : uint64_t {300};
 	}();
 	const bool enabled = interval != 0;
 	static uint64_t   next    = 0;
@@ -5400,125 +5398,6 @@ static const std::vector<GuestRange>* ResolveWrittenRanges(RenderContext&       
 	return narrowed ? &scratch.ranges : nullptr;
 }
 
-void TracePass(TextureCache& cache, const char* kind, std::span<PreparedBindings* const> stages,
-               std::span<const RenderColorInfo> colors) {
-	std::string line;
-	char        part[256];
-	std::snprintf(part, sizeof(part), "PassTrace %llu %s",
-	              static_cast<unsigned long long>(PassTrace::NextSeq()), kind);
-	line += part;
-	const auto image_text = [&](char tag, ImageId id) {
-		if (!id) {
-			line += " -";
-			return;
-		}
-		const auto& image = cache.GetImage(id);
-		std::snprintf(part, sizeof(part), " %c:%llx:%s:%ux%u%s", tag,
-		              static_cast<unsigned long long>(image.info.data.address),
-		              vk::to_string(image.info.pixel_format).c_str(), image.info.extent.width,
-		              image.info.extent.height, image.info.IsDepth() ? ":depth" : "");
-		line += part;
-	};
-	for (auto* stage: stages) {
-		if (stage == nullptr || stage->runtime == nullptr || !*stage->runtime) {
-			continue;
-		}
-		const auto& program = *stage->runtime->program;
-		std::snprintf(part, sizeof(part), " | st%d %016llx", static_cast<int>(program.stage),
-		              static_cast<unsigned long long>(program.shader_hash));
-		line += part;
-		for (const auto& binding: stage->images) {
-			image_text(binding.desc.type == TextureCache::BindingType::Storage ? 'S' : 'T',
-			           binding.image_id);
-		}
-		// ASTROHYBRID_PASS_TRACE_MATRIX=1: every bound buffer (first 64 KiB) is scanned for
-		// perspective projections (two scales whose ratio is 1.6-1.9, a +-1 in the w row or column,
-		// zero w-w); each new hit prints its address and the 48 floats from it.
-		static const bool scan_matrices = [] {
-			const char* value = std::getenv("ASTROHYBRID_PASS_TRACE_MATRIX");
-			return value != nullptr && value[0] == '1';
-		}();
-		if (scan_matrices) {
-			static std::vector<uint64_t> seen;
-			for (const auto& source: stage->buffer_sources) {
-				if (source.address == 0 || source.size < 64) {
-					continue;
-				}
-				const auto* f     = reinterpret_cast<const float*>(source.address);
-				const auto  count = std::min<uint64_t>(source.size, 65536) / 4;
-				for (uint64_t i = 0; i + 16 <= count; i++) {
-					const float* m      = f + i;
-					const auto   near_0 = [](float v) { return std::fabs(v) < 1e-6f; };
-					const auto   unit   = [](float v) { return std::fabs(std::fabs(v) - 1.0f) < 1e-5f; };
-					const float  sx = m[0], sy = m[5];
-					if (!(sx > 0.2f && sx < 20.0f && sy > 0.2f && sy < 20.0f)) {
-						continue;
-					}
-					const float ratio = sy / sx;
-					if (ratio < 1.6f || ratio > 1.9f || !near_0(m[15]) || !near_0(m[1]) ||
-					    !near_0(m[4])) {
-						continue;
-					}
-					const bool row_w = unit(m[14]) && near_0(m[12]) && near_0(m[13]);
-					const bool col_w = unit(m[11]) && near_0(m[3]) && near_0(m[7]);
-					if (!row_w && !col_w) {
-						continue;
-					}
-					const uint64_t key = source.address + i * 4;
-					if (std::find(seen.begin(), seen.end(), key) != seen.end() || seen.size() > 64) {
-						continue;
-					}
-					seen.push_back(key);
-					std::string text;
-					const auto  around = std::min<uint64_t>(48, count - i);
-					for (uint64_t k = 0; k < around; k++) {
-						std::snprintf(part, sizeof(part), " %g", static_cast<double>(m[k]));
-						text += part;
-					}
-					std::printf("PassTrace matrix st%d %016llx buffer %llx+%llu offset %llu (%s):%s\n",
-					            static_cast<int>(program.stage),
-					            static_cast<unsigned long long>(program.shader_hash),
-					            static_cast<unsigned long long>(source.address),
-					            static_cast<unsigned long long>(source.size),
-					            static_cast<unsigned long long>(i * 4), row_w ? "w row" : "w column",
-					            text.c_str());
-				}
-			}
-		}
-		// ASTROHYBRID_PASS_TRACE_CB=<hex hash>: that shader's buffers, first 24 dwords each.
-		static const uint64_t cb_hash = [] {
-			const char* value = std::getenv("ASTROHYBRID_PASS_TRACE_CB");
-			return value != nullptr ? std::strtoull(value, nullptr, 16) : uint64_t {0};
-		}();
-		if (cb_hash != 0 && program.shader_hash == cb_hash) {
-			for (const auto& source: stage->buffer_sources) {
-				if (source.address == 0 || source.size < 4) {
-					continue;
-				}
-				std::snprintf(part, sizeof(part), " | B:%llx:%llu",
-				              static_cast<unsigned long long>(source.address),
-				              static_cast<unsigned long long>(source.size));
-				line += part;
-				const auto* words = reinterpret_cast<const uint32_t*>(source.address);
-				const auto  count = std::min<uint64_t>(24, source.size / 4);
-				for (uint64_t i = 0; i < count; i++) {
-					float value = 0;
-					std::memcpy(&value, &words[i], 4);
-					std::snprintf(part, sizeof(part), " [%llu]%08x=%g", static_cast<unsigned long long>(i * 4),
-					              words[i], static_cast<double>(value));
-					line += part;
-				}
-			}
-		}
-	}
-	if (!colors.empty()) {
-		line += " | RT";
-		for (const auto& color: colors) {
-			image_text('C', color.image_id);
-		}
-	}
-	std::printf("%s\n", line.c_str());
-}
 // KYTY_BINDING_SAME_STATS=1 (diagnostic, KYTY_CP_DIAGNOSTICS builds only): per binding class, how
 // often a buffer binding's source (address, size, cache id) equals the previous RebindBuffers' of the
 // same program at the same slot, how often KYTY_KEEP_BINDINGS could keep it (keepable: its check
@@ -5613,8 +5492,6 @@ static Live::Switch g_rebind_lean("KYTY_REBIND_LEAN", Live::ParseDefaultOff);
 
 void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	KYTY_PROFILER_FUNCTION();
-	auto* pass = CpGaps::CurrentDrawPassSample();
-	const auto start = pass != nullptr ? CpGaps::Tsc() : 0;
 	prepared.write_preparation_tick = BufferCache::ShaderWriteRetickEnabled()
 	                                      ? m_context.GetCommandScheduler().CurrentTick()
 	                                      : UINT64_MAX;
@@ -5853,9 +5730,6 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 		BufferLookupStats::NoteStage(SyncEpoch::Current());
 	}
 	CommitStats::StepMark(CommitStats::Step::RbTables);
-	if (pass != nullptr) [[unlikely]] {
-		pass->rebind_ticks += CpGaps::Tsc() - start;
-	}
 }
 
 // KYTY_SPARSE_HOLES=1 (TextureCache::ResetUnmappedDepth): after a stage's views are acquired (and
@@ -6280,9 +6154,6 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 			BindRenderTarget(target.image_id);
 		}
 	}
-	if (PassTrace::Active()) [[unlikely]] {
-		TracePass(cache, "draw", stages, colors);
-	}
 	CommitStats::StepMark(CommitStats::Step::Images);
 	CommitStats::Mark(CommitStats::Phase::RebindImages);
 	// Discovery can read back PS5 metadata and submit the scheduler. Reserve draw buffers only
@@ -6362,7 +6233,7 @@ static void CountDescriptorPushMiss(int32_t result, std::span<const vk::WriteDes
 // maxDescriptorSetStorageBuffersDynamic allows: their buffer offsets are left out of the digest,
 // their buffers and ranges are not. Push layouts cannot hold dynamic descriptors, so their counts
 // are the potential of splitting them (a pushed set and a dynamic one). Counted as
-// DescriptorOffsetAudit* frame events and ten-second stdout summaries.
+// DescriptorOffsetAudit* frame events (with a connected profiler).
 static bool DescriptorOffsetAuditEnabled() {
 	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
 	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [] {
@@ -6396,68 +6267,23 @@ public:
 
 	Result Note(uint64_t tick, vk::DescriptorSetLayout layout,
 	            std::span<const vk::WriteDescriptorSet> writes, uint32_t dynamic_limit,
-	            bool push, bool graphics) {
+	            bool push) {
 		if (tick != m_tick) {
 			m_tick = tick;
-			for (auto& point: m_tracks) {
-				for (auto& track: point) {
-					track = {};
-				}
-			}
+			m_sets = {};
+			m_pushes = {};
 		}
 		Result result;
 		const auto digest = MaskedDigest(layout, writes, dynamic_limit, result.over_limit);
-		auto&      track  = m_tracks[graphics ? 0 : 1][push ? 0 : 1];
+		auto&      track  = push ? m_pushes : m_sets;
 		result.previous   = track.has_previous && track.previous == digest;
 		result.any        = !track.seen.insert(digest).second;
 		track.previous     = digest;
 		track.has_previous = true;
-		Report(result, push, graphics, dynamic_limit);
 		return result;
 	}
 
 private:
-	struct Counts {
-		uint64_t updates = 0;
-		uint64_t previous = 0;
-		uint64_t any = 0;
-		uint64_t over_limit = 0;
-	};
-
-	void Report(const Result& result, bool push, bool graphics, uint32_t dynamic_limit) {
-		using Clock = std::chrono::steady_clock;
-		auto& counts = m_counts[graphics ? 0 : 1][push ? 0 : 1];
-		++counts.updates;
-		counts.previous += result.previous;
-		counts.any += result.any;
-		counts.over_limit += result.over_limit;
-		if (++m_samples % 1024 != 0) {
-			return;
-		}
-		const auto now = Clock::now();
-		if (now - m_report_start < std::chrono::seconds(10)) {
-			return;
-		}
-		for (unsigned point = 0; point < 2; ++point) {
-			for (unsigned kind = 0; kind < 2; ++kind) {
-				auto& row = m_counts[point][kind];
-				if (row.updates != 0) {
-					fmt::print("DescriptorOffsetAudit: {} {} updates={} previous={} any={} "
-					           "over_limit={} dynamic_limit={}\n",
-					           point == 0 ? "graphics" : "compute", kind == 0 ? "push" : "set",
-					           row.updates, row.previous, row.any, row.over_limit, dynamic_limit);
-					row = {};
-				}
-			}
-		}
-		std::fflush(stdout);
-		m_report_start = now;
-	}
-
-	Counts m_counts[2][2] {};
-	uint64_t m_samples = 0;
-	std::chrono::steady_clock::time_point m_report_start = std::chrono::steady_clock::now();
-
 	struct Track {
 		uint64_t                     previous     = 0;
 		bool                         has_previous = false;
@@ -6522,7 +6348,8 @@ private:
 	}
 
 	uint64_t m_tick = UINT64_MAX;
-	Track    m_tracks[2][2];
+	Track    m_sets;
+	Track    m_pushes;
 };
 
 } // namespace
@@ -6914,11 +6741,8 @@ void RenderExecutor::EncodeCommit(Sink& sink, DrawEncode::Shadow& shadow, Comman
 	if (!scratch.writes.empty()) {
 		EXIT_IF(pipeline.descriptor_set_layout == nullptr);
 		if (DescriptorOffsetAuditEnabled()) [[unlikely]] {
-			NoteDescriptorOffsetAudit(pipeline, scratch.writes, point == vk::PipelineBindPoint::eGraphics);
+			NoteDescriptorOffsetAudit(pipeline, scratch.writes);
 		}
-		auto* pass = point == vk::PipelineBindPoint::eGraphics
-		                 ? CpGaps::CurrentDrawPassSample() : nullptr;
-		const auto descriptor_start = pass != nullptr ? CpGaps::Tsc() : 0;
 		if (pipeline.uses_push_descriptors) {
 			const CommitStats::SubScope desc_scope(CommitStats::Sub::DescPush);
 			// KYTY_PUSH_SHADOW_FRESH_SKIP: a stage's shader data or flattened SRT was uploaded for
@@ -6932,9 +6756,6 @@ void RenderExecutor::EncodeCommit(Sink& sink, DrawEncode::Shadow& shadow, Comman
 			const CommitStats::SubScope desc_scope(CommitStats::Sub::DescSet);
 			CommitDescriptorSet(buffer, point, pipeline, built.fresh);
 		}
-		if (pass != nullptr) [[unlikely]] {
-			pass->descriptor_ticks += CpGaps::Tsc() - descriptor_start;
-		}
 	}
 	if (pipeline.uses_bindless) [[unlikely]] {
 		// (Created by CommitBindingsSideEffects.)
@@ -6944,7 +6765,7 @@ void RenderExecutor::EncodeCommit(Sink& sink, DrawEncode::Shadow& shadow, Comman
 }
 
 void RenderExecutor::NoteDescriptorOffsetAudit(const PipelineCache::Pipeline&          pipeline,
-                                               std::span<const vk::WriteDescriptorSet> writes, bool graphics) {
+                                               std::span<const vk::WriteDescriptorSet> writes) {
 	// Draws and dispatches are recorded under the render mutex, one at a time.
 	static DescriptorOffsetAudit audit;
 	using E           = Profiler::FrameEvent;
@@ -6952,7 +6773,7 @@ void RenderExecutor::NoteDescriptorOffsetAudit(const PipelineCache::Pipeline&   
 	const auto result = audit.Note(
 	    m_context.GetCommandScheduler().CurrentTick(), pipeline.descriptor_set_layout, writes,
 	    m_context.GetGraphics().GetPhysicalDeviceProperties().limits.maxDescriptorSetStorageBuffersDynamic,
-	    push, graphics);
+	    push);
 	Profiler::CountFrameEvent(push ? E::DescriptorOffsetAuditPushes : E::DescriptorOffsetAuditSets);
 	if (result.previous) {
 		Profiler::CountFrameEvent(push ? E::DescriptorOffsetAuditPushRepeatsPrevious

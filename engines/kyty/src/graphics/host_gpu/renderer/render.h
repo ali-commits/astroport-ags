@@ -524,11 +524,6 @@ public:
 		SettleEncode();
 		m_shadow.InvalidatePushConstants();
 	}
-	// A foreign recorder (NGX DLSS, hybridDlss.cpp) bound state through the native handle.
-	void ForgetBoundState() const {
-		SettleEncode();
-		m_shadow.Begin();
-	}
 
 	// The encode's view (drawEncode.h): the shadow the state commands above update, the switches
 	// its comparisons depend on, and the ring the encoder writes (null while recording natively).
@@ -1302,7 +1297,7 @@ public:
 	                  DrawEncode::DescriptorScratch& scratch, DrawEncode::BuiltDescriptors& built);
 	[[nodiscard]] DrawEncode::DescriptorEnv MakeDescriptorEnv(std::span<PreparedBindings* const> stages);
 	void NoteDescriptorOffsetAudit(const PipelineCache::Pipeline&          pipeline,
-	                               std::span<const vk::WriteDescriptorSet> writes, bool graphics);
+	                               std::span<const vk::WriteDescriptorSet> writes);
 
 	// Draw-prep: hands the committed draw's preparation to its program refresh (once).
 	[[nodiscard]] DrawPrep::PreparedDraw* TakePreparedDraw() noexcept {
@@ -1533,15 +1528,6 @@ private:
 	                                                        uint32_t render_target_slice_offset);
 	void                      BindImage(ImageId id, bool storage);
 	void                      BindRenderTarget(ImageId id);
-	// ASTROHYBRID_DLSS (dlss.h): every draw's colour targets and depth attachment; and the game's
-	// temporal upscale draw replaced by DLSS (true: recorded, the draw is done).
-	void NoteDlssTargets(std::span<const RenderColorInfo> colors, ImageId depth);
-	[[nodiscard]] bool TryDlssUpscale(CommandBuffer& buffer, PreparedBindings& pixel,
-	                                  ImageId output);
-	// ASTROHYBRID_DLSSG (frameGen.h): the camera from a draw's bound constants, and the frame's
-	// depth, motion vectors and constants at the temporal upscale pass.
-	void NoteFrameGenCamera(const PreparedBindings& stage);
-	void TagFrameGen(CommandBuffer& buffer, PreparedBindings& pixel);
 	void                      ResetBindings();
 	// `site` names the caller's stage and table kind; it only selects the entry checked first.
 	// *fresh (optional): set when the returned range was allocated by this call (no earlier upload

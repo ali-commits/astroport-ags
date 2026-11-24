@@ -179,30 +179,9 @@ void _readFile(const Apr::ReadFileCommand& command) {
         if (obtained != static_cast<std::uint64_t>(wanted)) break;
     }
 #else
-    // APS5_GPU_ENGINE=kyty: Kyty write-protects GPU-visible guest pages to track CPU writes, and the
-    // kernel fails a read() into such a page (EFAULT) instead of faulting. Copy through a staging
-    // buffer then, as on Windows, so the stores fault and Kyty's handler records them.
-    static const bool staged = [] {
-        const char* engine = std::getenv("APS5_GPU_ENGINE");
-        return engine != nullptr && std::strcmp(engine, "kyty") == 0;
-    }();
-    std::uint64_t read = 0;
-    if (staged) {
-        std::vector<char> staging(static_cast<std::size_t>(std::min<std::uint64_t>(command.size, 64u * 1024u)));
-        while (read < command.size) {
-            const auto wanted = static_cast<std::streamsize>(std::min<std::uint64_t>(command.size - read, staging.size()));
-            stream.read(staging.data(), wanted);
-            const auto obtained = static_cast<std::uint64_t>(stream.gcount());
-            if (obtained != 0) std::memcpy(reinterpret_cast<char*>(command.destination) + read, staging.data(), static_cast<std::size_t>(obtained));
-            read += obtained;
-            if (stream.bad()) throw std::runtime_error("APR: read failed for " + file.path.string());
-            if (obtained != static_cast<std::uint64_t>(wanted)) break;
-        }
-    } else {
-        stream.read(reinterpret_cast<char*>(command.destination), static_cast<std::streamsize>(command.size));
-        if (stream.bad()) throw std::runtime_error("APR: read failed for " + file.path.string());
-        read = static_cast<std::uint64_t>(stream.gcount());
-    }
+    stream.read(reinterpret_cast<char*>(command.destination), static_cast<std::streamsize>(command.size));
+    if (stream.bad()) throw std::runtime_error("APR: read failed for " + file.path.string());
+    const auto read = static_cast<std::uint64_t>(stream.gcount());
 #endif
     if (read != command.size && (!stream.eof() || command.offset + read < std::filesystem::file_size(file.path))) throw std::runtime_error("APR: read of " + file.path.string() + " at offset " + std::to_string(command.offset) + " returned " + std::to_string(read) + " of " + std::to_string(command.size) + " bytes");
     if (read != command.size) std::memset(reinterpret_cast<char*>(command.destination) + read, 0, static_cast<std::size_t>(command.size - read));

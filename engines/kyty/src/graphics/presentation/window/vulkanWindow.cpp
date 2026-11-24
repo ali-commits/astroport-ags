@@ -33,12 +33,8 @@
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
-#include "graphics/presentation/window/lowLatency.h"
-#include "graphics/host_gpu/renderer/hybridDlss.h"
-#include "graphics/host_gpu/renderer/frameGen.h"
 #include "graphics/presentation/window/f32FlushSelfTest.h"
 #include "graphics/presentation/window/windowInternal.h"
-#include "streaming/sessionEnv.h"
 #include "graphics/shader/recompiler/CodegenOptions.h"
 #include "graphics/shader/recompiler/ir/BindlessBindings.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
@@ -1657,12 +1653,6 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		conditional_rendering.pNext = const_cast<void*>(create_info.pNext);
 		create_info.pNext = &conditional_rendering;
 	}
-	vk::PhysicalDevicePresentIdFeaturesKHR present_id {};
-	if (HasExtension(device_extensions, VK_KHR_PRESENT_ID_EXTENSION_NAME)) {
-		present_id.presentId = VK_TRUE;
-		present_id.pNext     = const_cast<void*>(create_info.pNext);
-		create_info.pNext    = &present_id;
-	}
 	// The renderer only uses the Vulkan 1.3 core dynamic states, but RADV (Mesa 26.3) creates its
 	// PS epilog cache only when this EXT feature is enabled and crashes in vkCmdDraw when a
 	// depth- or stencil-writing fragment shader needs an epilog (upstream 597137e8b).
@@ -1716,12 +1706,6 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	auto result = physical_device.createDevice(&create_info, nullptr, &device);
 	if (result != vk::Result::eSuccess) {
 		LOGF("vkCreateDevice failed: %s\n", vk::to_string(result).c_str());
-		std::printf("vkCreateDevice failed: %s (%zu extensions)\n", vk::to_string(result).c_str(),
-		            device_extensions.size());
-		for (const auto* name: device_extensions) {
-			std::printf("  device extension: %s\n", name);
-		}
-		std::fflush(stdout);
 		if (graphics.native_ray_tracing_enabled) {
 			// KYTY_RT_HW diagnostics: the extensions and feature structures of the failed device,
 			// and which other extension, left out, lets a device with ray tracing be created.
@@ -1972,17 +1956,6 @@ static void VulkanGetExtensions(VulkanExtensions& r) {
 		r.required_extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
 	}
 
-	// ASTROHYBRID_DLSS (renderer/dlss.h): NGX's instance extensions, where available.
-	{
-		std::vector<const char*> ngx_instance;
-		std::vector<const char*> ngx_device;
-		Dlss::RequiredExtensions(ngx_instance, ngx_device);
-		for (const auto* name: ngx_instance) {
-			if (HasExtension(r.available_extensions, name) && !HasExtension(r.required_extensions, name)) {
-				r.required_extensions.push_back(name);
-			}
-		}
-	}
 #if defined(_WIN32)
 	// KYTY_FULLSCREEN_EXCLUSIVE: VK_EXT_full_screen_exclusive needs this instance extension.
 	if (FullscreenExclusiveRequest() >= 0 &&
@@ -2227,39 +2200,6 @@ static void VulkanCheckInstanceVersion() {
 	}
 }
 
-// ASTROHYBRID_DLSSG (renderer/frameGen.h): with Streamline as the loader, the window surface is
-// created through it (from SDL's window handles), so Streamline knows which window a swapchain
-// presents to; otherwise SDL creates it as before.
-static bool CreateWindowSurface(SDL_Window* sdl_window, vk::Instance instance, VkSurfaceKHR* out) {
-	if (!FrameGen::Loaded()) {
-		return SDL_Vulkan_CreateSurface(sdl_window, static_cast<vk::Instance::CType>(instance), nullptr,
-		                                out);
-	}
-	struct Win32SurfaceCreateInfo {
-		VkStructureType sType;
-		const void*     pNext;
-		VkFlags         flags;
-		void*           hinstance;
-		void*           hwnd;
-	};
-	using CreateWin32Surface = VkResult(VKAPI_PTR*)(VkInstance, const Win32SurfaceCreateInfo*,
-	                                                const VkAllocationCallbacks*, VkSurfaceKHR*);
-	const auto properties = SDL_GetWindowProperties(sdl_window);
-	Win32SurfaceCreateInfo info {};
-	info.sType     = static_cast<VkStructureType>(1000009000); // VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR
-	info.hinstance = SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_WIN32_INSTANCE_POINTER, nullptr);
-	info.hwnd      = SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
-	const auto create = reinterpret_cast<CreateWin32Surface>(VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr(
-	    static_cast<VkInstance>(instance), "vkCreateWin32SurfaceKHR"));
-	if (create == nullptr || info.hwnd == nullptr) {
-		std::printf("DLSS-G: no window handle or vkCreateWin32SurfaceKHR for the surface\n");
-		return false;
-	}
-	const auto result = create(static_cast<VkInstance>(instance), &info, nullptr, out);
-	std::printf("DLSS-G: window surface created through Streamline -> %d\n", static_cast<int>(result));
-	return result == VK_SUCCESS;
-}
-
 void WindowContext::CreateVulkan() {
 	EXIT_IF(window == nullptr);
 	EXIT_IF(graphic_ctx.instance != nullptr);
@@ -2269,10 +2209,6 @@ void WindowContext::CreateVulkan() {
 
 	auto get_instance_proc_addr =
 	    reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_Vulkan_GetVkGetInstanceProcAddr());
-	// ASTROHYBRID_DLSSG (renderer/frameGen.h): Vulkan through Streamline's interposer.
-	if (const auto streamline = FrameGen::LoaderBeforeInstance(); streamline != nullptr) {
-		get_instance_proc_addr = streamline;
-	}
 	if (get_instance_proc_addr == nullptr) {
 		EXIT("Could not load Vulkan: %s\n", SDL_GetError());
 	}
@@ -2377,7 +2313,8 @@ void WindowContext::CreateVulkan() {
 	}
 
 	vk::SurfaceKHR::CType native_surface = VK_NULL_HANDLE;
-	if (!CreateWindowSurface(window, graphic_ctx.instance, &native_surface)) {
+	if (!SDL_Vulkan_CreateSurface(window, static_cast<vk::Instance::CType>(graphic_ctx.instance),
+	                              nullptr, &native_surface)) {
 		EXIT("Could not create a Vulkan surface");
 	}
 	surface = native_surface;
@@ -2459,19 +2396,6 @@ void WindowContext::CreateVulkan() {
 			    return graphic_ctx.physical_device.enumerateDeviceExtensionProperties(
 			        nullptr, count, values);
 		    });
-
-#if defined(__linux__)
-		if (Streaming::SessionSocket() != nullptr) {
-			if (HasExtension(available_extensions, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
-			    HasExtension(available_extensions, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME)) {
-				device_extensions.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
-				device_extensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
-				graphic_ctx.streaming_external_enabled = true;
-			} else {
-				LOGF("Session socket: Vulkan memory/semaphore FD extensions unavailable\n");
-			}
-		}
-#endif
 
 		if (HasExtension(available_extensions, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) {
 			device_extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
@@ -2622,33 +2546,6 @@ void WindowContext::CreateVulkan() {
 				device_extensions.push_back(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
 			}
 		}
-		// ASTROHYBRID_DLSS (renderer/dlss.h): NGX's device extensions, where available.
-		{
-			std::vector<const char*> ngx_instance;
-			std::vector<const char*> ngx_device;
-			Dlss::RequiredExtensions(ngx_instance, ngx_device);
-			for (const auto* name: ngx_device) {
-				// The EXT form may not be enabled with the core bufferDeviceAddress feature Kyty
-				// enables; the core feature serves NGX the same way.
-				if (std::strcmp(name, "VK_EXT_buffer_device_address") == 0) {
-					std::printf("DLSS: device extension %s covered by core buffer device address\n", name);
-					continue;
-				}
-				if (HasExtension(available_extensions, name) && !HasExtension(device_extensions, name)) {
-					std::printf("DLSS: device extension %s enabled\n", name);
-					device_extensions.push_back(name);
-				} else if (!HasExtension(available_extensions, name)) {
-					std::printf("DLSS: device extension %s unavailable\n", name);
-				}
-			}
-		}
-		// ASTROHYBRID_LOW_LATENCY (lowLatency.h): VK_NV_low_latency2 with present IDs.
-		if (LowLatency::WantExtensions(
-		        HasExtension(available_extensions, VK_NV_LOW_LATENCY_2_EXTENSION_NAME),
-		        HasExtension(available_extensions, VK_KHR_PRESENT_ID_EXTENSION_NAME))) {
-			device_extensions.push_back(VK_NV_LOW_LATENCY_2_EXTENSION_NAME);
-			device_extensions.push_back(VK_KHR_PRESENT_ID_EXTENSION_NAME);
-		}
 		// Graphics pipeline libraries (KYTY_PIPELINE_LIBRARY, pipeline/pipelineLibrary.h): only
 		// enabled when requested, so the default device is unchanged.
 		if (PipelineLibraryRequested() &&
@@ -2747,16 +2644,11 @@ void WindowContext::CreateVulkan() {
 		Dlss::AppendExtensions(device_extensions, available_extensions, true);
 	}
 
-	Dlss::ProbeBinaryImport("before device creation");
 	graphic_ctx.device = VulkanCreateDevice(graphic_ctx, device_extensions);
 	if (graphic_ctx.device == nullptr) {
 		EXIT("Could not create device");
 	}
 	VULKAN_HPP_DEFAULT_DISPATCHER.init(graphic_ctx.device);
-	if (HasExtension(device_extensions, VK_NV_LOW_LATENCY_2_EXTENSION_NAME)) {
-		LowLatency::OnDeviceCreated(static_cast<VkDevice>(graphic_ctx.device));
-	}
-	FrameGen::OnDeviceReady();
 	// KYTY_EMPTY_FS (pipelineFeedback.h): before any graphics pipeline.
 	EmptyFragment::Configure(graphic_ctx.device, graphic_ctx.physical_device_properties.vendorID);
 	// Diagnostic only (KYTY_GPU_OP_PROFILE / KYTY_GPU_OP_COUNTERS): wraps dispatcher entries.
@@ -2820,7 +2712,8 @@ void WindowContext::RecreateSurface() {
 		surface = nullptr;
 	}
 	vk::SurfaceKHR::CType native_surface = VK_NULL_HANDLE;
-	if (!CreateWindowSurface(window, graphic_ctx.instance, &native_surface)) {
+	if (!SDL_Vulkan_CreateSurface(window, static_cast<vk::Instance::CType>(graphic_ctx.instance),
+	                              nullptr, &native_surface)) {
 		EXIT("Could not recreate the Vulkan surface: %s\n", SDL_GetError());
 	}
 	surface = native_surface;

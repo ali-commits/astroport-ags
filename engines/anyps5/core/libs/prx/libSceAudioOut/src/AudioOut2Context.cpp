@@ -1,12 +1,9 @@
 #include "prx/libSceAudioOut/include/AudioOut2.hpp"
 #include <algorithm>
 #include <chrono>
-#include <deque>
-#include <condition_variable>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -160,7 +157,7 @@ static void OpenPadDevice(AudioOut2Context& context) {
     const int count = SDL_GetNumAudioDevices(0);
     for (int index = 0; index < count; index++) {
         const char* listed = SDL_GetAudioDeviceName(index, 0);
-        if (!AudioOut2PadDeviceWanted(listed, std::getenv("AGS_CONTROLLER_AUDIO_SINK"))) continue;
+        if (!AudioOut2IsPadAudioDevice(listed)) continue;
         const std::string name(listed);
         SDL_AudioSpec native{};
         if (SDL_GetAudioDeviceSpec(index, 0, &native) == 0 && native.channels != 0 && native.channels != AUDIO_OUT2_PAD_CHANNELS) continue;
@@ -220,97 +217,6 @@ static void QueuePadGrain(AudioOut2Context& context) {
     SDL_QueueAudio(context.padDevice, context.padFrames.data(), grainBytes);
 }
 
-static bool VibrationViaHost() {
-#ifdef _WIN32
-    return false;
-#else
-    static const bool enabled = [] {
-        const char* value = std::getenv("APS5_PAD_VIBRATION_VIA_HOST");
-        return (value == nullptr || std::strcmp(value, "0") != 0) && AudioOut2HostPadAudioAvailable();
-    }();
-    return enabled;
-#endif
-}
-
-static float LaunchVibrationGain() {
-    static const float gain = [] {
-        const char* value = std::getenv("APS5_PAD_VIBRATION_GAIN");
-        const float parsed = value != nullptr ? std::strtof(value, nullptr) : 1.0f;
-        return std::isfinite(parsed) ? std::clamp(parsed, 0.0f, 4.0f) : 1.0f;
-    }();
-    return gain;
-}
-
-static float VibrationGain() {
-    return AudioOut2HostVibrationGain(LaunchVibrationGain());
-}
-
-class HostVibrationQueue {
-public:
-    void Push(std::vector<float> grain) {
-        {
-            std::lock_guard lock(mutex);
-            if (!worker.joinable()) worker = std::thread([this] { Run(); });
-            if (grains.size() >= MAX_GRAINS) grains.pop_front();
-            grains.push_back(std::move(grain));
-        }
-        ready.notify_one();
-    }
-
-private:
-    static constexpr std::size_t MAX_GRAINS = 32;
-
-    void Run() {
-        std::unique_lock lock(mutex);
-        for (;;) {
-            ready.wait(lock, [this] { return !grains.empty(); });
-            auto grain = std::move(grains.front());
-            grains.pop_front();
-            lock.unlock();
-            static_cast<void>(AudioOut2QueueHostPadAudio(AUDIO_OUT2_SAMPLE_RATE, false, grain.data(), static_cast<std::uint32_t>(grain.size() / 2), 2, true, 1.0f));
-            lock.lock();
-        }
-    }
-
-    std::mutex mutex;
-    std::condition_variable ready;
-    std::deque<std::vector<float>> grains;
-    std::thread worker;
-};
-
-static HostVibrationQueue& HostVibration() {
-    static auto* queue = new HostVibrationQueue();
-    return *queue;
-}
-
-static void QueueVibrationOnHost(AudioOut2Context& context, float* pad) {
-    if (!VibrationViaHost()) return;
-    const float gain = VibrationGain();
-    std::vector<float> vibration(static_cast<std::size_t>(context.grain) * 2);
-    for (std::uint32_t frame = 0; frame < context.grain; ++frame) {
-        float* src = pad + static_cast<std::size_t>(frame) * AUDIO_OUT2_PAD_CHANNELS;
-        vibration[frame * 2 + 0] = std::clamp(src[AUDIO_OUT2_PAD_VIBRATION_LEFT] * gain, -1.0f, 1.0f);
-        vibration[frame * 2 + 1] = std::clamp(src[AUDIO_OUT2_PAD_VIBRATION_RIGHT] * gain, -1.0f, 1.0f);
-        src[AUDIO_OUT2_PAD_VIBRATION_LEFT] = 0.0f;
-        src[AUDIO_OUT2_PAD_VIBRATION_RIGHT] = 0.0f;
-    }
-    HostVibration().Push(std::move(vibration));
-}
-
-static void DumpVibration(const AudioOut2Context& context, const float* pad) {
-    static std::FILE* file = [] {
-        const char* path = std::getenv("APS5_PAD_VIBRATION_DUMP");
-        return path != nullptr && path[0] != '\0' ? std::fopen(path, "wb") : nullptr;
-    }();
-    if (file == nullptr) return;
-    for (std::uint32_t frame = 0; frame < context.grain; ++frame) {
-        const float* src = pad + static_cast<std::size_t>(frame) * AUDIO_OUT2_PAD_CHANNELS;
-        const float pair[2] = {src[AUDIO_OUT2_PAD_VIBRATION_LEFT], src[AUDIO_OUT2_PAD_VIBRATION_RIGHT]};
-        std::fwrite(pair, sizeof(float), 2, file);
-    }
-    std::fflush(file);
-}
-
 static void Render(AudioOut2Context& context, const AudioOut2Grain& grain) {
     float* pad = nullptr;
     if (context.padDevice != 0 || AudioOut2HasPadPorts(context)) {
@@ -320,41 +226,14 @@ static void Render(AudioOut2Context& context, const AudioOut2Grain& grain) {
     }
     std::fill(context.mix.begin(), context.mix.end(), 0.0f);
     AudioOut2MixPorts(context, grain, context.mix.data(), pad, context.grain);
-    if (pad != nullptr) DumpVibration(context, pad);
-    std::uint64_t vibrationQueuedUs = 0;
-    if (pad != nullptr && context.padDevice == 0) {
-        std::vector<float> speakerStereo(static_cast<std::size_t>(context.grain) * 2);
-        std::vector<float> vibrationStereo(static_cast<std::size_t>(context.grain) * 2);
-        for (std::uint32_t frame = 0; frame < context.grain; ++frame) {
-            const float* src = pad + static_cast<std::size_t>(frame) * AUDIO_OUT2_PAD_CHANNELS;
-            speakerStereo[frame * 2 + 0] = std::clamp(src[AUDIO_OUT2_PAD_SPEAKER_LEFT], -1.0f, 1.0f);
-            speakerStereo[frame * 2 + 1] = std::clamp(src[AUDIO_OUT2_PAD_SPEAKER_RIGHT], -1.0f, 1.0f);
-            vibrationStereo[frame * 2 + 0] = std::clamp(src[AUDIO_OUT2_PAD_VIBRATION_LEFT], -1.0f, 1.0f);
-            vibrationStereo[frame * 2 + 1] = std::clamp(src[AUDIO_OUT2_PAD_VIBRATION_RIGHT], -1.0f, 1.0f);
-        }
-        const auto speakerQueuedUs = AudioOut2QueueHostPadAudio(
-            AUDIO_OUT2_SAMPLE_RATE, true, speakerStereo.data(), context.grain, 2, true, 1.0f);
-        vibrationQueuedUs = AudioOut2QueueHostPadAudio(
-            AUDIO_OUT2_SAMPLE_RATE, false, vibrationStereo.data(), context.grain, 2, true, 1.0f);
-        if (speakerQueuedUs == 0) {
-            for (std::uint32_t frame = 0; frame < context.grain; ++frame) {
-                const float* src = pad + static_cast<std::size_t>(frame) * AUDIO_OUT2_PAD_CHANNELS;
-                context.mix[frame * 2 + 0] += src[AUDIO_OUT2_PAD_SPEAKER_LEFT];
-                context.mix[frame * 2 + 1] += src[AUDIO_OUT2_PAD_SPEAKER_RIGHT];
-            }
-        }
-    }
     for (float& sample : context.mix) {
         sample = std::clamp(sample * MASTER_GAIN, -1.0f, 1.0f);
         if (AudioOut2TraceEnabled()) context.summaryPeak = std::max(context.summaryPeak, std::abs(sample));
     }
     if (pad != nullptr) {
         AudioOut2FinishPadMix(pad, context.grain);
-        if (context.padDevice != 0) {
-            QueueVibrationOnHost(context, pad);
-            QueuePadGrain(context);
-        }
-        else if (vibrationQueuedUs == 0) {
+        if (context.padDevice != 0) QueuePadGrain(context);
+        else {
             const auto rumble = AudioOut2RumbleFromPadFrames(pad, context.grain);
             PadSubmitAudioHaptics_nid_postfix(rumble[0], rumble[1]);
         }

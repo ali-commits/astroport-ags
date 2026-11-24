@@ -55,8 +55,6 @@ constexpr std::uintptr_t ArenaStart = GuestArenaOffset == 0 ? 0x10000ull : Defau
 constexpr std::uintptr_t SystemReservedStart = 0x00000007FFFFC000ull + GuestArenaOffset;
 constexpr std::uintptr_t SystemReservedEnd = 0x0000001000000000ull + GuestArenaOffset;
 constexpr std::uintptr_t ApplicationAreaEnd = 0x000000FC00000000ull + GuestArenaOffset;
-constexpr std::uintptr_t CudaWindowStart = 0x000000DC00000000ull + GuestArenaOffset;
-constexpr std::uintptr_t CudaWindowEnd = 0x000000EC00000000ull + GuestArenaOffset;
 
 std::uintptr_t alignUp(std::uintptr_t value, std::size_t alignment) {
     return (value + alignment - 1) & ~(static_cast<std::uintptr_t>(alignment) - 1);
@@ -150,75 +148,6 @@ public:
         _used.emplace(start, start + bytes);
     }
 
-    std::uintptr_t Donate(std::size_t bytes, std::size_t alignment) {
-        if (_base == 0) throw std::runtime_error("guest address space arena is unavailable");
-        if (bytes == 0 || alignment == 0 || (alignment & (alignment - 1)) != 0) throw std::invalid_argument("invalid guest arena donation");
-        std::lock_guard lock(_lock);
-        auto limit = _end;
-        std::uintptr_t candidate = 0;
-        while (limit >= _base && bytes <= limit - _base) {
-            const auto start = (limit - bytes) & ~(alignment - 1);
-            if (start < _base) break;
-            const auto next = _used.lower_bound(start + bytes);
-            if (next == _used.begin() || std::prev(next)->second <= start) {
-                candidate = start;
-                break;
-            }
-            limit = std::prev(next)->first;
-        }
-        if (candidate == 0) return 0;
-#ifdef _WIN32
-        const auto address = reinterpret_cast<void*>(candidate);
-        MEMORY_BASIC_INFORMATION info{};
-        if (VirtualQuery(address, &info, sizeof(info)) == 0 || info.State != MEM_RESERVE) return 0;
-        const auto placeholderStart = reinterpret_cast<std::uintptr_t>(info.AllocationBase);
-        const auto placeholderEnd = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
-        if (candidate + bytes > placeholderEnd) return 0;
-        if ((placeholderStart != candidate || placeholderEnd != candidate + bytes) && !VirtualFree(address, bytes, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) return 0;
-#endif
-        _used.emplace(candidate, candidate + bytes);
-        _holes.emplace_back(candidate, candidate + bytes);
-        _donated.emplace_back(candidate, bytes);
-        return candidate;
-    }
-
-    std::uintptr_t DonateAt(std::uintptr_t address, std::size_t bytes) {
-        if (_base == 0) throw std::runtime_error("guest address space arena is unavailable");
-        if (bytes == 0 || address < _base || bytes > _end - address) throw std::invalid_argument("invalid guest arena donation");
-        std::lock_guard lock(_lock);
-#ifdef _WIN32
-        for (std::uintptr_t cursor = address; cursor < address + bytes;) {
-            MEMORY_BASIC_INFORMATION info{};
-            if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) == 0 || info.State != MEM_RESERVE) return 0;
-            cursor = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
-        }
-        for (std::uintptr_t cursor = address; cursor < address + bytes;) {
-            MEMORY_BASIC_INFORMATION info{};
-            if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) == 0) return 0;
-            const auto regionStart = reinterpret_cast<std::uintptr_t>(info.AllocationBase);
-            const auto regionEnd = std::min(address + bytes, reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize);
-            const auto pieceStart = std::max(cursor, regionStart);
-            const auto pieceBytes = regionEnd - pieceStart;
-            const auto placeholderEnd = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
-            if ((regionStart != pieceStart || placeholderEnd != regionEnd) && !VirtualFree(reinterpret_cast<void*>(pieceStart), pieceBytes, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) return 0;
-            cursor = regionEnd;
-        }
-#endif
-        const auto next = _used.lower_bound(address);
-        if (next == _used.end() || next->first != address) _used.emplace(address, address + bytes);
-        _holes.emplace_back(address, address + bytes);
-        _donated.emplace_back(address, bytes);
-        return address;
-    }
-
-    bool Donated(std::uintptr_t address, std::size_t bytes) {
-        std::lock_guard lock(_lock);
-        for (const auto& [base, size] : _donated) {
-            if (address >= base && bytes <= size && address - base <= size - bytes) return true;
-        }
-        return false;
-    }
-
     void Release(const void* pointer, std::size_t bytes) {
         std::lock_guard lock(_lock);
         const auto start = reinterpret_cast<std::uintptr_t>(pointer);
@@ -252,17 +181,10 @@ private:
         const std::uintptr_t granularity = system.dwAllocationGranularity;
         const std::uintptr_t end = ApplicationAreaEnd;
         std::uint32_t retries = 0;
-        const bool cudaWindow = std::getenv("ASTROHYBRID_CUDA_HOLE") != nullptr;
         for (std::uintptr_t cursor = ArenaStart; cursor < end;) {
-            if (cudaWindow && cursor >= CudaWindowStart && cursor < CudaWindowEnd) {
-                _holes.emplace_back(cursor, CudaWindowEnd);
-                cursor = CudaWindowEnd;
-                continue;
-            }
             MEMORY_BASIC_INFORMATION info{};
             if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) == 0) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "query the guest arena range");
-            auto regionEnd = std::min(end, reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize);
-            if (cudaWindow && cursor < CudaWindowStart && regionEnd > CudaWindowStart) regionEnd = CudaWindowStart;
+            const auto regionEnd = std::min(end, reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize);
             const auto first = info.State == MEM_FREE ? std::min(regionEnd, alignUp(cursor, granularity)) : regionEnd;
             const auto last = std::max(first, regionEnd & ~(granularity - 1));
             if (first < last && WindowsMappings::Get().Reserve(reinterpret_cast<void*>(first), last - first) == nullptr) {
@@ -416,7 +338,6 @@ private:
 
     std::uintptr_t _base = 0;
     std::uintptr_t _end = 0;
-    std::vector<std::pair<std::uintptr_t, std::size_t>> _donated;
     bool _writeWatched = false;
 
 public:
@@ -471,18 +392,6 @@ void GuestArenaRelease_nid_postfix(const void* pointer, std::size_t bytes) {
     Arena::Get().Release(pointer, bytes);
 }
 
-std::uintptr_t GuestArenaDonate_nid_postfix(std::size_t bytes, std::size_t alignment) {
-    return Arena::Get().Donate(bytes, alignment);
-}
-
-std::uintptr_t GuestArenaDonateAt_nid_postfix(std::uintptr_t address, std::size_t bytes) {
-    return Arena::Get().DonateAt(address, bytes);
-}
-
-bool GuestArenaDonated_nid_postfix(const void* pointer, std::size_t bytes) {
-    return Arena::Get().Donated(reinterpret_cast<std::uintptr_t>(pointer), bytes);
-}
-
 void GuestArenaRange_nid_postfix(std::uintptr_t* base, std::size_t* bytes) {
     *base = Arena::Get().Base();
     *bytes = Arena::Get().Size();
@@ -510,114 +419,6 @@ bool GuestArenaHandleWrite_nid_postfix(std::uintptr_t address) {
 
 bool GuestArenaHandleRead_nid_postfix(std::uintptr_t address) {
     return WindowsMappings::Get().HandleRead(address);
-}
-
-void GuestArenaWriteAlarmStats_nid_postfix(std::uint64_t* skips, std::uint64_t* faults) {
-    WindowsMappings::Get().AlarmStats(skips, faults);
-}
-
-namespace {
-
-struct Traps {
-    std::mutex mutex;
-    std::map<std::uintptr_t, DWORD> pages;
-    std::atomic<std::uint64_t> armed{0};
-    std::atomic<std::uint64_t> gameFaults{0};
-    std::atomic<std::uint64_t> otherFaults{0};
-    std::atomic<std::uint64_t> skipped{0};
-    std::atomic<std::size_t> armedPages{0};
-    std::map<std::uintptr_t, std::uint64_t> sites;
-};
-
-Traps& traps() {
-    static Traps state;
-    return state;
-}
-
-bool inMainImage(std::uintptr_t instruction) {
-    static const std::pair<std::uintptr_t, std::uintptr_t> image = [] {
-        const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
-        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + static_cast<std::uintptr_t>(dos->e_lfanew));
-        return std::pair<std::uintptr_t, std::uintptr_t>{base, base + nt->OptionalHeader.SizeOfImage};
-    }();
-    return instruction >= image.first && instruction < image.second;
-}
-
-}
-
-void GuestArenaTrap_nid_postfix(std::uintptr_t address, std::size_t bytes) {
-    constexpr std::uintptr_t page = 4096;
-    constexpr std::size_t maxPages = 65536;
-    const auto first = (address + page - 1) & ~(page - 1);
-    const auto last = (address + bytes) & ~(page - 1);
-    if (first >= last) return;
-    auto& state = traps();
-    std::lock_guard lock(state.mutex);
-    for (auto cursor = first; cursor < last; cursor += page) {
-        if (state.pages.contains(cursor)) continue;
-        if (state.pages.size() >= maxPages) {
-            state.skipped.fetch_add(1, std::memory_order_relaxed);
-            return;
-        }
-        MEMORY_BASIC_INFORMATION info{};
-        if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) == 0 || info.State != MEM_COMMIT || info.Protect != PAGE_READWRITE) {
-            state.skipped.fetch_add(1, std::memory_order_relaxed);
-            continue;
-        }
-        DWORD previous = 0;
-        if (VirtualProtect(reinterpret_cast<void*>(cursor), page, PAGE_NOACCESS, &previous) == 0) {
-            state.skipped.fetch_add(1, std::memory_order_relaxed);
-            continue;
-        }
-        state.pages.emplace(cursor, previous);
-        state.armed.fetch_add(1, std::memory_order_relaxed);
-    }
-    state.armedPages.store(state.pages.size(), std::memory_order_relaxed);
-}
-
-bool GuestArenaTrapArmed_nid_postfix(std::uintptr_t address) {
-    auto& state = traps();
-    if (state.armedPages.load(std::memory_order_relaxed) == 0) return false;
-    std::lock_guard lock(state.mutex);
-    return state.pages.contains(address & ~std::uintptr_t{4095});
-}
-
-bool GuestArenaHandleTrap_nid_postfix(std::uintptr_t address, std::uintptr_t instruction) {
-    auto& state = traps();
-    if (state.armedPages.load(std::memory_order_relaxed) == 0) return false;
-    const auto page = address & ~std::uintptr_t{4095};
-    std::lock_guard lock(state.mutex);
-    const auto found = state.pages.find(page);
-    if (found == state.pages.end()) return false;
-    DWORD previous = 0;
-    if (VirtualProtect(reinterpret_cast<void*>(page), 4096, found->second, &previous) == 0) return false;
-    state.pages.erase(found);
-    state.armedPages.store(state.pages.size(), std::memory_order_relaxed);
-    (inMainImage(instruction) ? state.gameFaults : state.otherFaults).fetch_add(1, std::memory_order_relaxed);
-    ++state.sites[instruction];
-    return true;
-}
-
-std::size_t GuestArenaTrapSites_nid_postfix(std::uintptr_t* instructions, std::uint64_t* counts, std::size_t capacity) {
-    auto& state = traps();
-    std::lock_guard lock(state.mutex);
-    std::vector<std::pair<std::uintptr_t, std::uint64_t>> sorted(state.sites.begin(), state.sites.end());
-    std::sort(sorted.begin(), sorted.end(), [](const auto& left, const auto& right) { return left.second > right.second; });
-    const auto count = std::min(capacity, sorted.size());
-    for (std::size_t i = 0; i < count; ++i) {
-        instructions[i] = sorted[i].first;
-        counts[i] = sorted[i].second;
-    }
-    return count;
-}
-
-void GuestArenaTrapStats_nid_postfix(std::uint64_t* armed, std::uint64_t* gameFaults, std::uint64_t* otherFaults, std::uint64_t* skipped) {
-    auto& state = traps();
-    *armed = state.armed.load(std::memory_order_relaxed);
-    *gameFaults = state.gameFaults.load(std::memory_order_relaxed);
-    *otherFaults = state.otherFaults.load(std::memory_order_relaxed);
-    *skipped = state.skipped.load(std::memory_order_relaxed);
 }
 
 void GuestArenaPinWritable_nid_postfix(const void* pointer, std::size_t bytes) {

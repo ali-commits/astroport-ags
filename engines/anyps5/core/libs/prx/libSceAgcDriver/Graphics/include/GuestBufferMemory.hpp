@@ -295,13 +295,6 @@ private:
     std::atomic<std::uint64_t> largest{0};
 };
 
-void NoteGpuProduced(std::uint64_t begin, std::uint64_t end, std::uint64_t generation, std::shared_ptr<Buffer> shadow = nullptr, std::uint64_t shadowBase = 0);
-std::shared_ptr<Buffer> GpuProducedShadow(std::uint64_t address, std::size_t bytes, VkDeviceSize alignment, VkDeviceSize* offset);
-bool ReadGpuProducedShadows();
-bool CopyInFromShadows();
-bool GpuProducedUnchanged(std::uint64_t address, std::size_t bytes);
-bool SkipGpuProducedSnapshots();
-
 class GuestBufferMemory {
 public:
     explicit GuestBufferMemory(const Context& context);
@@ -464,12 +457,6 @@ private:
         // path it would take without staging, in both upload stages.
         bool unstaged = false;
         bool overlay = false;
-        // APS5_RESIDENT_STAGING: the write generation taken before this use's copy-in, and the one
-        // the shadow matches the import at after its copy-back (0: not proven); a reused build's
-        // next use skips the copy-in while UnchangedSince(region, residentGeneration) holds.
-        std::uint64_t copyInGeneration = 0;
-        mutable std::uint64_t residentGeneration = 0;
-        mutable bool residentCandidate = false;
     };
 
     // How [begin, end) lies against the space's base regions.

@@ -1,5 +1,3 @@
-#include <cstdlib>
-#include <cstring>
 #include "prx/libSceAgcDriver/Execution/include/AsyncLog.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PipelineJournal.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
@@ -194,17 +192,7 @@ void Driver::stop() {
 
 Driver::Driver() {
     InstallAsyncLog_nid_no_patch();
-    // APS5_GPU_ENGINE=kyty on Linux: Kyty's renderer owns the PS5 driver area at 0xfe0000000 (the host
-    // donated it to Kyty, AstroHybrid's kytyGpuBridge start_graphics). On Windows guest addresses are
-    // offset (GuestAddressOffset), so the two never meet; here they would be the same pages.
-    static const bool driverMemory = [] {
-#ifndef _WIN32
-        const char* engine = std::getenv("APS5_GPU_ENGINE");
-        if (engine != nullptr && std::strcmp(engine, "kyty") == 0) return true;
-#endif
-        MapDriverMemory();
-        return true;
-    }();
+    static const bool driverMemory = (MapDriverMemory(), true);
     static_cast<void>(driverMemory);
     LibcSetExitDrain_nid_no_patch([] {
         const auto current = Driver::Get().device.Load();

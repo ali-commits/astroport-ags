@@ -41,7 +41,6 @@
 #include <optional>
 #include <set>
 #include <string>
-#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -1309,12 +1308,7 @@ std::uint64_t SampledTextureBudget(const VkPhysicalDeviceMemoryProperties& memor
     const auto budget = reported->heapBudget[*heap];
     const auto usage = reported->heapUsage[*heap];
     const auto reserved = usage - std::min<std::uint64_t>(usage, textureBytes) + std::max(TextureCacheBudget(memory), storageBytes) + budget / 8u;
-    static const std::uint64_t floor = [] {
-        const char* text = std::getenv("APS5_SAMPLED_BUDGET_FLOOR_MIB");
-        const auto mib = text != nullptr ? std::strtoull(text, nullptr, 10) : 0ull;
-        return std::max<std::uint64_t>(2048ull, mib) << 20u;
-    }();
-    return std::max<std::uint64_t>(floor, budget > reserved ? budget - reserved : 0u);
+    return std::max<std::uint64_t>(2048ull << 20u, budget > reserved ? budget - reserved : 0u);
 }
 
 bool SampledBudgetReportDue(std::uint64_t reported, std::uint64_t budget, std::chrono::steady_clock::duration sinceReport) {
@@ -3426,36 +3420,7 @@ bool CompletePendingCpuWrites(const Context& context, std::uint64_t address, std
     const auto overlaps = [&](const auto& writers) {
         return std::any_of(writers.begin(), writers.end(), [&](const auto& writer) { return writer->CopiedWritesOverlap(address, bytes); });
     };
-    const bool dispatchWriter = context.copiedWriters != nullptr && overlaps(*context.copiedWriters);
-    const bool drawWriter = !dispatchWriter && overlaps(*drawWriters);
-    static const bool completionLabelsOnly = [] {
-        const char* text = std::getenv("APS5_SYNC_COMPLETION_LABELS_ONLY");
-        return text != nullptr && text[0] != 0 && text[0] != '0';
-    }();
-    const bool labelWait = labels && (completionLabelsOnly ? recorder->CompletionLabelIn(address, bytes) : recorder->PendingLabelIn(address, bytes));
-    if (dispatchWriter || drawWriter || labelWait) {
-        static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
-        if (profile) {
-            static AgcDriver::Mutex mutex;
-            static std::map<std::tuple<std::uint64_t, int>, std::uint64_t> counts;
-            static auto last = std::chrono::steady_clock::now();
-            std::lock_guard lock(mutex);
-            ++counts[{address & ~std::uint64_t{0xffff}, dispatchWriter ? 0 : drawWriter ? 1 : 2}];
-            if (std::chrono::steady_clock::now() - last >= std::chrono::seconds(10)) {
-                last = std::chrono::steady_clock::now();
-                std::vector<std::pair<std::tuple<std::uint64_t, int>, std::uint64_t>> sorted(counts.begin(), counts.end());
-                std::sort(sorted.begin(), sorted.end(), [](const auto& left, const auto& right) { return left.second > right.second; });
-                std::string text;
-                for (std::size_t i = 0; i < sorted.size() && i < 10; ++i) {
-                    char item[96];
-                    static constexpr const char* kinds[] = {"dispatch", "draw", "label"};
-                    std::snprintf(item, sizeof(item), " 0x%llx %s x%llu", static_cast<unsigned long long>(std::get<0>(sorted[i].first)), kinds[std::get<1>(sorted[i].first)], static_cast<unsigned long long>(sorted[i].second));
-                    text += item;
-                }
-                std::fprintf(stderr, "[cpuwrite-sync] 10 s (64 KiB block, writer kind, count), GDS at 0x%llx:%s\n", static_cast<unsigned long long>(Pm4::GdsAddress()), text.c_str());
-                counts.clear();
-            }
-        }
+    if ((context.copiedWriters != nullptr && overlaps(*context.copiedWriters)) || overlaps(*drawWriters) || (labels && recorder->PendingLabelIn(address, bytes))) {
         Recorder::CountSync(4);
         recorder->SyncThrough(address, bytes);
         return true;
@@ -5726,15 +5691,6 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
         }
         const auto begin = address - item.adjustment;
         const auto bytes = static_cast<std::size_t>(GuestBufferMemory::ViewBytes(size, item.adjustment));
-        if (override == moved.end()) {
-            VkDeviceSize shadowOffset = 0;
-            if (auto shadow = GpuProducedShadow(begin, bytes, context.limits.minStorageBufferOffsetAlignment, &shadowOffset)) {
-                selected.push_back(index);
-                keep({begin, std::move(shadow), shadowOffset, bytes});
-                continue;
-            }
-            if (GpuProducedUnchanged(item.address, item.size)) continue;
-        }
         if (override == moved.end() && (bytes > maxSnapshotBytes || totalSnapshotBytes + bytes > maxSnapshotBytes)) continue;
         const auto registryGeneration = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
         if (!stamped) {
@@ -5764,7 +5720,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
                 const auto generation = GuestMemory::CollectWrites(begin, bytes);
                 buffer = recorder.ReusableDrawSnapshot(begin, bytes, Recorder::SnapshotUse::Storage, nullptr, generation, &offset);
                 if (buffer == nullptr) {
-                    buffer = std::make_shared<Buffer>(context, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, context.SnapshotProperties());
+                    buffer = std::make_shared<Buffer>(context, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
                     std::memcpy(buffer->Bytes().data(), reinterpret_cast<const void*>(begin), bytes);
                     recorder.KeepDrawSnapshot(begin, bytes, generation, registryGeneration, buffer);
                 }
@@ -5837,7 +5793,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
     Require(nextWrite == writes.end(), "draw snapshot writes disagree with their descriptor bindings");
     context.Resolved(&DeviceFunctions::updateDescriptorSets, "vkUpdateDescriptorSets")(context.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
     recorder.Keep(result);
-    for (const auto& snapshot : result->snapshots) recorder.KeepBytes(snapshot.buffer.get(), snapshot.buffer->Mapped() ? snapshot.buffer->Bytes().size() : snapshot.bytes);
+    for (const auto& snapshot : result->snapshots) recorder.KeepBytes(snapshot.buffer.get(), snapshot.buffer->Bytes().size());
     return result;
 }
 

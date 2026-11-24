@@ -13,9 +13,6 @@ if(KYTY_CLANG_CL)
 endif()
 
 add_library(common STATIC ${common_src} ${common_headers})
-if(NOT MSVC)
-	set_source_files_properties(compileWatch.cpp kytyEvents.cpp u59Preset.cpp PROPERTIES COMPILE_OPTIONS -fexceptions)
-endif()
 
 # Loading/watchdog diagnostics handle filesystem and thread-start exceptions locally.
 # Other sources retain the project's no-exceptions compilation policy.

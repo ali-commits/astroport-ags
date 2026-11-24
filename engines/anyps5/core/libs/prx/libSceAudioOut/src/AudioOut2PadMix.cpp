@@ -1,16 +1,10 @@
 #include "AudioOut2PadMix.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <cstddef>
 #include <cstring>
 #include <cmath>
 #include <stdexcept>
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <dlfcn.h>
-#endif
 
 AudioOut2Route AudioOut2RouteForPort(std::uint16_t type, std::uint32_t channels) {
     if (type == AUDIO_OUT2_PORT_TYPE_PAD_SPEAKER && (channels == 1 || channels == 2)) return AudioOut2Route::PadSpeaker;
@@ -28,11 +22,6 @@ bool AudioOut2IsPadAudioDevice(const char* name) {
         if (matched == length) return true;
     }
     return false;
-}
-
-bool AudioOut2PadDeviceWanted(const char* name, const char* sink) {
-    if (sink == nullptr || *sink == '\0') return AudioOut2IsPadAudioDevice(name);
-    return name != nullptr && std::strcmp(name, sink) == 0;
 }
 
 void AudioOut2AccumulatePadFrame(AudioOut2Route route, const float* in, std::uint32_t channels, const float* volume, float* pad) {
@@ -81,57 +70,4 @@ void AudioOut2WritePadFrames(const float* pad, const AudioOut2PadLayout& layout,
             out[static_cast<std::size_t>(frame) * layout.channels + layout.position[channel]] = pad[static_cast<std::size_t>(frame) * AUDIO_OUT2_PAD_CHANNELS + channel];
         }
     }
-}
-
-bool AudioOut2HostPadAudioAvailable() {
-#ifdef _WIN32
-    return GetModuleHandleA("kyty_gpu.dll") != nullptr;
-#else
-    return ::dlsym(RTLD_DEFAULT, "KytyGpuQueuePadAudio") != nullptr;
-#endif
-}
-
-float AudioOut2HostVibrationGain(float fallback) {
-    using Fn = float (*)();
-    static std::atomic<Fn> cached{nullptr};
-    Fn fn = cached.load(std::memory_order_relaxed);
-    if (fn == nullptr) {
-#ifdef _WIN32
-        HMODULE mod = GetModuleHandleA("kyty_gpu.dll");
-        if (mod == nullptr) return fallback;
-        fn = reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(mod, "KytyGpuPadVibrationGain")));
-#else
-        fn = reinterpret_cast<Fn>(::dlsym(RTLD_DEFAULT, "KytyGpuPadVibrationGain"));
-#endif
-        if (fn == nullptr) return fallback;
-        cached.store(fn, std::memory_order_relaxed);
-    }
-    const float gain = fn();
-    return std::isfinite(gain) ? std::clamp(gain, 0.0f, 4.0f) : fallback;
-}
-
-std::uint64_t AudioOut2QueueHostPadAudio(std::uint32_t freq, bool speaker, const void* data, std::uint32_t frames, std::uint32_t channels, bool isFloat, float gain) {
-#ifdef _WIN32
-    using Fn = std::uint64_t (*)(std::uint32_t, int, const void*, std::uint32_t, std::uint32_t, int, float);
-    static Fn cached = nullptr;
-    Fn fn = cached;
-    if (fn == nullptr) {
-        HMODULE mod = GetModuleHandleA("kyty_gpu.dll");
-        if (mod == nullptr) return 0;
-        fn = reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(mod, "KytyGpuQueuePadAudio")));
-        if (fn == nullptr) return 0;
-        cached = fn;
-    }
-    return fn(freq, speaker ? 1 : 0, data, frames, channels, isFloat ? 1 : 0, gain);
-#else
-    using Fn = std::uint64_t (*)(std::uint32_t, int, const void*, std::uint32_t, std::uint32_t, int, float);
-    static Fn cached = nullptr;
-    Fn fn = cached;
-    if (fn == nullptr) {
-        fn = reinterpret_cast<Fn>(::dlsym(RTLD_DEFAULT, "KytyGpuQueuePadAudio"));
-        if (fn == nullptr) return 0;
-        cached = fn;
-    }
-    return fn(freq, speaker ? 1 : 0, data, frames, channels, isFloat ? 1 : 0, gain);
-#endif
 }

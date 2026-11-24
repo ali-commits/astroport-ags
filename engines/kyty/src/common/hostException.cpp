@@ -301,40 +301,6 @@ static void SignalHandler(int signal_number, siginfo_t* signal_info, void* nativ
 	::sigaction(signal_number, &restore, nullptr);
 }
 
-#if !defined(__APPLE__)
-static std::atomic<Handler> g_first_handler {nullptr};
-static struct sigaction     g_first_previous_segv {};
-static struct sigaction     g_first_previous_bus {};
-
-static void FirstSignalHandler(int signal_number, siginfo_t* signal_info, void* native_context) {
-	auto*         context = static_cast<ucontext_t*>(native_context);
-	ExceptionInfo info {};
-	info.type                   = ExceptionType::AccessViolation;
-	info.exception_address      = static_cast<uint64_t>(context->uc_mcontext.gregs[REG_RIP]);
-	info.native_code            = static_cast<uint32_t>(signal_number);
-	info.native_context         = context;
-	info.access_violation_type  = DecodeAccess(context);
-	info.access_violation_vaddr = reinterpret_cast<uint64_t>(signal_info->si_addr);
-	info.rsp                    = static_cast<uint64_t>(context->uc_mcontext.gregs[REG_RSP]);
-	const auto handler          = g_first_handler.load(std::memory_order_acquire);
-	if (handler != nullptr && handler(info)) {
-		return;
-	}
-	const auto& previous = signal_number == SIGBUS ? g_first_previous_bus : g_first_previous_segv;
-	if ((previous.sa_flags & SA_SIGINFO) != 0 && previous.sa_sigaction != nullptr) {
-		previous.sa_sigaction(signal_number, signal_info, native_context);
-		return;
-	}
-	if (previous.sa_handler != SIG_DFL && previous.sa_handler != SIG_IGN && previous.sa_handler != nullptr) {
-		previous.sa_handler(signal_number);
-		return;
-	}
-	struct sigaction restore {};
-	restore.sa_handler = SIG_DFL;
-	sigemptyset(&restore.sa_mask);
-	::sigaction(signal_number, &restore, nullptr);
-}
-#endif
 #endif
 
 static bool InstallPlatformHandler() {
@@ -383,28 +349,6 @@ bool InstallFirstAccessHandler(Handler handler) {
 	if (AddVectoredExceptionHandler(1, FirstExceptionFilter) == nullptr) {
 		g_first_handler.store(nullptr, std::memory_order_release);
 		printf("AddVectoredExceptionHandler(first) failed\n");
-		return false;
-	}
-	return true;
-#elif !defined(__APPLE__)
-	// Linux (AstroHybrid): a first-chance SIGSEGV/SIGBUS handler in front of the host's own (AnyPS5's
-	// guest write watch, its crash reporter): Kyty decides first, everything else goes to the handler
-	// that was installed before, as a Windows first vectored handler passes it on.
-	if (handler == nullptr) {
-		return false;
-	}
-	Handler expected = nullptr;
-	if (!g_first_handler.compare_exchange_strong(expected, handler, std::memory_order_acq_rel)) {
-		return expected == handler;
-	}
-	struct sigaction action {};
-	action.sa_sigaction = FirstSignalHandler;
-	sigemptyset(&action.sa_mask);
-	action.sa_flags = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
-	if (::sigaction(SIGSEGV, &action, &g_first_previous_segv) != 0 ||
-	    ::sigaction(SIGBUS, &action, &g_first_previous_bus) != 0) {
-		g_first_handler.store(nullptr, std::memory_order_release);
-		printf("sigaction(first) failed\n");
 		return false;
 	}
 	return true;

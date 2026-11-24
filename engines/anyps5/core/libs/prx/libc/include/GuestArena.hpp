@@ -30,9 +30,6 @@ std::uintptr_t GuestArenaHighestFree_nid_no_patch(std::size_t bytes, std::size_t
 bool GuestArenaNextUsed_nid_no_patch(std::uintptr_t address, std::uintptr_t* start, std::uintptr_t* end);
 void GuestArenaMarkUsed_nid_postfix(const void* pointer, std::size_t bytes);
 void GuestArenaRelease_nid_postfix(const void* pointer, std::size_t bytes);
-std::uintptr_t GuestArenaDonate_nid_postfix(std::size_t bytes, std::size_t alignment);
-std::uintptr_t GuestArenaDonateAt_nid_postfix(std::uintptr_t address, std::size_t bytes);
-bool GuestArenaDonated_nid_postfix(const void* pointer, std::size_t bytes);
 // The reserved range, and whether it was reserved with page write watching (Windows MEM_WRITE_WATCH).
 void GuestArenaRange_nid_postfix(std::uintptr_t* base, std::size_t* bytes);
 bool GuestArenaWriteWatched_nid_postfix();
@@ -43,12 +40,6 @@ void GuestArenaSetAccessObserver_nid_postfix(void (*callback)(std::uintptr_t add
 #ifdef _WIN32
 bool GuestArenaHandleWrite_nid_postfix(std::uintptr_t address);
 bool GuestArenaHandleRead_nid_postfix(std::uintptr_t address);
-void GuestArenaWriteAlarmStats_nid_postfix(std::uint64_t* skips, std::uint64_t* faults);
-void GuestArenaTrap_nid_postfix(std::uintptr_t address, std::size_t bytes);
-bool GuestArenaTrapArmed_nid_postfix(std::uintptr_t address);
-bool GuestArenaHandleTrap_nid_postfix(std::uintptr_t address, std::uintptr_t instruction);
-std::size_t GuestArenaTrapSites_nid_postfix(std::uintptr_t* instructions, std::uint64_t* counts, std::size_t capacity);
-void GuestArenaTrapStats_nid_postfix(std::uint64_t* armed, std::uint64_t* gameFaults, std::uint64_t* otherFaults, std::uint64_t* skipped);
 void GuestArenaPinWritable_nid_postfix(const void* pointer, std::size_t bytes);
 void GuestArenaUnpinWritable_nid_postfix(const void* pointer, std::size_t bytes);
 bool GuestArenaProtection_nid_postfix(std::uintptr_t address, std::uint32_t* protection);

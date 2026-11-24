@@ -1,4 +1,3 @@
-#include "streaming/liveSettings.h"
 #include "streaming/sessionEnv.h"
 #include "streaming/transport.h"
 
@@ -12,6 +11,18 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+
+namespace Streaming {
+// Task 4 replaces this fixture state with Live().
+static OutputState& Live() {
+	static OutputState state {};
+	return state;
+}
+
+OutputState ReadLiveOutput() {
+	return Live();
+}
+} // namespace Streaming
 
 namespace {
 using namespace Streaming;
@@ -180,16 +191,11 @@ void TestSettingsApplyBeforeAccepted() {
 
 void TestOutputAfterResolution() {
 	Host host;
-	Live().store({30, 1920, 1080, 1.0f, false, false});
+	Live() = {1920, 1080, 30};
 	Transport transport(host.path, {}, {}, [](const Json& apply) {
 		const auto& values = apply["values"];
-		Live().Update([&](LiveState& state) {
-			if (values.contains("display.resolution")) {
-				state.width = 1280;
-				state.height = 720;
-			}
-			if (values.contains("display.fps")) state.fps = values["display.fps"];
-		});
+		if (values.contains("display.resolution")) Live() = {1280, 720, 30};
+		if (values.contains("display.fps")) Live().fps = values["display.fps"];
 		return Applied(apply["id"], values);
 	}, true);
 	host.ConnectFrameless(transport);

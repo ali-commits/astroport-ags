@@ -5198,15 +5198,6 @@ void drawInputReuseTests(const Device& device, Recorder& recorder) {
     recorder.Sync();
 }
 
-void drawInputMemoryTests(const Device& device) {
-    alignas(64) static std::array<std::uint32_t, 64> indices{};
-    for (std::uint32_t i = 0; i < indices.size(); ++i) indices[i] = i;
-    const auto copy = CopyDrawInput(device.GetContext(), nullptr, reinterpret_cast<std::uint64_t>(indices.data()), sizeof(indices), 4, Recorder::SnapshotUse::Index32);
-    indices[9] = 0x10000;
-    Require((copy.buffer->Properties() & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == 0, "an index copy left host memory, so its highest index would be scanned from the guest instead of the copy");
-    Require(HighestDrawIndex(copy.buffer->Bytes(), 4, false) == 63u, "the highest index of an index copy followed a later store to the guest");
-}
-
 void drawInputInPlaceTests(const Device& device, Recorder& recorder, bool copied = false) {
     auto context = device.GetContext();
     constexpr std::size_t bytes = 65536;
@@ -6931,10 +6922,6 @@ void singlePassTests(const Device& device, Recorder& recorder, bool watched) {
         std::uint32_t pipeBankXor = 0;
     };
     constexpr Case cases[] = {
-        {"R8 linear 300x170", 1, TextureTileMode::kLinear, 300, 170, 1},
-        {"R16 linear 257x129, 3 mips", 7, TextureTileMode::kLinear, 257, 129, 3},
-        {"RGBA8 linear 520x260", 56, TextureTileMode::kLinear, 520, 260, 1},
-        {"RGBA16F linear 385x257, 3 mips", 71, TextureTileMode::kLinear, 385, 257, 3},
         {"R8 64 KiB R_X 200x150", 1, TextureTileMode::kR64KBX, 200, 150, 1},
         {"R16 64 KiB R_X 200x150, 3 mips", 7, TextureTileMode::kR64KBX, 200, 150, 3},
         {"RGBA8 64 KiB R_X 520x260, 6 mips", 56, TextureTileMode::kR64KBX, 520, 260, 6},
@@ -7100,8 +7087,7 @@ void singlePassTests(const Device& device, Recorder& recorder, bool watched) {
             results[mode].moves = StorageTexture::SinglePassMoves() - movesBefore;
             if (results[mode].reuploaded != texels) failures += what + (mode == 1 ? " (single pass)" : " (copies)") + ": the second image does not hold the texels written back\n";
         }
-        const auto minimumMoves = test.tileMode == TextureTileMode::kLinear ? 2u : 3u;
-        if (results[0].moves != 0 || results[1].moves < minimumMoves) failures += what + ": single-pass moves " + std::to_string(results[0].moves) + " with the copies and " + std::to_string(results[1].moves) + " in single pass (want 0 and at least " + std::to_string(minimumMoves) + ")\n";
+        if (results[0].moves != 0 || results[1].moves < 3) failures += what + ": single-pass moves " + std::to_string(results[0].moves) + " with the copies and " + std::to_string(results[1].moves) + " in single pass (want 0 and at least 3)\n";
         if (results[0].uploaded != results[1].uploaded) failures += what + ": the first upload differs between the copies and single pass\n";
         if (results[0].memory != results[1].memory) {
             std::size_t differ = 0;
@@ -12240,11 +12226,6 @@ int main(int argc, char** argv) {
             std::cout << "In-place draw input tests passed\n";
             return 0;
         }
-        if (argc == 2 && std::string_view(argv[1]) == "--draw-input-memory-only") {
-            drawInputMemoryTests(device);
-            std::cout << "Draw input memory tests passed\n";
-            return 0;
-        }
         if (argc == 2 && std::string_view(argv[1]) == "--draw-inputs-copied-only") {
             drawInputInPlaceTests(device, recorder, true);
             std::cout << "Copied draw input tests passed\n";
@@ -12334,7 +12315,6 @@ int main(int argc, char** argv) {
         unwrittenSnapshotTests(device);
         drawSnapshotUploadTests(device, recorder);
         drawInputReuseTests(device, recorder);
-        drawInputMemoryTests(device);
         drawInputInPlaceTests(device, recorder);
         RunResidentPresentTests(device.GetContext());
         sliceDirtyTests(device, recorder);

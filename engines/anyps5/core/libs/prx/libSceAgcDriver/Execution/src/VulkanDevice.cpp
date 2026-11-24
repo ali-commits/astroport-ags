@@ -451,7 +451,6 @@ struct VulkanDevice::State {
     std::uint32_t sparseFamily = VK_QUEUE_FAMILY_IGNORED;
     std::uint32_t sparseIndex = 0;
     VkQueue sparseQueue = VK_NULL_HANDLE;
-    VkQueue computeQueue = VK_NULL_HANDLE;
     std::mutex sparseQueueMutex;
     VkQueue settleQueue = VK_NULL_HANDLE;
     std::uint32_t settleFamily = 0;
@@ -1717,7 +1716,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     queueInfo.queueFamilyIndex = family;
     queueInfo.queueCount = 1;
     queueInfo.pQueuePriorities = &priority;
-    const float priorities[4]{1.0f, 1.0f, 1.0f, 1.0f};
+    const float priorities[3]{1.0f, 1.0f, 1.0f};
 #ifdef _WIN32
     const bool settles = true;
 #else
@@ -1770,12 +1769,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     const auto settleIndex = plan.settleIndex;
     VkDeviceQueueCreateInfo queueInfos[3]{queueInfo, {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}, {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}};
     queueInfos[0].queueCount = plan.mainCount;
-    std::uint32_t computeIndex = 0;
-    if (Graphics::Recorder::ComputeQueueEnabled() && family < queues.size() && queues[family].queueCount > plan.mainCount && plan.mainCount < 4) {
-        computeIndex = plan.mainCount;
-        queueInfos[0].queueCount = plan.mainCount + 1;
-    }
-    queueInfos[0].pQueuePriorities = queueInfos[0].queueCount > 1 ? priorities : &priority;
+    queueInfos[0].pQueuePriorities = plan.mainCount > 1 ? priorities : &priority;
     deviceInfo.queueCreateInfoCount = 1;
     const auto addQueue = [&](std::uint32_t queueFamily, std::uint32_t index) {
         for (std::uint32_t info = 1; info < deviceInfo.queueCreateInfoCount; ++info) {
@@ -2152,10 +2146,6 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     }
     state->DeviceFunction<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(state->device, family, 0, &state->queue);
     state->queueFamily = family;
-    if (computeIndex != 0) {
-        state->DeviceFunction<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(state->device, family, computeIndex, &state->computeQueue);
-        APS5_LOG_OUT("Compute-lane queue family=%u index=%u", family, computeIndex);
-    }
     if (plan.present) {
         state->DeviceFunction<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(state->device, family, plan.presentIndex, &state->presentQueue);
         APS5_LOG_OUT("Presentation queue family=%u index=%u", family, plan.presentIndex);
@@ -2596,21 +2586,6 @@ int VulkanDevice::WriteLabelOnGpu(std::uint64_t address, std::span<const std::by
     // Debug aid: APS5_LABEL_SUBMIT_NOW=1 submits every label at once, as before.
     static const bool submitNow = std::getenv("APS5_LABEL_SUBMIT_NOW") != nullptr;
     if (submitNow) recorder.Submit();
-    return 0;
-}
-
-int VulkanDevice::WriteStoreOnGpu(std::uint64_t address, std::span<const std::byte> bytes, std::uint64_t stamp, std::uint32_t queue) {
-    if (!state->recorder || bytes.empty() || bytes.size() > 65536 || address % 4 != 0 || bytes.size() % 4 != 0) return 4;
-    auto& recorder = *state->recorder;
-    if (recorder.Idle()) return 1;
-    if (state->CopiedWriterOverlaps(address, bytes.size()) || (Graphics::Recorder::PendingCompletionStores() != 0 && recorder.CompletionLabelIn(address, bytes.size())) || recorder.PendingLabelIn(address, bytes.size())) return WriteLabelOnGpu(address, bytes, stamp, queue);
-    const auto context = graphicsContext();
-    const auto* import = Graphics::HostImportFor(context, address, bytes.size());
-    if (import == nullptr) return 3;
-    if (Graphics::AnyShadowedOverlaps(address, bytes.size())) Graphics::PublishShadow(address, bytes.size(), Graphics::PublishScope::PartialUnits, Graphics::PublishReason::Label);
-    recorder.RecordStore(import->buffer, Graphics::HostImportOffset(*import, address), bytes, address);
-    recorder.NotePendingWrite(address, bytes.size());
-    GuestMemory::MarkWritten(address, bytes.size());
     return 0;
 }
 
@@ -3862,18 +3837,6 @@ bool VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     submit.pCommandBuffers = &commands;
     submit.signalSemaphoreCount = 1;
     submit.pSignalSemaphores = &rendered;
-    VkTimelineSemaphoreSubmitInfoKHR laneTimeline{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO_KHR};
-    VkSemaphore laneSemaphore = VK_NULL_HANDLE;
-    std::uint64_t laneValue = 0;
-    const VkPipelineStageFlags laneStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-    if (state->computeQueue != VK_NULL_HANDLE && state->recorder && state->recorder->NewestTimelinePoint(&laneSemaphore, &laneValue)) {
-        submit.waitSemaphoreCount = 1;
-        submit.pWaitSemaphores = &laneSemaphore;
-        submit.pWaitDstStageMask = &laneStage;
-        laneTimeline.waitSemaphoreValueCount = 1;
-        laneTimeline.pWaitSemaphoreValues = &laneValue;
-        submit.pNext = &laneTimeline;
-    }
     timing.Mark("command_record_scale");
     // The slot's fence signaled (retired above) or was never used: the reset cannot block.
     check(state->DeviceFunction<PFN_vkResetFences>("vkResetFences")(state->device, 1, &slot.fence), "vkResetFences present");
@@ -4196,7 +4159,6 @@ Graphics::Context VulkanDevice::buildContext() const {
     context.queueFamily = state->queueFamily;
     context.sparseFamily = state->sparseFamily;
     context.sparseQueue = state->sparseQueue;
-    context.computeQueue = state->computeQueue;
     context.sparseQueueMutex = &state->sparseQueueMutex;
     context.settleQueue = state->settlePool != VK_NULL_HANDLE ? state->settleQueue : VK_NULL_HANDLE;
     context.settlePool = state->settlePool;
@@ -4478,23 +4440,6 @@ bool SyncEachDispatch() {
 bool TraceDispatchIo() {
     static const bool traceIo = std::getenv("APS5_TRACE_DISPATCH_IO") != nullptr;
     return traceIo;
-}
-
-// With APS5_TRACE_PROGRAM=<hex code address>[:n] set too, only every n-th dispatch of that program.
-bool TraceDispatchIo(std::uint64_t programAddress) {
-    if (!TraceDispatchIo()) return false;
-    static const std::pair<std::uint64_t, std::uint64_t> filter = [] {
-        const char* text = std::getenv("APS5_TRACE_PROGRAM");
-        if (text == nullptr) return std::pair<std::uint64_t, std::uint64_t>{0, 0};
-        char* end = nullptr;
-        const auto program = std::strtoull(text, &end, 16);
-        const auto every = *end == ':' ? std::strtoull(end + 1, nullptr, 10) : 100ull;
-        return std::pair<std::uint64_t, std::uint64_t>{program, std::max<std::uint64_t>(every, 1)};
-    }();
-    if (filter.first == 0) return true;
-    if (programAddress != filter.first) return false;
-    static std::atomic<std::uint64_t> seen{0};
-    return seen.fetch_add(1, std::memory_order_relaxed) % filter.second == 0;
 }
 
 void WatchMemory(std::uint64_t programAddress) {
@@ -5239,7 +5184,7 @@ void VulkanDevice::recordDispatch(RecordedDispatch& record) {
     if (record.resources != nullptr) recorder.KeepBytes(record.resources.get(), record.resources->CopiedBytes());
     if (record.bindings != nullptr) {
         recorder.Keep(record.bindings);
-        for (const auto& snapshot : record.bindings->snapshots) recorder.KeepBytes(snapshot.buffer.get(), snapshot.buffer->Mapped() ? snapshot.buffer->Bytes().size() : snapshot.bytes);
+        for (const auto& snapshot : record.bindings->snapshots) recorder.KeepBytes(snapshot.buffer.get(), snapshot.buffer->Bytes().size());
     }
     recordStep(PhaseRecordKeeps);
     if (record.dataRefresh != RecordedDispatch::DataRefresh::None) {
@@ -5857,7 +5802,7 @@ VulkanDevice::IndirectOutcome VulkanDevice::recordCompletedDispatch(const Shader
         // finishes the recorder up to that batch's serial. Prints the [address-sync] leases line.
         Graphics::CountLeaseOutcome(false, recorder.Submissions() + 1);
     }
-    if (TraceDispatchIo(programAddress)) std::fprintf(stderr, "[dispatch-io] 0x%llx %s:%s\n", static_cast<unsigned long long>(programAddress), groupsText, resources->Describe().c_str());
+    if (TraceDispatchIo()) std::fprintf(stderr, "[dispatch-io] %s:%s\n", groupsText, resources->Describe().c_str());
     WatchMemory(programAddress);
     // The recipe for the caller's dispatch-cache variant (design_cpu_final M4, rule R3): only an
     // object the resource cache serves under this content key (reusable: no lease, no copied
@@ -5996,7 +5941,7 @@ RecipeOutcome VulkanDevice::DispatchRecipe(const ShaderRecompiler::RecompileResu
         state->recorder->Sync();
         timer.phase(PhaseSync);
     }
-    if (TraceDispatchIo(programAddress)) std::fprintf(stderr, "[dispatch-io] 0x%llx %s:%s\n", static_cast<unsigned long long>(programAddress), groupsText, hit->resources->Describe().c_str());
+    if (TraceDispatchIo()) std::fprintf(stderr, "[dispatch-io] %s:%s\n", groupsText, hit->resources->Describe().c_str());
     WatchMemory(programAddress);
     timer.finish(lookupsBefore, groupsText, indirect);
     if (profile) reportRecipes();

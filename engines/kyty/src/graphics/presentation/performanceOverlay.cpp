@@ -1,11 +1,9 @@
 #include "graphics/presentation/performanceOverlay.h"
-#include "graphics/presentation/videoOut.h"
 
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/hostStats.h"
 #include "graphics/host_gpu/graphicContext.h"
-#include "graphics/host_gpu/renderer/frameGen.h"
 #include "imgui.h"
 #include "kernel/memory.h"
 
@@ -16,8 +14,6 @@
 #include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -151,7 +147,6 @@ std::mutex            g_frame_mutex;
 FrameWindow           g_frames;
 std::atomic<uint64_t> g_generation {0};
 std::atomic<bool>     g_details {false};
-std::atomic<bool>     g_fps_only {false};
 std::atomic<uint64_t> g_revision {0};
 
 std::mutex                  g_host_mutex;
@@ -761,24 +756,6 @@ void PerformanceOverlayRecordFlip(uint32_t guest_width, uint32_t guest_height) n
 }
 
 bool PerformanceOverlayEnabled() noexcept {
-	// ASTROHYBRID_OVERLAY (default unset): fps = FPS line only, compact = the F2 panel, full = the
-	// Shift+F2 panel, shown from the start. F2 and Shift+F2 keep working.
-	static const bool start_mode = [] {
-		const char* mode = std::getenv("ASTROHYBRID_OVERLAY");
-		if (mode == nullptr) {
-			return false;
-		}
-		const bool fps  = std::strcmp(mode, "fps") == 0;
-		const bool full = std::strcmp(mode, "full") == 0;
-		if (fps || full || std::strcmp(mode, "compact") == 0) {
-			g_fps_only.store(fps, std::memory_order_release);
-			g_details.store(full, std::memory_order_release);
-			SetOverlayEnabled(true);
-			g_revision.fetch_add(1, std::memory_order_acq_rel);
-		}
-		return true;
-	}();
-	(void)start_mode;
 	return Common::DebugCounters::Enabled();
 }
 
@@ -788,9 +765,7 @@ void TogglePerformanceOverlay() noexcept {
 }
 
 void TogglePerformanceOverlayDetails() noexcept {
-	if (g_fps_only.exchange(false, std::memory_order_acq_rel) && Common::DebugCounters::Enabled()) {
-		g_details.store(false, std::memory_order_release);
-	} else if (Common::DebugCounters::Enabled()) {
+	if (Common::DebugCounters::Enabled()) {
 		g_details.store(!g_details.load(std::memory_order_acquire), std::memory_order_release);
 	} else {
 		g_details.store(true, std::memory_order_release);
@@ -877,41 +852,14 @@ float DrawPerformanceOverlay(const GraphicContext& graphics, vk::Extent2D extent
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {10.0f * scale, 8.0f * scale});
 	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {8.0f * scale, 2.0f * scale});
 	ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, {4.0f * scale, 1.0f * scale});
-	const bool fps_only = g_fps_only.load(std::memory_order_acquire);
-	if (fps_only) {
-		ImGui::SetNextWindowBgAlpha(0.55f);
-	}
-	const bool open = ImGui::Begin("##kyty_performance_overlay", nullptr, FLAGS);
-	// ASTROHYBRID_DLSSG (frameGen.h): with frame generation the screen shows more frames than the
-	// game renders; both are shown.
-	const double generated = Graphics::FrameGen::ShownPerGameFrame();
-	const bool   frame_gen = generated > 1.05;
-	if (open && fps_only) {
-		if (shown.fps > 0.0 && frame_gen) {
-			ImGui::TextColored(Color(GOOD), "%.0f FPS on screen", shown.fps * generated);
-			ImGui::TextDisabled("%.0f game x%.1f frame gen", shown.fps, generated);
-		} else if (shown.fps > 0.0) {
-			ImGui::TextColored(Color(FrameTimeColor(shown.frame_ms)), "%.0f FPS", shown.fps);
-		} else {
-			ImGui::TextDisabled("-- FPS");
-		}
-	} else if (open) {
-		if (shown.fps > 0.0 && frame_gen) {
-			ImGui::TextColored(Color(GOOD), "%.0f FPS on screen (frame gen x%.1f)", shown.fps * generated,
-			                   generated);
-			ImGui::TextColored(Color(FrameTimeColor(shown.frame_ms)), "Game %.1f FPS   %.1f ms",
-			                   shown.fps, shown.frame_ms);
-		} else if (shown.fps > 0.0) {
+	if (ImGui::Begin("##kyty_performance_overlay", nullptr, FLAGS)) {
+		if (shown.fps > 0.0) {
 			ImGui::TextColored(Color(FrameTimeColor(shown.frame_ms)), "%.1f FPS   %.1f ms",
 			                   shown.fps, shown.frame_ms);
 		} else if (shown.stalled_s >= 1.0) {
 			ImGui::TextColored(Color(BAD), "No frames for %.0f s", shown.stalled_s);
 		} else {
 			ImGui::TextDisabled("Waiting for frames");
-		}
-		if (const auto* limit = VideoOut::FrameLimitLabel()) {
-			ImGui::TextUnformatted("Frame-rate limit");
-			ImGui::Text("%s  (Ctrl+F2 to change)", limit);
 		}
 		DrawFrameGraph(shown.history, shown.history_count, (details ? 330.0f : 260.0f) * scale,
 		               46.0f * scale);

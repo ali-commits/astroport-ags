@@ -1881,8 +1881,6 @@ if(BUILD_TESTING)
     set_tests_properties(agc_draw_inputs_in_place PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME agc_draw_inputs_copied COMMAND agc_driver_recorder_tests --draw-inputs-copied-only)
     set_tests_properties(agc_draw_inputs_copied PROPERTIES SKIP_RETURN_CODE 77)
-    add_test(NAME agc_draw_input_memory COMMAND agc_driver_recorder_tests --draw-input-memory-only)
-    set_tests_properties(agc_draw_input_memory PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME agc_resident_present COMMAND agc_driver_recorder_tests --resident-present-only)
     set_tests_properties(agc_resident_present PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME agc_queued_write_groups COMMAND agc_driver_recorder_tests --queued-write-groups-only)
@@ -1893,7 +1891,7 @@ if(BUILD_TESTING)
     add_test(NAME agc_metadata_pass COMMAND agc_driver_recorder_tests --metadata-pass-only)
     set_tests_properties(agc_metadata_pass PROPERTIES SKIP_RETURN_CODE 77)
     if(WIN32)
-        set_tests_properties(agc_recorder_read_list agc_host_import_unmap agc_parked_import_unmap agc_host_import_retirement agc_sparse_run_import agc_sparse_run_import_copied agc_unit_shadow agc_driver_recorder agc_idle_publish_wait agc_descriptor_pool_recycling agc_draw_snapshot_cap agc_draw_snapshot_epoch agc_multisample_guest_access agc_repeat_storage_guard agc_draw_inputs_in_place agc_draw_inputs_copied agc_draw_input_memory agc_resident_present agc_slice_dirty agc_queued_write_groups agc_metadata_pass agc_tiled_resolve PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(agc_recorder_read_list agc_host_import_unmap agc_parked_import_unmap agc_host_import_retirement agc_sparse_run_import agc_sparse_run_import_copied agc_unit_shadow agc_driver_recorder agc_idle_publish_wait agc_descriptor_pool_recycling agc_draw_snapshot_cap agc_draw_snapshot_epoch agc_multisample_guest_access agc_repeat_storage_guard agc_draw_inputs_in_place agc_draw_inputs_copied agc_resident_present agc_slice_dirty agc_queued_write_groups agc_metadata_pass agc_tiled_resolve PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
         add_test(NAME agc_host_import_second_mapping COMMAND agc_driver_recorder_tests --host-import-second-mapping-only)
         set_tests_properties(agc_host_import_second_mapping PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT_MODIFICATION
@@ -3334,12 +3332,8 @@ if(BUILD_TESTING)
     set_tests_properties(agc_driver_draw_data_hit_user_words_verify PROPERTIES ENVIRONMENT "APS5_VERIFY_DRAW_DATA_HITS=1" SKIP_RETURN_CODE 77)
     add_test(NAME agc_driver_draw_data_hit_user_words_refresh COMMAND agc_driver_draw_data_hit_user_words_tests)
     set_tests_properties(agc_driver_draw_data_hit_user_words_refresh PROPERTIES ENVIRONMENT "APS5_DRAW_PIPELINE=1" SKIP_RETURN_CODE 77)
-    add_test(NAME agc_driver_draw_data_hit_user_words_rebased COMMAND agc_driver_draw_data_hit_user_words_tests)
-    set_tests_properties(agc_driver_draw_data_hit_user_words_rebased PROPERTIES ENVIRONMENT "APS5_REBASED_STAGE_REUSE=1" SKIP_RETURN_CODE 77)
-    add_test(NAME agc_driver_draw_data_hit_user_words_rebased_verify COMMAND agc_driver_draw_data_hit_user_words_tests)
-    set_tests_properties(agc_driver_draw_data_hit_user_words_rebased_verify PROPERTIES ENVIRONMENT "APS5_REBASED_STAGE_REUSE=1;APS5_VERIFY_DRAW_DATA_HITS=1" SKIP_RETURN_CODE 77)
     if(WIN32)
-        set_tests_properties(agc_driver_draw_cache_reuse_off agc_driver_draw_cache_reuse_verify agc_driver_draw_cache_reuse_inline agc_driver_draw_data_hit_user_words_verify agc_driver_draw_data_hit_user_words_refresh agc_driver_draw_data_hit_user_words_rebased agc_driver_draw_data_hit_user_words_rebased_verify PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(agc_driver_draw_cache_reuse_off agc_driver_draw_cache_reuse_verify agc_driver_draw_cache_reuse_inline agc_driver_draw_data_hit_user_words_verify agc_driver_draw_data_hit_user_words_refresh PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
 

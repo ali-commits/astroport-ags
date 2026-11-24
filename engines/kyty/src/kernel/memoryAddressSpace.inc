@@ -16,11 +16,6 @@ static constexpr uint64_t HOST_USER_MAX = GUEST_ADDRESS_SPACE_END - 1u;
 // AMM map commands (kAmmWindowBase).
 static constexpr uint64_t HOST_USER_ALLOC_END = kAmmWindowBase;
 static_assert(kAmmWindowBase > HOST_USER_MIN && kAmmWindowBase + kAmmWindowSize == HOST_USER_MAX + 1u);
-// AstroHybrid: the host (AnyPS5) donates its guest window at the AMM window base; with no AMM
-// map commands in that window, ordinary mappings search the whole user range as before int22.
-static uint64_t UserAllocEnd() {
-	return g_host_placeholders.empty() ? HOST_USER_ALLOC_END : HOST_USER_MAX + 1u;
-}
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 // KYTY_READ_GUARD (default off; chenxiao07/KytyPS5 f53b4497a, 8de5e4024, 90c42c900, ee79829f0,
@@ -1350,9 +1345,6 @@ public:
 		m_backing = nullptr;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 		for (const auto& [start, size]: m_owned) {
-			if (std::find(m_adopted.begin(), m_adopted.end(), std::make_pair(start, size)) != m_adopted.end()) {
-				continue;
-			}
 			const auto end     = start + size;
 			auto       current = start;
 			while (current < end) {
@@ -1617,15 +1609,15 @@ public:
 		}
 		alignment = std::max<uint64_t>(alignment != 0 ? alignment : PageSize(), PageSize());
 		std::lock_guard lock(m_mutex);
-		if (search_addr != 0 && search_addr < UserAllocEnd()) {
-			return FindFreeAlignedUnlocked(search_addr, UserAllocEnd(), size, alignment);
+		if (search_addr != 0 && search_addr < HOST_USER_ALLOC_END) {
+			return FindFreeAlignedUnlocked(search_addr, HOST_USER_ALLOC_END, size, alignment);
 		}
-		// No hint, or one at or above the AMM window (UserAllocEnd()): the default search, as
+		// No hint, or one at or above the AMM window (HOST_USER_ALLOC_END): the default search, as
 		// FindGuestFreeRange falls back for such a hint.
 		auto addr = FindFreeAlignedUnlocked(HOST_SYSTEM_MANAGED_MIN, HOST_SYSTEM_MANAGED_MAX + 1u,
 		                                    size, alignment);
 		return addr != 0 ? addr
-		                 : FindFreeAlignedUnlocked(HOST_USER_MIN, UserAllocEnd(), size, alignment);
+		                 : FindFreeAlignedUnlocked(HOST_USER_MIN, HOST_USER_ALLOC_END, size, alignment);
 	}
 
 	uint64_t FindFreeAligned(uint64_t search_start, uint64_t search_end, uint64_t size,
@@ -2189,19 +2181,6 @@ private:
 		const auto         guest_end         = HOST_USER_MAX + 1u;
 		auto               next_addr         = HOST_SYSTEM_MANAGED_MIN;
 
-		for (const auto& [start, size]: g_host_placeholders) {
-			MEMORY_BASIC_INFORMATION info {};
-			EXIT_IF(VirtualQuery(reinterpret_cast<const void*>(start), &info, sizeof(info)) == 0);
-			EXIT_IF(info.State != MEM_RESERVE || reinterpret_cast<uint64_t>(info.BaseAddress) != start ||
-			        static_cast<uint64_t>(info.RegionSize) < size);
-			AddFreeUnlocked(start, size);
-			m_owned.emplace_back(start, size);
-			m_adopted.emplace_back(start, size);
-		}
-		if (!g_host_placeholders.empty()) {
-			next_addr = guest_end;
-		}
-
 		while (next_addr < guest_end) {
 			MEMORY_BASIC_INFORMATION info {};
 			if (VirtualQuery(reinterpret_cast<const void*>(next_addr), &info, sizeof(info)) == 0) {
@@ -2242,23 +2221,6 @@ private:
 		}};
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
-		// AstroHybrid on Linux: the host (AnyPS5) donated these ranges to Kyty (AdoptHostPlaceholders).
-		// AnyPS5 keeps its PROT_NONE arena mapping over them and only records the donation, so Kyty
-		// takes them over in place, as the Windows build adopts the host's placeholders, and reserves
-		// nothing else: the rest of the PS5 regions is the host's.
-		if (!g_host_placeholders.empty()) {
-			for (const auto& [start, size]: g_host_placeholders) {
-				void* ptr = mmap(reinterpret_cast<void*>(start), size, PROT_NONE,
-				                 MAP_PRIVATE | MAP_ANON | MAP_NORESERVE | MAP_FIXED, -1, 0);
-				if (ptr == MAP_FAILED || reinterpret_cast<uint64_t>(ptr) != start) {
-					EXIT("failed to adopt the host's guest range 0x%016" PRIx64 ", size 0x%016" PRIx64 "\n", start, size);
-				}
-				AddFreeUnlocked(start, size);
-				m_owned.emplace_back(start, size);
-				m_adopted.emplace_back(start, size);
-			}
-			return;
-		}
 		std::vector<std::pair<uint64_t, uint64_t>> occupied;
 		FILE*                                      maps = fopen("/proc/self/maps", "r");
 		EXIT_IF(maps == nullptr);
@@ -2498,7 +2460,6 @@ private:
 	// KYTY_LAST_SHARED_MAPPING.
 	std::atomic<uint64_t>                       m_mapped_generation {1};
 	std::vector<std::pair<uint64_t, uint64_t>> m_owned;
-	std::vector<std::pair<uint64_t, uint64_t>> m_adopted;
 	// AddLiveStack's ranges (KYTY_TRACKER_SPARE), host-page aligned: start to end.
 	std::multimap<uint64_t, uint64_t>          m_live_stacks;
 	uint64_t                                   m_granularity = 0x10000;

@@ -1216,7 +1216,7 @@ DrawInputCopy CopyDrawInput(const Context& context, Recorder* recorder, std::uin
             return copy;
         }
     }
-    copy.buffer = use == Recorder::SnapshotUse::Vertex ? std::make_shared<Buffer>(context, bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, context.SnapshotProperties()) : std::make_shared<Buffer>(context, bytes, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+    copy.buffer = std::make_shared<Buffer>(context, bytes, use == Recorder::SnapshotUse::Vertex ? VK_BUFFER_USAGE_VERTEX_BUFFER_BIT : VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
     GuestMemory::Read(address, copy.buffer->Bytes(), alignment);
     return copy;
 }
@@ -2148,7 +2148,6 @@ void captureInputs(const Context& context, Recorder& recorder, VkCommandBuffer c
     };
     if (bindings != nullptr) {
         for (const auto& snapshot : bindings->snapshots) {
-            if (!snapshot.buffer->Mapped()) continue;
             const auto bytes = snapshot.Bytes();
             addSample(snapshot.address, bytes.size(), snapshot.buffer->Handle(), snapshot.offset, bytes.data());
         }

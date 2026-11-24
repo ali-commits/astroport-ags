@@ -1,4 +1,3 @@
-#include "graphics/presentation/window/lowLatency.h"
 #include "common/hleWaitStats.h"
 #include "common/liveSwitch.h"
 #include "libs/agc.h"
@@ -4310,7 +4309,6 @@ uint32_t* KYTY_SYSV_ABI AgcDcbSetFlip(CommandBuffer* buf, uint32_t video_out_han
                                       int32_t display_buffer_index, uint32_t flip_mode,
                                       int64_t flip_arg) {
 	PRINT_NAME();
-	Graphics::LowLatency::NoteFlipPacket();
 
 	AgcTrace("\t video_out_handle     = %" PRIu32 "\n"
 	     "\t display_buffer_index = %" PRId32 "\n"
@@ -4415,8 +4413,6 @@ static void submit_dcb(uint32_t* dcb, uint32_t size_in_dwords) {
 	GraphicsDbgDumpDcb("d", size_in_dwords, dcb);
 	EXIT_IF(g_renderer == nullptr);
 	g_renderer->GetGpu().Submit(std::span {dcb, size_in_dwords}, {});
-	// ASTROHYBRID_LOW_LATENCY: a submission carrying a flip ends the guest frame (lowLatency.h).
-	Graphics::LowLatency::AfterDcbSubmit();
 }
 
 int KYTY_SYSV_ABI AgcDriverSubmitDcb(const Packet* packet) {

@@ -314,8 +314,6 @@ static callback_func_t g_test_before_backing_map = nullptr;
 static callback_func_t g_test_backing_read       = nullptr;
 #endif
 
-static std::vector<std::pair<uint64_t, uint64_t>> g_host_placeholders;
-
 #include "memoryAddressSpace.inc"
 
 enum class VirtualRangeType {
@@ -1606,14 +1604,14 @@ static uint64_t FindGuestFreeRange(uint64_t search_addr, uint64_t size, uint64_t
 
 	if (search_addr != 0) {
 		// A hint inside the AMM window is not honoured: that window belongs to AMM map commands.
-		if (search_addr < UserAllocEnd()) {
-			return find_in(search_addr, UserAllocEnd());
+		if (search_addr < HOST_USER_ALLOC_END) {
+			return find_in(search_addr, HOST_USER_ALLOC_END);
 		}
 		search_addr = 0;
 	}
 	auto addr = find_in(GUEST_DEFAULT_MAP_BASE, HOST_SYSTEM_MANAGED_MAX + 1u);
 	if (addr == 0) {
-		addr = find_in(HOST_USER_MIN, UserAllocEnd());
+		addr = find_in(HOST_USER_MIN, HOST_USER_ALLOC_END);
 	}
 	return addr;
 }
@@ -2863,12 +2861,6 @@ static void InitializeMemorySizes() {
 	     g_flexible_memory_size / (1024ull * 1024ull),
 	     (g_guest_memory_size - g_flexible_memory_size) / (1024ull * 1024ull),
 	     UpstreamMemoryDefaults() ? " (KYTY_UPSTREAM_MEMORY_DEFAULTS)" : "");
-}
-
-void AdoptHostPlaceholders(uint64_t vaddr, uint64_t size) {
-	EXIT_IF(g_guest_address_space != nullptr);
-	EXIT_IF(size == 0);
-	g_host_placeholders.emplace_back(vaddr, size);
 }
 
 void Initialize() {

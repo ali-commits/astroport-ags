@@ -2,13 +2,6 @@
 #include "graphics/presentation/videoOut.h"
 
 #include "common/abi.h"
-
-#include <algorithm>
-#include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/cpuPlacement.h"
@@ -34,8 +27,6 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/presentation/performanceOverlay.h"
 #include "graphics/presentation/presenter.h"
-#include "graphics/presentation/window/lowLatency.h"
-#include "graphics/host_gpu/renderer/passTrace.h"
 #include "graphics/presentation/renderDoc.h"
 #include "kernel/eventQueueFilters.h"
 #include "kernel/pthread.h"
@@ -50,7 +41,6 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
-#include <cstring>
 #include <fmt/format.h>
 #include <list>
 #include <thread>
@@ -261,7 +251,6 @@ private:
 		RequestState                state;
 		Graphics::Presenter::Frame* frame;
 		bool                        premultiplied_alpha;
-		uint64_t                    latency_frame; // ASTROHYBRID_LOW_LATENCY frame number
 		// KYTY_HOLD_SKIPPED_DRAWS: the main display keeps the frame it shows (TakeFrameHold).
 		bool hold = false;
 	};
@@ -832,174 +821,6 @@ void VideoOutDriver::Impl::VblankEnd() {
 // <= 500 us) instead of only at a vblank. The timeline restarts when the switch turns on or the
 // refresh rate changes. Independent of KYTY_PRESENT_PORT_UNLOCKED, which only changes FlipQueue::Flip.
 static Live::Switch g_present_abs_vblank("KYTY_PRESENT_ABS_VBLANK", Live::ParseDefaultOff);
-// ASTROHYBRID_FPS_PACING (default on; =0 off): with a frame-rate limit, presents keep a fixed cadence
-// (each due time is the previous due time plus the interval) instead of restarting the interval at
-// every present, which let timer overshoots accumulate (30 FPS limit measured 29.76 FPS, uneven gaps).
-static Live::Switch g_frame_limit_pacing("ASTROHYBRID_FPS_PACING", Live::ParseDefaultOn);
-
-namespace {
-
-constexpr uint32_t FRAME_LIMIT_DISABLED = UINT32_MAX;
-constexpr std::array<uint32_t, 10> FRAME_LIMITS {30, 35, 40, 45, 50, 55, 60, 90, 120, 0};
-constexpr std::array<const char*, 10> FRAME_LIMIT_LABELS {"30 FPS", "35 FPS", "40 FPS", "45 FPS", "50 FPS",
-                                                        "55 FPS", "60 FPS", "90 FPS", "120 FPS", "No limit"};
-
-// ASTROHYBRID_FPS_LIMIT: one of the listed values, or any whole number of frames per second from 10
-// to 240 (the launcher's frame-generation target divides the on-screen rate by the multiplier, e.g.
-// 50 on screen with 2x = 25). Ctrl+F2 then cycles the listed values as before.
-constexpr uint32_t    FRAME_LIMIT_CUSTOM = 1000;
-std::atomic<uint32_t> g_custom_frame_limit {0};
-
-std::atomic<uint32_t>& FrameLimitChoice() {
-	static std::atomic<uint32_t> choice {[] {
-		const char* value = std::getenv("ASTROHYBRID_FPS_LIMIT");
-		if (value != nullptr) {
-			constexpr std::array<const char*, 10> options {"30", "35", "40", "45", "50", "55", "60", "90", "120", "unlimited"};
-			for (uint32_t i = 0; i < options.size(); ++i) {
-				if (std::strcmp(value, options[i]) == 0) {
-					return i;
-				}
-			}
-			char*      end    = nullptr;
-			const auto custom = std::strtoul(value, &end, 10);
-			if (end != value && *end == '\0' && custom >= 10 && custom <= 240) {
-				g_custom_frame_limit.store(static_cast<uint32_t>(custom), std::memory_order_relaxed);
-				return FRAME_LIMIT_CUSTOM;
-			}
-		}
-		return FRAME_LIMIT_DISABLED;
-	}()};
-	return choice;
-}
-
-struct GameStep {
-	double*   fps   = nullptr;
-	float*    dt    = nullptr;
-	uint64_t* us    = nullptr;
-	bool      ready = false;
-	bool      dead  = false;
-	double    ema   = 0.0;
-	double    scale = 1.0;
-	uint64_t  last  = 0;
-};
-
-// ASTROHYBRID_GAME_SPEED=1 (default off): Astro Bot advances a fixed 1/FrameRate per frame from one
-// global (eboot 0x8ff0040: f64 frame rate, f32 1/rate, u64 microseconds per frame; image +0x400000),
-// so below 60 FPS the game runs in slow motion (30 FPS = half speed). With the switch on, every
-// present writes the measured frame rate there; ASTROHYBRID_GAME_SPEED_PERCENT (25..150, default 100)
-// scales the result (90 = 10% slower). Every
-// present writes the measured frame rate there (the limit itself when the cadence holds it), clamped
-// to 20..120. ASTROHYBRID_GAME_STEP_ADDR overrides the address; the block is checked first.
-void UpdateGameStep(GameStep& step, uint64_t now, uint64_t frequency, uint32_t limit) {
-	static const bool enabled = [] {
-		const char* value = std::getenv("ASTROHYBRID_GAME_SPEED");
-		return value != nullptr && std::strcmp(value, "1") == 0;
-	}();
-	if (!enabled || step.dead) {
-		return;
-	}
-	if (!step.ready) {
-		const char* custom = std::getenv("ASTROHYBRID_GAME_STEP_ADDR");
-		const auto  addr   = custom != nullptr ? std::strtoull(custom, nullptr, 0) : 0x93F0040ull;
-#ifdef _WIN32
-		MEMORY_BASIC_INFORMATION info {};
-		if (VirtualQuery(reinterpret_cast<void*>(addr), &info, sizeof(info)) != sizeof(info) ||
-		    info.State != MEM_COMMIT || (info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY)) == 0) {
-#else
-		// Linux: the 24-byte block must lie in one readable and writable mapping.
-		const auto writable = [](uint64_t a) {
-			FILE* maps = std::fopen("/proc/self/maps", "r");
-			if (maps == nullptr) return false;
-			unsigned long long lo = 0, hi = 0;
-			char perms[8] = {};
-			char line[512];
-			bool ok = false;
-			while (!ok && std::fgets(line, sizeof(line), maps) != nullptr) {
-				ok = std::sscanf(line, "%llx-%llx %7s", &lo, &hi, perms) == 3 && a >= lo && a + 24 <= hi &&
-				     perms[0] == 'r' && perms[1] == 'w';
-			}
-			std::fclose(maps);
-			return ok;
-		};
-		if (!writable(addr)) {
-#endif
-			step.dead = true;
-			std::printf("Game speed: no frame-rate block at 0x%llx, switch ignored\n", static_cast<unsigned long long>(addr));
-			return;
-		}
-		auto* fps = reinterpret_cast<double*>(addr);
-		auto* dt  = reinterpret_cast<float*>(addr + 8);
-		if (!(*fps >= 10.0 && *fps <= 240.0) || std::abs(*dt * *fps - 1.0) > 1e-3) {
-			step.dead = true;
-			std::printf("Game speed: 0x%llx does not hold a frame rate (%g, %g), switch ignored\n",
-			       static_cast<unsigned long long>(addr), *fps, static_cast<double>(*dt));
-			return;
-		}
-		step.fps   = fps;
-		step.dt    = dt;
-		step.us    = reinterpret_cast<uint64_t*>(addr + 16);
-		step.ready = true;
-		if (const char* speed = std::getenv("ASTROHYBRID_GAME_SPEED_PERCENT"); speed != nullptr) {
-			step.scale = std::clamp(std::strtod(speed, nullptr), 25.0, 150.0) / 100.0;
-		}
-		std::printf("Game speed: frame-rate block at 0x%llx (game rate %g), real-time step on\n",
-		       static_cast<unsigned long long>(addr), *fps);
-	}
-	if (step.last != 0 && now > step.last) {
-		const double rate = static_cast<double>(frequency) / static_cast<double>(now - step.last);
-		step.ema          = step.ema == 0.0 ? rate : step.ema + (rate - step.ema) * 0.03;
-	}
-	step.last = now;
-	if (step.ema == 0.0) {
-		return;
-	}
-	double rate = step.ema;
-	if (limit != 0 && std::abs(rate - limit) <= limit * 0.06) {
-		rate = limit;
-	}
-	rate = std::clamp(rate, 20.0, 120.0) / step.scale;
-	if (std::abs(rate - *step.fps) < 0.75) {
-		return;
-	}
-	*step.fps = rate;
-	*step.dt  = static_cast<float>(1.0 / rate);
-	*step.us  = static_cast<uint64_t>(1000000.0 / rate);
-}
-
-} // namespace
-
-const char* FrameLimitLabel() {
-	const auto choice = FrameLimitChoice().load(std::memory_order_acquire);
-	if (choice == FRAME_LIMIT_DISABLED) return nullptr;
-	if (choice != FRAME_LIMIT_CUSTOM) return FRAME_LIMIT_LABELS[choice];
-
-	thread_local char label[16];
-	std::snprintf(label, sizeof(label), "%u FPS", g_custom_frame_limit.load(std::memory_order_relaxed));
-	return label;
-}
-
-void SetFrameLimit(uint32_t fps) {
-	const auto listed = std::ranges::find(FRAME_LIMITS, fps);
-	if (listed != FRAME_LIMITS.end()) {
-		FrameLimitChoice().store(static_cast<uint32_t>(listed - FRAME_LIMITS.begin()),
-		                         std::memory_order_release);
-	} else if (fps >= 10 && fps <= 240) {
-		auto& choice = FrameLimitChoice();
-		g_custom_frame_limit.store(fps, std::memory_order_relaxed);
-		choice.store(FRAME_LIMIT_CUSTOM, std::memory_order_release);
-	}
-}
-
-bool CycleFrameLimit() {
-	auto& setting = FrameLimitChoice();
-	const auto choice = setting.load(std::memory_order_relaxed);
-	if (choice == FRAME_LIMIT_DISABLED) {
-		return false;
-	}
-	setting.store(choice == FRAME_LIMIT_CUSTOM ? 0u : (choice + 1) % static_cast<uint32_t>(FRAME_LIMITS.size()),
-	              std::memory_order_relaxed);
-	return true;
-}
 
 // KYTY_PRESENT_READY_FLIPS=1 (live switch, default off; usa-ratt/KytyPS5-GT7's FlipQueue::Flip): guest flips are
 // presented as soon as their GPU work is done, between vblanks, whatever the host present mode (the
@@ -1038,51 +859,14 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 	uint64_t abs_origin  = 0;
 	uint64_t abs_index   = 0;
 	uint32_t abs_refresh = 0;
-	uint32_t previous_limit = FRAME_LIMIT_DISABLED;
-	uint32_t previous_fps = 0;
-	uint64_t next_flip = 0;
-
-	GameStep game_step;
-	const auto flip = [&](uint32_t limit) {
-		if (limit == 0) {
-			const bool flipped = m_flip_queue.Flip();
-			if (flipped) {
-				UpdateGameStep(game_step, Common::Timer::QueryPerformanceCounter(), frequency, 0);
-			}
-			return flipped;
-		}
-		const auto now = Common::Timer::QueryPerformanceCounter();
-		if (now < next_flip || !m_flip_queue.Flip()) {
-			return false;
-		}
-		// Carry small timer overshoots forward without accumulating them. After a late frame,
-		// start a fresh interval so the next frame cannot arrive in a catch-up burst.
-		const bool on_cadence = g_frame_limit_pacing.On() && next_flip != 0 &&
-		                        now - next_flip <= frequency / 1000;
-		next_flip = (on_cadence ? next_flip : now) + (frequency + limit - 1) / limit;
-		UpdateGameStep(game_step, now, frequency, limit);
-		return true;
-	};
 
 	uint32_t placement_count = 0; // placement samples (common/cpuPlacement.h), every 8th vblank
 	while (!token.stop_requested()) {
 		if ((++placement_count & 7u) == 0u) {
 			Common::SamplePlacement(Common::ThreadRole::Host);
 		}
-		const auto choice = FrameLimitChoice().load(std::memory_order_acquire);
-		const bool limit_enabled = choice != FRAME_LIMIT_DISABLED;
-		const auto limit = limit_enabled ? (choice == FRAME_LIMIT_CUSTOM
-		                                        ? g_custom_frame_limit.load(std::memory_order_relaxed)
-		                                        : FRAME_LIMITS[choice])
-		                                 : 0u;
-		if (choice != previous_limit || limit != previous_fps) {
-			previous_limit = choice;
-			previous_fps = limit;
-			next_flip = 0;
-		}
 		const bool ready_flips = g_present_ready_flips.On();
-		const bool absolute = g_present_abs_vblank.On() || ready_flips ||
-		                      (limit_enabled && Config::GetPresentMode() == Config::PresentMode::Immediate);
+		const bool absolute    = g_present_abs_vblank.On() || ready_flips;
 		bool       behind      = false; // a vblank deadline was missed: may present a blank frame
 		uint64_t   frame_begin = 0;
 		uint64_t   period      = 1;
@@ -1111,18 +895,13 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 			}
 			if (ready_flips || Config::GetPresentMode() == Config::PresentMode::Immediate) {
 				// Present each ready flip as it arrives; the guest's vblank events keep their clock.
-				while (!token.stop_requested() &&
-				       Common::Timer::QueryPerformanceCounter() < deadline) {
-					if (flip(limit)) {
+				while (!token.stop_requested() && now_ticks() < deadline) {
+					if (m_flip_queue.Flip()) {
 						continue;
 					}
 					const auto current = now_ticks();
 					if (current >= deadline) {
 						break;
-					}
-					if (limit != 0 && current < next_flip) {
-						sleep_until(std::min(deadline, next_flip));
-						continue;
 					}
 					const auto remaining_us =
 					    ((deadline - current) * 1000000u + frequency - 1) / frequency;
@@ -1160,7 +939,7 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 		}
 
 		VblankBegin();
-		bool presented = flip(limit);
+		bool presented = m_flip_queue.Flip();
 		if (!presented && m_presenter.NeedsSystemOverlayRefresh()) {
 			if (!m_presenter.PresentLastFrame()) {
 				m_presenter.Present(m_presenter.PrepareBlankFrame(width, height, true));
@@ -1234,9 +1013,6 @@ bool FlipQueue::Reserve(VideoOutConfig& cfg, int index, int64_t flip_arg, FlipRe
 	r.submit_ptc = LibKernel::KernelGetProcessTimeCounter();
 	r.source     = source;
 	r.state      = RequestState::Reserved;
-	Graphics::PassTrace::NoteFlip();
-	r.latency_frame = source == FlipRequestSource::GpuEop ? Graphics::LowLatency::OnGpuFlipReserved()
-	                                                      : Graphics::LowLatency::TakeCpuFlipFrame();
 	if (cfg.slave_count != 0) {
 		for (auto* queue: {&m_requests, &m_cpu_requests}) {
 			for (auto& slave: *queue) {
@@ -1602,11 +1378,6 @@ bool FlipQueue::Flip() {
 			m_presenter.Discard(*hidden);
 		}
 		if (layer_count != 0) {
-			for (size_t i = 0; i < count; i++) {
-				if (requests[i].cfg->bus == VIDEO_OUT_BUS_TYPE_MAIN) {
-					Graphics::LowLatency::SetNextPresentFrame(requests[i].latency_frame);
-				}
-			}
 			m_presenter.Present(std::span(layers.data(), layer_count));
 		}
 		pace_cost = pace_tick != 0 ? PaceLog::NowNs() - present_begin : 0;
@@ -2007,18 +1778,17 @@ KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64
 	HleWait::Scope hle_wait_scope(HleWait::FlipSubmit); // wholecp measurement (KYTY_HLE_WAIT_STATS)
 	PRINT_NAME();
 
-	uint64_t   request_id    = 0;
-	const auto latency_frame = Graphics::LowLatency::BeginCpuFlip();
-	const int  result        = ReserveFlipRequest(DriverState(), handle, index, flip_mode, flip_arg,
-	                                              FlipRequestSource::Cpu, request_id);
+	auto&     driver     = DriverState();
+	uint64_t  request_id = 0;
+	const int result     = ReserveFlipRequest(driver, handle, index, flip_mode, flip_arg,
+	                                          FlipRequestSource::Cpu, request_id);
 	if (result == VIDEO_OUT_ERROR_INVALID_FLIP_MODE) {
 		LOGF("\t unsupported flip_mode = %d\n", flip_mode);
 	}
 	if (result != OK) {
 		return result;
 	}
-	DriverState().Renderer().GetGpu().SubmitFlipPreparation(request_id);
-	Graphics::LowLatency::EndCpuFlip(latency_frame);
+	driver.Renderer().GetGpu().SubmitFlipPreparation(request_id);
 
 	return OK;
 }
