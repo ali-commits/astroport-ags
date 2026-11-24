@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <algorithm>
 #include <mutex>
@@ -133,8 +134,20 @@ void requireRaysOutput(std::uint32_t* count, const char* function) {
     *count = 0;
 }
 
-void requireNoPropagation(bool none, const char* function) {
-    if (!none) throw std::runtime_error(std::string(function) + ": rays or audio paths are outside the no-propagation model");
+std::uint32_t formatChannels(std::uint32_t format) {
+    switch (format) {
+    case 0: return 4;
+    case 1: return 9;
+    case 2: return 16;
+    case 4:
+    case 5: return 8;
+    default: return 0;
+    }
+}
+
+void reportIgnored(std::once_flag& reported, std::uint32_t count, const char* function) {
+    if (count == 0) return;
+    std::call_once(reported, [&] { std::fprintf(stderr, "[audio-propagation] %s: %u entries ignored, propagation is not simulated\n", function, count); });
 }
 
 }
@@ -246,7 +259,8 @@ std::int32_t APS5_VABI sceAudioPropagationSystemSetRays(AudioPropagationHandle s
     std::lock_guard lock(state.mutex);
     requireSystem(state, system, __func__);
     require(count == 0 || rays != nullptr, __func__);
-    requireNoPropagation(count == 0, __func__);
+    static std::once_flag reported;
+    reportIgnored(reported, count, __func__);
     return 0;
 }
 
@@ -382,6 +396,8 @@ std::int32_t APS5_VABI sceAudioPropagationSourceSetAudioPaths(AudioPropagationHa
     std::lock_guard lock(state.mutex);
     requireObject(state, source, Kind::Source, __func__);
     require(count == 0 || entries != nullptr, __func__);
+    static std::once_flag reported;
+    reportIgnored(reported, count, __func__);
     return 0;
 }
 
@@ -414,15 +430,8 @@ std::int32_t APS5_VABI sceAudioPropagationSourceRender(AudioPropagationHandle sy
         requireDescriptor(&info.desc, RenderInfoId, RenderInfoSize, __func__);
         require(requireObject(state, info.source, Kind::Source, __func__).system == system, __func__);
         require(info.output != nullptr && info.outputSize != 0, __func__);
-        std::uint32_t channels = 0;
-        switch (info.format) {
-        case 0: channels = 4; break;
-        case 1: channels = 9; break;
-        case 2: channels = 16; break;
-        case 4:
-        case 5: channels = 8; break;
-        default: throw std::runtime_error(std::string(__func__) + ": render format " + std::to_string(info.format) + " is unknown");
-        }
+        const auto channels = formatChannels(info.format);
+        if (channels == 0) throw std::runtime_error(std::string(__func__) + ": render format " + std::to_string(info.format) + " is unknown");
         const auto requiredBytes = static_cast<std::size_t>(configuration.frameSamples) * channels * sizeof(float);
         require(info.outputSize >= requiredBytes && info.outputSize % (channels * sizeof(float)) == 0, __func__);
         for (const auto handle : state.sourcePaths.at(info.source)) {
@@ -434,16 +443,16 @@ std::int32_t APS5_VABI sceAudioPropagationSourceRender(AudioPropagationHandle sy
     }
     for (std::uint32_t index = 0; index < count; ++index) {
         auto& info = infos[index];
+        info.channelCount = 0;
         const std::size_t outputFloats = info.outputSize / sizeof(float);
         std::fill_n(info.output, outputFloats, 0.0f);
         const auto found = state.inputs.find(info.source);
         if (found == state.inputs.end()) continue;
         const auto input = found->second;
         state.inputs.erase(found);
-        const std::size_t frames = input.bytes / sizeof(float);
-        if (input.samples == nullptr || frames == 0) continue;
-        const std::size_t channels = outputFloats / frames;
-        if (channels == 0) continue;
+        if (input.samples == nullptr) continue;
+        const std::size_t channels = formatChannels(info.format);
+        const std::size_t frames = std::min(input.bytes / sizeof(float), outputFloats / channels);
         for (std::size_t frame = 0; frame < frames; ++frame) info.output[frame * channels] = input.samples[frame];
     }
     return 0;
