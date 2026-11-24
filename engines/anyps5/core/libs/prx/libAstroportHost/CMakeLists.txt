@@ -1,0 +1,17 @@
+add_library(libAstroportHost SHARED EXCLUDE_FROM_ALL ${CMAKE_CURRENT_SOURCE_DIR}/Export.cpp)
+target_include_directories(libAstroportHost PRIVATE ${LIBS_INCLUDE_DIR})
+target_link_libraries(libAstroportHost PRIVATE libScePad)
+set_target_properties(libAstroportHost PROPERTIES CXX_EXTENSIONS OFF)
+
+if(BUILD_TESTING)
+    add_test_executable(guest_astroport_host_tests ${LIBS_INCLUDE_DIR}/tests/GuestAstroportHost.cpp)
+    target_include_directories(guest_astroport_host_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_astroport_host_tests PRIVATE libAstroportHost libScePad libkernel libc)
+    foreach(astroportHostCase donate conflict events renderer apr pad)
+        set(astroportHostRun ${CMAKE_CURRENT_BINARY_DIR}/astroport_host_${astroportHostCase})
+        file(MAKE_DIRECTORY ${astroportHostRun})
+        add_test(NAME guest_astroport_host_${astroportHostCase} COMMAND guest_astroport_host_tests ${astroportHostCase}
+            WORKING_DIRECTORY ${astroportHostRun})
+        set_tests_properties(guest_astroport_host_${astroportHostCase} PROPERTIES TIMEOUT 20)
+    endforeach()
+endif()

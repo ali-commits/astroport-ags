@@ -8,6 +8,7 @@
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestWriteWatch.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
+#include "prx/libkernel/include/ExternalRenderer.hpp"
 #include "prx/libkernel/AppMetadata/include/ParamJsonParser.hpp"
 #include "prx/libkernel/Pthread/include/Pthread.hpp"
 #ifdef _WIN32
@@ -28,6 +29,7 @@
 #endif
 #endif
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <limits>
 #include <stdexcept>
@@ -55,6 +57,13 @@ size_t _configuredFlexibleSize() {
         return static_cast<size_t>(bytes);
     }();
     return size;
+}
+
+void NoteUnforwarded(unsigned site, const char* name, const void* addr, size_t len) {
+ static std::atomic<unsigned> noted{0};
+ const auto* r = ExternalRendererGet_nid_no_patch();
+ if (!r || !r->owns(reinterpret_cast<uintptr_t>(addr), len ? len : 1) || (noted.fetch_or(1u << site) & (1u << site)) != 0) return;
+ std::fprintf(stderr, "[external-renderer] unforwarded memory call %s on renderer memory 0x%llx+0x%zx\n", name, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(addr)), len);
 }
 
 bool UndefinedProtection(int prot) {
@@ -225,6 +234,7 @@ void ReleaseFlexibleMappingRange(std::uintptr_t address, size_t len) {
 extern "C" {
 
 int APS5_VABI sceKernelAllocateDirectMemory(int64_t search_start, int64_t search_end, size_t len, size_t alignment, int memory_type, int64_t* phys_addr_out) {
+ if (const auto* r = ExternalRendererGet_nid_no_patch()) return r->allocateDirectMemory(search_start, search_end, len, alignment, memory_type, phys_addr_out);
  if (search_start < 0 || search_end <= search_start || len == 0
   || (len & (PS5_PAGE_SIZE - 1)) || !phys_addr_out
   || (alignment != 0 && (alignment & (PS5_PAGE_SIZE - 1))))
@@ -233,6 +243,7 @@ int APS5_VABI sceKernelAllocateDirectMemory(int64_t search_start, int64_t search
 }
 
 int APS5_VABI sceKernelAllocateMainDirectMemory(size_t len, size_t alignment, int memory_type, int64_t* phys_addr_out) {
+ if (const auto* r = ExternalRendererGet_nid_no_patch()) return r->allocateMainDirectMemory(len, alignment, memory_type, phys_addr_out);
  return sceKernelAllocateDirectMemory(0, static_cast<int64_t>(DIRECT_MEMORY_SIZE), len, alignment, memory_type, phys_addr_out);
 }
 
@@ -247,6 +258,7 @@ int APS5_VABI sceKernelAvailableDirectMemorySize(int64_t search_start, int64_t s
 }
 
 int APS5_VABI sceKernelDirectMemoryQuery(int64_t offset, int flags, void* info, size_t info_size) {
+ if (const auto* r = ExternalRendererGet_nid_no_patch()) return r->directMemoryQuery(offset, flags, info, info_size);
  constexpr int SCE_KERNEL_DMQ_FIND_NEXT = 1;
  if (!info || offset < 0) return SCE_KERNEL_ERROR_EINVAL;
  struct DirectMemoryQueryInfo { int64_t start; int64_t end; int memory_type; };
@@ -269,6 +281,7 @@ int APS5_VABI sceKernelGetDirectMemoryType(int64_t offset, int* memory_type, int
 }
 
 size_t APS5_VABI sceKernelGetDirectMemorySize(void) {
+ if (const auto* r = ExternalRendererGet_nid_no_patch()) return r->getDirectMemorySize();
  return DIRECT_MEMORY_SIZE;
 }
 
@@ -277,6 +290,7 @@ int APS5_VABI sceKernelEnableDmemAliasing(void) {
 }
 
 int APS5_VABI sceKernelMapDirectMemory(void** addr, size_t len, int prot, int flags, int64_t direct_memory_start, size_t alignment) {
+ if (const auto* r = ExternalRendererGet_nid_no_patch()) return r->mapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment);
  if (UndefinedProtection(prot)) return SCE_KERNEL_ERROR_EINVAL;
  (void)alignment;
  const int result = DoMapDirect(addr, len, prot, flags, direct_memory_start, alignment);
@@ -285,6 +299,7 @@ int APS5_VABI sceKernelMapDirectMemory(void** addr, size_t len, int prot, int fl
 }
 
 int APS5_VABI sceKernelMapDirectMemory2(void** addr, size_t len, int type, int prot, int flags, int64_t direct_memory_start, size_t alignment) {
+ if (const auto* r = ExternalRendererGet_nid_no_patch()) return r->mapDirectMemory2(addr, len, type, prot, flags, direct_memory_start, alignment);
  if (UndefinedProtection(prot)) return SCE_KERNEL_ERROR_EINVAL;
  (void)type;
  const int result = DoMapDirect(addr, len, prot, flags, direct_memory_start, alignment);
@@ -293,12 +308,14 @@ int APS5_VABI sceKernelMapDirectMemory2(void** addr, size_t len, int type, int p
 }
 
 int APS5_VABI sceKernelMapFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags) {
+ if (const auto* r = ExternalRendererGet_nid_no_patch()) return r->mapFlexibleMemory(addr_in_out, len, prot, flags);
  if (UndefinedProtection(prot)) return SCE_KERNEL_ERROR_EINVAL;
  constexpr int IgnoredHeapFlag = 0x8000;
  return _mapFlexible(addr_in_out, len, prot, flags & ~IgnoredHeapFlag);
 }
 
 int APS5_VABI sceKernelMapNamedDirectMemory(void** addr, size_t len, int prot, int flags, int64_t direct_memory_start, size_t alignment, const char* name) {
+ if (const auto* r = ExternalRendererGet_nid_no_patch()) return r->mapNamedDirectMemory(addr, len, prot, flags, direct_memory_start, alignment, name);
  if (UndefinedProtection(prot)) return SCE_KERNEL_ERROR_EINVAL;
  const int result = DoMapDirect(addr, len, prot, flags, direct_memory_start, alignment);
  if (result == 0) _releaseFlexible(reinterpret_cast<uintptr_t>(*addr), len);
@@ -307,6 +324,7 @@ int APS5_VABI sceKernelMapNamedDirectMemory(void** addr, size_t len, int prot, i
 }
 
 int32_t APS5_VABI sceKernelMapNamedFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags, const char* name) {
+ if (const auto* r = ExternalRendererGet_nid_no_patch()) return r->mapNamedFlexibleMemory(addr_in_out, len, prot, flags, name);
  if (UndefinedProtection(prot)) return SCE_KERNEL_ERROR_EINVAL;
  const int result = _mapFlexible(addr_in_out, len, prot, flags);
  if (result == 0 && name) sceKernelSetVirtualRangeName(*addr_in_out, len, name);
@@ -319,12 +337,14 @@ int32_t APS5_VABI sceKernelMapNamedFlexibleMemoryInternal(void** addr_in_out, si
 }
 
 int APS5_VABI sceKernelMprotect(const void* addr, size_t len, int prot) {
+ if (const auto* r = ExternalRendererGet_nid_no_patch(); r && r->owns(reinterpret_cast<uintptr_t>(addr), len ? len : 1)) return r->mprotect(addr, len, prot);
  constexpr int DefinedProtection = 0x3F7;
  if (len == 0) return 0;
  return DoMprotect(addr, len, prot & DefinedProtection);
 }
 
 int APS5_VABI sceKernelMunmap(uint64_t vaddr, size_t len) {
+ if (const auto* r = ExternalRendererGet_nid_no_patch(); r && r->owns(static_cast<uintptr_t>(vaddr), len ? len : 1)) return r->munmap(vaddr, len);
  const int result = DoMunmap(reinterpret_cast<void*>(vaddr), len);
  if (result == 0) {
   _releaseFlexible(static_cast<uintptr_t>(vaddr), len);
@@ -334,6 +354,7 @@ int APS5_VABI sceKernelMunmap(uint64_t vaddr, size_t len) {
 }
 
 int APS5_VABI sceKernelMmap(void* addr, size_t len, int prot, int flags, int fd, int64_t offset, void** res) {
+ NoteUnforwarded(0, __func__, addr, len);
  void* mapped = mmap_nid_postfix(addr, len, prot, flags, fd, offset);
  if (mapped == reinterpret_cast<void*>(static_cast<uintptr_t>(-1))) return SceKernelError(*__error_nid_postfix());
  *res = mapped;
@@ -341,6 +362,7 @@ int APS5_VABI sceKernelMmap(void* addr, size_t len, int prot, int flags, int fd,
 }
 
 int APS5_VABI sceKernelReleaseFlexibleMemory(void* addr, size_t len) {
+ NoteUnforwarded(1, __func__, addr, len);
  const auto start = reinterpret_cast<uintptr_t>(addr);
  if (start == 0 || (start & (PS5_PAGE_SIZE - 1)) != 0 || (len & (PS5_PAGE_SIZE - 1)) != 0 || len > std::numeric_limits<uintptr_t>::max() - start)
   return SCE_KERNEL_ERROR_EINVAL;
@@ -349,6 +371,7 @@ int APS5_VABI sceKernelReleaseFlexibleMemory(void* addr, size_t len) {
 }
 
 int APS5_VABI sceKernelReleaseDirectMemory(int64_t start, size_t len) {
+ if (const auto* r = ExternalRendererGet_nid_no_patch()) return r->releaseDirectMemory(start, len);
  if (start < 0 || len == 0) return SCE_KERNEL_ERROR_EINVAL;
  if ((static_cast<std::uint64_t>(start) & (PS5_PAGE_SIZE - 1)) != 0 || (len & (PS5_PAGE_SIZE - 1)) != 0 ||
      len > DIRECT_MEMORY_SIZE || static_cast<std::uint64_t>(start) > DIRECT_MEMORY_SIZE - len)
@@ -359,12 +382,14 @@ int APS5_VABI sceKernelReleaseDirectMemory(int64_t start, size_t len) {
 }
 
 int APS5_VABI sceKernelReserveVirtualRange(void** addr, size_t len, int flags, size_t alignment) {
+ NoteUnforwarded(2, __func__, addr ? *addr : nullptr, len);
  const int result = DoReserveVirtual(addr, len, flags, alignment);
  if (result == 0) _releaseFlexible(reinterpret_cast<uintptr_t>(*addr), len);
  return result;
 }
 
 int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInfo* info, uint64_t info_size) {
+ if (const auto* r = ExternalRendererGet_nid_no_patch(); r && r->owns(reinterpret_cast<uintptr_t>(addr), 1)) return r->virtualQuery(addr, flags, info, info_size);
  if (!info || info_size < sizeof(VirtualQueryInfo)) return SCE_KERNEL_ERROR_EINVAL;
  memset(info, 0, sizeof(VirtualQueryInfo));
  const auto address = reinterpret_cast<uintptr_t>(addr);
@@ -472,6 +497,7 @@ int APS5_VABI sceKernelCheckedReleaseDirectMemory(int64_t start, size_t len) {
 }
 
 int APS5_VABI sceKernelMtypeprotect(const void* addr, size_t len, int type, int prot) {
+ NoteUnforwarded(3, __func__, addr, len);
  if (len == 0) return 0;
  return DoMtypeprotect(addr, len, type, prot);
 }
@@ -499,6 +525,7 @@ int APS5_VABI sceKernelIsStack(void* addr, void** start, void** end) {
 }
 
 int APS5_VABI sceKernelAvailableFlexibleMemorySize(size_t* size) {
+ if (const auto* r = ExternalRendererGet_nid_no_patch()) return r->availableFlexibleMemorySize(size);
  if (!size) return SCE_KERNEL_ERROR_EINVAL;
  const size_t configured = _configuredFlexibleSize();
  const size_t images = GuestImageSegmentBytes_nid_no_patch();
@@ -508,6 +535,7 @@ int APS5_VABI sceKernelAvailableFlexibleMemorySize(size_t* size) {
 }
 
 int APS5_VABI sceKernelConfiguredFlexibleMemorySize(size_t* size) {
+ if (const auto* r = ExternalRendererGet_nid_no_patch()) return r->configuredFlexibleMemorySize(size);
  if (!size) return SCE_KERNEL_ERROR_EINVAL;
  *size = _configuredFlexibleSize();
  return 0;
@@ -519,6 +547,7 @@ int APS5_VABI sceKernelInternalMemoryGetAvailableSize(std::size_t* size) {
 }
 
 int APS5_VABI sceKernelSetVirtualRangeName(const void* addr, uint64_t len, const char* name) {
+ if (const auto* r = ExternalRendererGet_nid_no_patch(); r && r->owns(reinterpret_cast<uintptr_t>(addr), len ? len : 1)) return r->setVirtualRangeName(addr, len, name);
  const auto start = reinterpret_cast<uintptr_t>(addr);
  if (!addr || len == 0 || !name || len > UINTPTR_MAX - start) return SCE_KERNEL_ERROR_EINVAL;
  std::lock_guard lock(g_rangeNameLock);
@@ -528,6 +557,7 @@ int APS5_VABI sceKernelSetVirtualRangeName(const void* addr, uint64_t len, const
 }
 
 int APS5_VABI sceKernelClearVirtualRangeName(const void* addr, uint64_t len) {
+ if (const auto* r = ExternalRendererGet_nid_no_patch(); r && r->owns(reinterpret_cast<uintptr_t>(addr), len ? len : 1)) return r->clearVirtualRangeName(addr, len);
  const auto start = reinterpret_cast<uintptr_t>(addr);
  if (!addr || len == 0 || len > UINTPTR_MAX - start) return SCE_KERNEL_ERROR_EINVAL;
  std::lock_guard lock(g_rangeNameLock);
@@ -586,6 +616,7 @@ int APS5_VABI sceKernelBatchMap2(KernelBatchMapEntry* entries, int num_entries, 
  int result = 0;
  for (; processed < num_entries; ++processed) {
   auto& entry = entries[processed];
+  if (entry.operation != OpUnmap) NoteUnforwarded(4, __func__, entry.start, entry.length);
   if (entry.length == 0 || entry.operation < OpMapDirect || entry.operation > OpTypeProtect) {
    result = SCE_KERNEL_ERROR_EINVAL;
    break;

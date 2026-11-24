@@ -14,6 +14,7 @@
 #include "prx/libkernel/Apr/include/AprCommandBuffer.hpp"
 #include "prx/libkernel/Apr/include/AmmPool.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
+#include "prx/libkernel/include/ExternalRenderer.hpp"
 #include "prx/libkernel/File/include/NativeStat.hpp"
 #include "prx/libkernel/Equeue/Equeue.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
@@ -166,9 +167,16 @@ void _readFile(const Apr::ReadFileCommand& command) {
     stream.seekg(static_cast<std::streamoff>(command.offset));
     const GuestArena::HostWrite destination(reinterpret_cast<void*>(command.destination), command.size);
     if (!destination.Open()) throw std::runtime_error("APR: the read destination of " + file.path.string() + " is not writable guest memory");
-#ifdef _WIN32
-    std::vector<char> staging(static_cast<std::size_t>(std::min<std::uint64_t>(command.size, 64u * 1024u)));
     std::uint64_t read = 0;
+#ifndef _WIN32
+    if (ExternalRendererGet_nid_no_patch() == nullptr) {
+        stream.read(reinterpret_cast<char*>(command.destination), static_cast<std::streamsize>(command.size));
+        if (stream.bad()) throw std::runtime_error("APR: read failed for " + file.path.string());
+        read = static_cast<std::uint64_t>(stream.gcount());
+    } else
+#endif
+    {
+    std::vector<char> staging(static_cast<std::size_t>(std::min<std::uint64_t>(command.size, 64u * 1024u)));
     while (read < command.size) {
         const auto wanted = static_cast<std::streamsize>(std::min<std::uint64_t>(command.size - read, staging.size()));
         stream.read(staging.data(), wanted);
@@ -178,11 +186,7 @@ void _readFile(const Apr::ReadFileCommand& command) {
         if (stream.bad()) throw std::runtime_error("APR: read failed for " + file.path.string());
         if (obtained != static_cast<std::uint64_t>(wanted)) break;
     }
-#else
-    stream.read(reinterpret_cast<char*>(command.destination), static_cast<std::streamsize>(command.size));
-    if (stream.bad()) throw std::runtime_error("APR: read failed for " + file.path.string());
-    const auto read = static_cast<std::uint64_t>(stream.gcount());
-#endif
+    }
     if (read != command.size && (!stream.eof() || command.offset + read < std::filesystem::file_size(file.path))) throw std::runtime_error("APR: read of " + file.path.string() + " at offset " + std::to_string(command.offset) + " returned " + std::to_string(read) + " of " + std::to_string(command.size) + " bytes");
     if (read != command.size) std::memset(reinterpret_cast<char*>(command.destination) + read, 0, static_cast<std::size_t>(command.size - read));
 }

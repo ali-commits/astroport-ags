@@ -1,4 +1,4 @@
-core/libs/libs/libAstroHybridHost.prx
+core/libs/libs/libAstroportHost.prx
 core/libs/libs/libc.prx
 core/libs/libs/libkernel.prx
 core/libs/libs/libkernel_sys.prx
@@ -368,7 +368,7 @@ core/libs/libs/libSceWorkspace.prx
 core/libs/libs/libSceXml.prx
 core/libs/libs/libSceZlib.prx
 core/libs/libs/ulobjmgr.prx
-core/libs/libs/unpatched/libAstroHybridHost.prx
+core/libs/libs/unpatched/libAstroportHost.prx
 core/libs/libs/unpatched/libc.prx
 core/libs/libs/unpatched/libkernel.prx
 core/libs/libs/unpatched/libkernel_sys.prx
