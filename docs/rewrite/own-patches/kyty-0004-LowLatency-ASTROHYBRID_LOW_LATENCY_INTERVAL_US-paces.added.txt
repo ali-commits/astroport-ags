@@ -1,0 +1,27 @@
+From: Claude <noreply@anthropic.com>
+Date: Sun, 15 Nov 2026 14:09:47 +0800
+Subject: [PATCH] LowLatency: ASTROHYBRID_LOW_LATENCY_INTERVAL_US paces frames
+ in vkLatencySleepNV
+
+With the frame cap in the Reflex sleep (before the game starts a frame) instead of after the
+frame was simulated, Sky Garden at a 30 FPS cap goes from 152 to ~80 ms from simulation start
+to GPU end (with KYTY_AGC_DONE_MODE=idle), still at 30 FPS.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+ src/graphics/presentation/window/lowLatency.cpp | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+
+=== src/graphics/presentation/window/lowLatency.cpp
+@@ new line 272
++	// ASTROHYBRID_LOW_LATENCY_INTERVAL_US (default 0: no limit): the driver also paces frames to at least
++	// this interval in vkLatencySleepNV, before the game starts the next one (33333 = 30 FPS), so the
++	// frame cap sits where Reflex lowers latency instead of after the frame was simulated.
++	static const uint32_t interval = [] {
++		const char* value = std::getenv("ASTROHYBRID_LOW_LATENCY_INTERVAL_US");
++		const long  us    = value != nullptr ? std::strtol(value, nullptr, 10) : 0;
++		return us > 0 && us < 1000000 ? static_cast<uint32_t>(us) : 0u;
++	}();
++	mode.minimumIntervalUs = Mode() == 1 ? interval : 0;
++	std::printf("LowLatency: swapchain sleep mode %s, minimum interval %u us -> %s\n",
++	            Mode() == 1 ? "on (boost)" : "off (measure only)", mode.minimumIntervalUs,

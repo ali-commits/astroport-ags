@@ -1,0 +1,64 @@
+From: Ali <newaaa4@gmail.com>
+Date: Sun, 15 Nov 2026 17:13:35 +0800
+Subject: [PATCH] feat(audiopropagation): render a source's input straight into
+ the bed's first channel
+
+Sources had no paths and rendered silence, so every sound the title sends
+through propagation was dropped (ASTRO BOT: the haptics of the character's
+contact with the world). Following KytyPS5's direct mode: the source input set
+with attribute 4 is written into channel 0 of the output bed, which is
+cleared first, and the input is used once.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+ .../AudioPropagation.hpp                      | 11 ++++++++
+ .../prx/libSceAudioPropagation/Export.cpp     | 27 ++++++++++++++++++-
+ 2 files changed, 37 insertions(+), 1 deletion(-)
+
+
+=== core/libs/prx/libSceAudioPropagation/AudioPropagation.hpp
+@@ new line 146
++inline constexpr std::uint32_t SourceAttributeInput = 4;
++
++struct SourceInputBuffer {
++    const float* samples;
++    std::uint32_t sizeBytes;
++    std::uint32_t reserved0;
++    std::uint64_t reserved1;
++};
++
++static_assert(sizeof(SourceInputBuffer) == 24);
++
+
+=== core/libs/prx/libSceAudioPropagation/Export.cpp
+@@ new line 6
++#include <algorithm>
+@@ new line 37
++struct SourceInput {
++    const float* samples = nullptr;
++    std::uint32_t bytes = 0;
++};
++
+@@ new line 54
++    std::unordered_map<AudioPropagationHandle, SourceInput> inputs;
+@@ new line 123
++        state.inputs.erase(handle);
+@@ new line 320
++    for (std::uint32_t index = 0; index < count; ++index) {
++        const auto& attribute = attributes[index];
++        if (attribute.id != SourceAttributeInput || attribute.valueSize < sizeof(SourceInputBuffer)) continue;
++        const auto& buffer = *static_cast<const SourceInputBuffer*>(attribute.value);
++        state.inputs[source] = SourceInput{buffer.samples, buffer.samples != nullptr ? buffer.sizeBytes : 0};
++    }
+@@ new line 435
++        auto& info = infos[index];
++        const std::size_t outputFloats = info.outputSize / sizeof(float);
++        std::fill_n(info.output, outputFloats, 0.0f);
++        const auto found = state.inputs.find(info.source);
++        if (found == state.inputs.end()) continue;
++        const auto input = found->second;
++        state.inputs.erase(found);
++        const std::size_t frames = input.bytes / sizeof(float);
++        if (input.samples == nullptr || frames == 0) continue;
++        const std::size_t channels = outputFloats / frames;
++        if (channels == 0) continue;
++        for (std::size_t frame = 0; frame < frames; ++frame) info.output[frame * channels] = input.samples[frame];

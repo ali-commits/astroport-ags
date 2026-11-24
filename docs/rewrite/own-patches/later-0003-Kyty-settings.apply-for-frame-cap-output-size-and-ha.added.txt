@@ -1,0 +1,489 @@
+From: Ali <newaaa4@gmail.com>
+Date: Sat, 21 Nov 2026 19:07:08 +0800
+Subject: [PATCH 3/7] Kyty: settings.apply for frame cap, output size and
+ haptic strength
+
+A 30/60 switch is refused with "Applies at the next start"; output size
+resizes the window; haptic strength is a live atomic AnyPS5 reads through
+KytyGpuPadVibrationGain.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+ engines/kyty/CMakeLists.txt                   |  10 +-
+ .../src/graphics/presentation/videoOut.cpp    |  38 ++++--
+ .../kyty/src/graphics/presentation/videoOut.h |   1 +
+ .../graphics/presentation/window/window.cpp   |  56 ++++++---
+ .../presentation/window/windowInternal.h      |   4 +
+ engines/kyty/src/hybrid/kytyGpuBridge.cpp     |   3 +
+ engines/kyty/src/hybrid/kyty_gpu.def          |   1 +
+ engines/kyty/src/streaming/liveSettings.cpp   | 118 ++++++++++++++++++
+ engines/kyty/src/streaming/liveSettings.h     |  71 +++++++++++
+ .../kyty/src/streaming/liveSettingsApply.cpp  |  77 ++++++++++++
+ engines/kyty/tests/LiveSettingsTests.cpp      |  48 +++++++
+ engines/kyty/tests/SessionSocketTests.cpp     |  24 ++--
+ 12 files changed, 409 insertions(+), 42 deletions(-)
+ create mode 100644 engines/kyty/src/streaming/liveSettings.cpp
+ create mode 100644 engines/kyty/src/streaming/liveSettings.h
+ create mode 100644 engines/kyty/src/streaming/liveSettingsApply.cpp
+ create mode 100644 engines/kyty/tests/LiveSettingsTests.cpp
+
+
+=== engines/kyty/CMakeLists.txt
+@@ new line 799
++		"${KYTY_SOURCE_DIR}/streaming/protocol.cpp" "${KYTY_SOURCE_DIR}/streaming/transport.cpp"
++		"${KYTY_SOURCE_DIR}/streaming/liveSettings.cpp")
++
++	add_executable(live_settings_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/LiveSettingsTests.cpp"
++		"${KYTY_SOURCE_DIR}/streaming/liveSettings.cpp")
++	target_include_directories(live_settings_tests PRIVATE "${KYTY_SOURCE_DIR}")
++	target_link_libraries(live_settings_tests PRIVATE nlohmann_json::nlohmann_json)
++	add_test(NAME live_settings COMMAND live_settings_tests)
++	set_tests_properties(live_settings PROPERTIES TIMEOUT 30)
+
+=== engines/kyty/src/graphics/presentation/videoOut.cpp
+@@ new line 849
+@@ new line 864
+@@ new line 969
++	const auto choice = FrameLimitChoice().load(std::memory_order_acquire);
++	if (choice == FRAME_LIMIT_DISABLED) return nullptr;
++	if (choice != FRAME_LIMIT_CUSTOM) return FRAME_LIMIT_LABELS[choice];
++
++	thread_local char label[16];
++	std::snprintf(label, sizeof(label), "%u FPS", g_custom_frame_limit.load(std::memory_order_relaxed));
++	return label;
++}
++
++void SetFrameLimit(uint32_t fps) {
++	const auto listed = std::ranges::find(FRAME_LIMITS, fps);
++	if (listed != FRAME_LIMITS.end()) {
++		FrameLimitChoice().store(static_cast<uint32_t>(listed - FRAME_LIMITS.begin()),
++		                         std::memory_order_release);
++	} else if (fps >= 10 && fps <= 240) {
++		auto& choice = FrameLimitChoice();
++		g_custom_frame_limit.store(fps, std::memory_order_relaxed);
++		choice.store(FRAME_LIMIT_CUSTOM, std::memory_order_release);
++	}
+@@ new line 1039
++	uint32_t previous_fps = 0;
+@@ new line 1069
++		const auto choice = FrameLimitChoice().load(std::memory_order_acquire);
++		if (choice != previous_limit || limit != previous_fps) {
++			previous_limit = choice;
++			previous_fps = limit;
++			next_flip = 0;
++		}
+
+=== engines/kyty/src/graphics/presentation/videoOut.h
+@@ new line 57
++void SetFrameLimit(uint32_t fps);
+
+=== engines/kyty/src/graphics/presentation/window/window.cpp
+@@ new line 24
++#include "streaming/liveSettings.h"
++#include "streaming/metricsSource.h"
++#include "streaming/sessionEnv.h"
+@@ new line 51
+@@ new line 155
++void WindowRequestSize(uint32_t width, uint32_t height) {
++	std::lock_guard lock(g_window_lifetime_mutex);
++	if (g_window) {
++		g_window->pending_size.store((static_cast<uint64_t>(width) << 32) | height,
++		                             std::memory_order_relaxed);
++	}
++}
++
+@@ new line 218
++static void SetFullscreenState(WindowContext& context, bool fullscreen) {
++	context.fullscreen.store(fullscreen, std::memory_order_relaxed);
++	Streaming::Live().Update([=](Streaming::LiveState& state) { state.fullscreen = fullscreen; });
++}
++
+@@ new line 232
++	} else {
++		SetFullscreenState(*g_window, !fullscreen);
+@@ new line 459
++		case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
++		case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
++			SetFullscreenState(*this, window_event.type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN);
++			break;
+@@ new line 876
++		if (const auto size = pending_size.exchange(0, std::memory_order_relaxed)) {
++			const auto width = static_cast<int>(size >> 32);
++			const auto height = static_cast<int>(static_cast<uint32_t>(size));
++			if (!SDL_SetWindowSize(window, width, height)) {
++				LOGF("Window resize failed: %s\n", SDL_GetError());
++			}
++		}
+@@ new line 948
++	SetFullscreenState(context, (SDL_GetWindowFlags(context.window) & SDL_WINDOW_FULLSCREEN) != 0u);
++	Streaming::Live().Update([&](Streaming::LiveState& state) {
++		state.width = static_cast<uint32_t>(width);
++		state.height = static_cast<uint32_t>(height);
++	});
++
+@@ new line 992
++#if defined(__linux__)
++	std::optional<Streaming::Transport> session;
++	if (const char* path = Streaming::SessionSocket()) {
++		session.emplace(path, Streaming::Transport::Completion{},
++		                Streaming::MakeEmulatorMetricsHooks(), Streaming::ApplySettings, true);
++	}
++#endif
+
+=== engines/kyty/src/graphics/presentation/window/windowInternal.h
+@@ new line 96
++	std::atomic<bool>              fullscreen    = false;
++	std::atomic<uint64_t>          pending_size   = 0;
+@@ new line 107
++void WindowRequestSize(uint32_t width, uint32_t height);
++
+
+=== engines/kyty/src/hybrid/kytyGpuBridge.cpp
+@@ new line 37
++#include "streaming/liveSettings.h"
+@@ new line 972
++extern "C" KYTY_GPU_EXPORT float KytyGpuPadVibrationGain() { return Streaming::PadVibrationGain(); }
++
+
+=== engines/kyty/src/hybrid/kyty_gpu.def
+@@ new line 2
++    KytyGpuPadVibrationGain
+
+=== engines/kyty/src/streaming/liveSettings.cpp
+@@ new line 1
++#include "streaming/liveSettings.h"
++#include "streaming/transport.h"
++
++#include <algorithm>
++#include <charconv>
++#include <cmath>
++#include <cstdlib>
++
++namespace Streaming {
++namespace {
++
++std::optional<std::pair<uint32_t, uint32_t>> ParseResolution(const Json& value) {
++	if (!value.is_string()) return std::nullopt;
++	const auto& text = value.get_ref<const std::string&>();
++	const auto separator = text.find('x');
++	if (separator == std::string::npos) return std::nullopt;
++
++	const auto parse_side = [](std::string_view side, uint32_t& size) {
++		const auto* end = side.data() + side.size();
++		const auto result = std::from_chars(side.data(), end, size);
++		return result.ec == std::errc{} && result.ptr == end && size >= 2 && size <= 8192;
++	};
++	uint32_t width = 0, height = 0;
++	const std::string_view resolution = text;
++	if (!parse_side(resolution.substr(0, separator), width) ||
++	    !parse_side(resolution.substr(separator + 1), height)) return std::nullopt;
++	return std::pair{width, height};
++}
++
++uint32_t ReadLaunchInteger(const char* key, uint32_t fallback, uint32_t min, uint32_t max) {
++	const char* value = std::getenv(key);
++	if (value == nullptr) return fallback;
++	char* end = nullptr;
++	const auto parsed = std::strtoul(value, &end, 10);
++	return end != value && *end == '\0' && parsed >= min && parsed <= max
++	           ? static_cast<uint32_t>(parsed) : fallback;
++}
++
++float LaunchHapticGain() {
++	const char* value = std::getenv("APS5_PAD_VIBRATION_GAIN");
++	if (value == nullptr) return 1.0f;
++	char* end = nullptr;
++	const float gain = std::strtof(value, &end);
++	return end != value && *end == '\0' && !std::isnan(gain) ? std::clamp(gain, 0.0f, 4.0f) : 1.0f;
++}
++
++} // namespace
++
++Decision DecideSettingsApply(const Json& apply, const LiveState& now,
++                             std::span<const FrameCapRule> groups) {
++	Decision decision {{ {"type", "settings.applied"}, {"id", apply.value("id", Json{})},
++	                     {"applied", Json::object()}, {"values", Json::object()},
++	                     {"refused", Json::object()} }, {}, {}};
++	const auto requested = apply.find("values");
++	if (requested == apply.end() || !requested->is_object()) return decision;
++
++	auto& applied = decision.reply["applied"];
++	auto& refused = decision.reply["refused"];
++	for (const auto& [key, value]: requested->items()) {
++		if (key == "display.fps" && value.is_number_integer()) {
++			const auto fps = value.get<uint64_t>();
++			const auto rule = std::ranges::find(groups, fps, &FrameCapRule::fps);
++			if (rule != groups.end()) {
++				if (rule->fps != now.fps) {
++					const auto current = std::ranges::find(groups, now.fps, &FrameCapRule::fps);
++					if (current == groups.end() || current->group != rule->group) {
++						refused[key] = "Applies at the next start";
++						continue;
++					}
++					decision.cap_swap = std::pair{now.fps, rule->fps};
++				}
++				decision.actions.fps = rule->fps;
++				applied[key] = value;
++				continue;
++			}
++		} else if (key == "display.resolution") {
++			if (const auto size = ParseResolution(value)) {
++				if (now.fullscreen && !now.exporting) {
++					refused[key] = "Leave fullscreen first";
++				} else {
++					decision.actions.size = size;
++					applied[key] = value;
++				}
++				continue;
++			}
++		} else if (key == kHapticKey && value.is_number_integer()) {
++			const auto percent = value.get<uint64_t>();
++			if (percent >= 100 && percent <= 400) {
++				decision.actions.haptic = static_cast<float>(percent) / 100.0f;
++				decision.reply["values"][key] = value;
++				continue;
++			}
++		}
++		refused[key] = "Not supported";
++	}
++	return decision;
++}
++
++LiveStateStorage& Live() {
++	static LiveStateStorage state({
++	    ReadLaunchInteger("ASTROHYBRID_FPS_LIMIT", 60, 10, 240),
++	    ReadLaunchInteger("KYTY_GPU_WIDTH", 1280, 2, 8192),
++	    ReadLaunchInteger("KYTY_GPU_HEIGHT", 720, 2, 8192),
++	    LaunchHapticGain(), false, false,
++	});
++	return state;
++}
++
++float PadVibrationGain() {
++	return Live().load().haptic;
++}
++
++OutputState ReadLiveOutput() {
++	const auto state = Live().load();
++	return {state.width, state.height, state.fps};
++}
++
++} // namespace Streaming
+
+=== engines/kyty/src/streaming/liveSettings.h
+@@ new line 1
++#pragma once
++
++#include "streaming/protocol.h"
++
++#include <span>
++#include <utility>
++
++namespace Streaming {
++
++struct LiveState {
++	uint32_t fps;
++	uint32_t width, height;
++	float haptic;
++	bool fullscreen;
++	bool exporting;
++};
++
++struct FrameCapRule {
++	uint32_t fps;
++	uint8_t group;
++};
++
++inline constexpr std::array<FrameCapRule, 2> kFrameCapGroups {{{30, 0}, {60, 1}}};
++inline constexpr std::string_view kHapticKey = "controller.haptics";
++
++struct LiveActions {
++	std::optional<uint32_t> fps;
++	std::optional<std::pair<uint32_t, uint32_t>> size;
++	std::optional<float> haptic;
++};
++
++struct Decision {
++	Json reply;
++	LiveActions actions;
++	std::optional<std::pair<uint32_t, uint32_t>> cap_swap; // old, new
++};
++
++Decision DecideSettingsApply(const Json& apply, const LiveState& now,
++                             std::span<const FrameCapRule> groups = kFrameCapGroups);
++
++// LiveState is too large for a lock-free atomic. Keep the whole snapshot under one lock.
++class LiveStateStorage {
++public:
++	explicit LiveStateStorage(LiveState state): m_state(state) {}
++
++	LiveState load() const {
++		std::lock_guard lock(m_mutex);
++		return m_state;
++	}
++
++	void store(LiveState state) {
++		Update([&](LiveState& current) { current = state; });
++	}
++
++	template <typename UpdateState>
++	void Update(UpdateState update) {
++		std::lock_guard lock(m_mutex);
++		update(m_state);
++	}
++
++private:
++	mutable std::mutex m_mutex;
++	LiveState m_state;
++};
++
++LiveStateStorage& Live();
++float PadVibrationGain();
++int LivePatch(const char* name, bool on);
++Json ApplySettings(const Json& apply);
++
++} // namespace Streaming
+
+=== engines/kyty/src/streaming/liveSettingsApply.cpp
+@@ new line 1
++#include "streaming/liveSettings.h"
++
++#include "graphics/presentation/videoOut.h"
++#include "graphics/presentation/window/windowInternal.h"
++
++#include <cstdlib>
++
++#if defined(__linux__)
++#include <dlfcn.h>
++#endif
++
++namespace Streaming {
++
++int LivePatch(const char* name, bool on) {
++#if defined(__linux__)
++	using Patch = int32_t (*)(const char*, int32_t);
++	static const auto patch = []() -> Patch {
++		const char* audit = std::getenv("LD_AUDIT");
++		if (audit == nullptr) return nullptr;
++		std::string_view entries(audit);
++		while (!entries.empty()) {
++			const auto separator = entries.find_first_of(": ");
++			const auto path = entries.substr(0, separator);
++			if (path.ends_with("libastro_patcher.so")) {
++				void* library = dlopen(std::string(path).c_str(), RTLD_NOW | RTLD_LOCAL);
++				if (library == nullptr) return nullptr;
++				auto symbol = reinterpret_cast<Patch>(dlsym(library, "astro_patch_live"));
++				if (symbol == nullptr) dlclose(library);
++				return symbol;
++			}
++			entries.remove_prefix(separator == std::string_view::npos ? entries.size() : separator + 1);
++		}
++		return nullptr;
++	}();
++	if (patch != nullptr) return patch(name, on ? 1 : 0);
++#else
++	(void)name;
++	(void)on;
++#endif
++	return -10;
++}
++
++Json ApplySettings(const Json& apply) {
++	const auto now = Live().load();
++	auto decision = DecideSettingsApply(apply, now);
++	auto& actions = decision.actions;
++
++	if (decision.cap_swap) {
++		const auto [old_fps, new_fps] = *decision.cap_swap;
++		const auto old_cap = "precise frame cap " + std::to_string(old_fps) + " fps";
++		const auto new_cap = "precise frame cap " + std::to_string(new_fps) + " fps";
++		// shortcut: ASTROHYBRID_LOW_LATENCY_INTERVAL_US keeps its launch value; update it when a group gets a second value
++		if (LivePatch(old_cap.c_str(), false) != 0 || LivePatch(new_cap.c_str(), true) != 0) {
++			LivePatch(old_cap.c_str(), true);
++			decision.reply["applied"].erase("display.fps");
++			decision.reply["refused"]["display.fps"] = "Applies at the next start";
++			actions.fps.reset();
++		}
++	}
++
++	if (actions.fps) Libs::VideoOut::SetFrameLimit(*actions.fps);
++	if (actions.size && !now.exporting) {
++		const auto [width, height] = *actions.size;
++		Libs::Graphics::WindowRequestSize(width, height);
++	}
++	Live().Update([&](LiveState& state) {
++		if (actions.fps) state.fps = *actions.fps;
++		if (actions.size) {
++			state.width = actions.size->first;
++			state.height = actions.size->second;
++		}
++		if (actions.haptic) state.haptic = *actions.haptic;
++	});
++	return std::move(decision.reply);
++}
++
++} // namespace Streaming
+
+=== engines/kyty/tests/LiveSettingsTests.cpp
+@@ new line 1
++#include "streaming/liveSettings.h"
++
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++
++using namespace Streaming;
++
++static void Check(bool condition, const char* message) {
++	if (!condition) {
++		std::fprintf(stderr, "%s\n", message);
++		std::exit(1);
++	}
++}
++
++static const LiveState kNow {30, 3840, 2160, 2.5f, false, false};
++static Json Apply(Json values) { return {{"type", "settings.apply"}, {"id", 7}, {"values", values}}; }
++static void TestFrameRate() {
++  auto d = DecideSettingsApply(Apply({{"display.fps", 60}}), kNow);
++  Check(d.reply["refused"]["display.fps"] == "Applies at the next start" && !d.actions.fps && !d.cap_swap, "30 to 60 refused");
++  d = DecideSettingsApply(Apply({{"display.fps", 30}}), kNow);
++  Check(d.reply["applied"]["display.fps"] == 30 && !d.cap_swap, "same value applied");
++  const std::array<FrameCapRule, 2> one_group {{{30, 0}, {60, 0}}};
++  d = DecideSettingsApply(Apply({{"display.fps", 60}}), kNow, one_group);
++  Check(d.actions.fps == 60u && d.cap_swap == std::pair<uint32_t, uint32_t>{30, 60}, "same group swaps the cap");
++  for (Json bad : {Json(45), Json("60"), Json(60.5)})
++    Check(DecideSettingsApply(Apply({{"display.fps", bad}}), kNow).reply["refused"]["display.fps"] == "Not supported", "bad fps");
++}
++static void TestResolution() {
++  auto d = DecideSettingsApply(Apply({{"display.resolution", "2560x1440"}}), kNow);
++  Check(d.actions.size == std::pair<uint32_t, uint32_t>{2560, 1440} && d.reply["applied"]["display.resolution"] == "2560x1440", "windowed resize");
++  for (const char* bad : {"abcx", "0x0", "9000x9000", "1920x", "1920x1080x2"})
++    Check(DecideSettingsApply(Apply({{"display.resolution", bad}}), kNow).reply["refused"]["display.resolution"] == "Not supported", bad);
++  LiveState full = kNow; full.fullscreen = true;
++  Check(DecideSettingsApply(Apply({{"display.resolution", "1920x1080"}}), full).reply["refused"]["display.resolution"] == "Leave fullscreen first", "fullscreen local");
++  full.exporting = true;
++  Check(DecideSettingsApply(Apply({{"display.resolution", "1920x1080"}}), full).actions.size.has_value(), "fullscreen export follows");
++}
++static void TestHapticAndMixed() {
++  auto d = DecideSettingsApply(Apply({{"controller.haptics", 300}, {"display.fps", "x"}, {"nope", 1}}), kNow);
++  Check(d.actions.haptic == 3.0f && d.reply["values"]["controller.haptics"] == 300 && d.reply["applied"].empty()
++        && d.reply["refused"].size() == 2 && d.reply["id"] == 7 && d.reply["type"] == "settings.applied", "mixed packet");
++  for (Json bad : {Json(50), Json(450), Json("2"), Json(std::nan(""))})
++    Check(DecideSettingsApply(Apply({{"controller.haptics", bad}}), kNow).reply["refused"].contains("controller.haptics"), "bad haptic");
++  d = DecideSettingsApply(Json{{"type", "settings.apply"}, {"id", 8}}, kNow);
++  Check(d.reply["id"] == 8 && d.reply["applied"].empty() && d.reply["values"].empty() && d.reply["refused"].empty(), "no values");
++}
++int main() { TestFrameRate(); TestResolution(); TestHapticAndMixed(); std::puts("live settings tests: ok"); }
+
+=== engines/kyty/tests/SessionSocketTests.cpp
+@@ new line 1
++#include "streaming/liveSettings.h"
+@@ new line 13
+@@ new line 180
++	Live().store({30, 1920, 1080, 1.0f, false, false});
++		Live().Update([&](LiveState& state) {
++			if (values.contains("display.resolution")) {
++				state.width = 1280;
++				state.height = 720;
++			}
++			if (values.contains("display.fps")) state.fps = values["display.fps"];
++		});

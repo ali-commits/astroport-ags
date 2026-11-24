@@ -1,0 +1,911 @@
+From: Ali <newaaa4@gmail.com>
+Date: Sat, 21 Nov 2026 21:30:36 +0800
+Subject: [PATCH 4/7] Kyty: native frames on the AGS session socket,
+ metrics-only fallback
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+ .../src/graphics/host_gpu/graphicContext.h    |   1 +
+ .../presentation/window/swapchain.cpp         | 222 +++++++++
+ .../presentation/window/vulkanWindow.cpp      |  14 +
+ .../graphics/presentation/window/window.cpp   |  18 +-
+ engines/kyty/src/streaming/aspectMode.h       | 105 +++++
+ engines/kyty/src/streaming/captureOptions.h   |  12 +
+ engines/kyty/src/streaming/exporter.cpp       | 439 ++++++++++++++++++
+ engines/kyty/src/streaming/exporter.h         |  62 +++
+ 8 files changed, 859 insertions(+), 14 deletions(-)
+ create mode 100644 engines/kyty/src/streaming/aspectMode.h
+ create mode 100644 engines/kyty/src/streaming/captureOptions.h
+ create mode 100644 engines/kyty/src/streaming/exporter.cpp
+ create mode 100644 engines/kyty/src/streaming/exporter.h
+
+
+=== engines/kyty/src/graphics/host_gpu/graphicContext.h
+@@ new line 92
++	bool                               streaming_external_enabled            = false;
+
+=== engines/kyty/src/graphics/presentation/window/swapchain.cpp
+@@ new line 22
++#include "streaming/captureOptions.h"
++#include "streaming/exporter.h"
++#include "streaming/liveSettings.h"
++#include "streaming/metricsSource.h"
++#include "streaming/sessionEnv.h"
++#include "streaming/transport.h"
++#include <charconv>
+@@ new line 318
++#if defined(__linux__)
++static bool PresentUnlocked();
++
++// The native producer takes its source before local swapchain acquisition.
++class NativeStreamExport final {
++public:
++	NativeStreamExport(GraphicContext& graphics, CommandScheduler& scheduler, const char* socket)
++	    : m_graphics(graphics), m_scheduler(scheduler),
++	      m_transport(socket, [&scheduler](uint64_t tick) { return scheduler.IsFree(tick); },
++	                  Streaming::MakeEmulatorMetricsHooks(),
++	                  [this](const Streaming::Json& apply) {
++		                  const bool exporting = UpdateExporting();
++		                  auto reply = Streaming::ApplySettings(apply);
++		                  if (exporting) {
++			                  const auto& applied = reply.at("applied");
++			                  if (applied.contains("display.resolution")) m_live_size = true;
++			                  if (applied.contains("display.fps")) m_live_fps = true;
++		                  }
++		                  return reply;
++	                  },
++	                  !FramesEnabled()) {}
++
++	~NativeStreamExport() {
++		if (m_last_tick != 0) m_scheduler.Wait(m_last_tick);
++	}
++
++	bool UsesFrames() const { return !m_transport.MetricsOnly(); }
++
++	void Capture(const std::array<Presenter::Layer, 2>& layers) {
++		if (!UsesFrames()) {
++			if (m_pool) {
++				UpdateExporting();
++				if (m_last_tick != 0) m_scheduler.Wait(m_last_tick);
++				m_ring.reset();
++				m_pool.reset();
++			}
++			return;
++		}
++		UpdateExporting();
++		const auto generation = m_transport.Generation();
++		const auto* source = layers[0].frame != nullptr ? layers[0].frame : layers[1].frame;
++		if (generation == 0 || generation == m_reconnecting_generation || source == nullptr) return;
++
++		const bool live_size = m_live_size.load(std::memory_order_acquire);
++		const bool live_fps = m_live_fps.load(std::memory_order_acquire);
++		const auto live = Streaming::Live().load();
++		const uint32_t width = live_size ? live.width : (m_width != 0 ? m_width : source->image.extent.width);
++		const uint32_t height = live_size ? live.height : (m_height != 0 ? m_height : source->image.extent.height);
++		const uint32_t fps = live_fps ? live.fps : m_fps;
++		if (m_pool && m_generation == generation &&
++		    (m_pool->Descriptor().width != width || m_pool->Descriptor().height != height ||
++		     m_pool_fps != fps)) {
++			m_reconnecting_generation = generation;
++			m_transport.Reconnect();
++			return;
++		}
++		if (m_generation != generation) {
++			// Keep a bounded number of old pools alive while a peer may still import them.
++			if (m_pool && m_retired.size() >= 2) {
++				LOGF("Session socket: retired GPU pool limit reached; using metrics only\n");
++				m_transport.SetMetricsOnly();
++				return;
++			}
++			if (m_pool) m_retired.push_back(std::move(m_pool));
++			std::string error;
++			const char* aspect = std::getenv("KYTY_STREAM_ASPECT");
++			m_pool = Streaming::GpuPool::Create(
++			    m_graphics.physical_device, m_graphics.device, m_graphics.queue_family,
++			    width, height, ++m_epoch, error, Streaming::ParseAspectMode(aspect ? aspect : ""));
++			if (!m_pool) {
++				LOGF("Session socket: GPU pool unavailable; using metrics only: %s\n", error.c_str());
++				m_transport.SetMetricsOnly();
++				return;
++			}
++			m_generation = generation;
++			m_pool_fps = fps;
++			m_ring = std::make_shared<Streaming::LeaseRing>(m_epoch);
++			m_transport.SetPool(m_pool->Descriptor(), m_pool->Fds(), m_ring, generation);
++			LOGF("Streaming GPU pool: %ux%u pitch=%u epoch=%llu UUID=%s\n", width, height,
++			     m_pool->Descriptor().stride, static_cast<unsigned long long>(m_epoch),
++			     m_pool->Descriptor().gpu_uuid.c_str());
++		}
++		if (!m_transport.Attached()) return;
++		if (std::ranges::any_of(layers, [](const auto& layer) {
++			    return layer.frame != nullptr && layer.frame->hdr;
++		    })) {
++			static std::atomic_flag warned = ATOMIC_FLAG_INIT;
++			if (!warned.test_and_set(std::memory_order_relaxed))
++				LOGF("Streaming: forced HDR/PQ source cannot be exported through the SDR capture pool\n");
++			return;
++		}
++
++		const auto now = std::chrono::steady_clock::now();
++		if (now - m_last_capture < std::chrono::nanoseconds(1000000000 / fps)) return;
++		const auto lease = m_ring->TryAcquire();
++		if (!lease) {
++			m_transport.Drop();
++			return;
++		}
++		m_last_capture = now;
++		std::optional<RenderLockGuard> render_lock;
++		if (!PresentUnlocked()) render_lock.emplace(m_scheduler.Context().GetMutex());
++		auto& wrapper = m_scheduler.BeginCommand();
++		wrapper.EndRendering();
++		const auto command = wrapper.Handle();
++		std::array<Streaming::CaptureLayer, 2> capture {};
++		for (size_t bus = 0; bus < layers.size(); ++bus) {
++			auto* frame = layers[bus].frame;
++			if (frame == nullptr) continue;
++			if (bus == 0) {
++				frame->Transit(command, vk::ImageLayout::eTransferSrcOptimal,
++				               vk::AccessFlagBits2::eTransferRead);
++			} else {
++				frame->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
++				               vk::AccessFlagBits2::eShaderRead);
++				if (frame->view == nullptr) {
++					vk::ImageViewCreateInfo view {};
++					view.image = frame->image.image;
++					view.viewType = vk::ImageViewType::e2D;
++					view.format = frame->image.format;
++					view.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
++					RequireVulkanSuccess(
++					    m_graphics.device.createImageView(&view, nullptr, &frame->view),
++					    "create streaming source view");
++				}
++			}
++			capture[bus] = {frame->image.image, frame->view,
++			                {frame->image.extent.width, frame->image.extent.height},
++			                layers[bus].premultiplied_alpha};
++		}
++		m_pool->Record(command, *lease, capture[0], capture[1]);
++		SubmitInfo submit;
++		if (lease->recycled)
++			submit.AddWait(m_pool->Done(lease->slot), 0, vk::PipelineStageFlagBits::eTransfer);
++		submit.AddSignal(m_pool->Ready(lease->slot), 0);
++		m_last_tick = m_scheduler.Submit(submit, true);
++		for (const auto& layer: layers) {
++			if (layer.frame != nullptr) layer.frame->present_tick = m_last_tick;
++		}
++		const auto pts = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch());
++		m_transport.Publish({*lease, m_last_tick, static_cast<uint64_t>(pts.count())});
++	}
++
++private:
++	static uint32_t ReadCaptureOption(const char* name) {
++		const char* value = std::getenv(name);
++		if (value == nullptr || *value == '\0') return 0;
++		const auto* end = value + std::strlen(value);
++		uint32_t option = 0;
++		const auto parsed = std::from_chars(value, end, option);
++		return parsed.ec == std::errc{} && parsed.ptr == end && option >= 2 && option <= 8192
++		           ? option : UINT32_MAX;
++	}
++
++	bool FramesEnabled() {
++		if (!m_graphics.streaming_external_enabled ||
++		    !Streaming::FramesRequested(std::getenv("KYTY_STREAM_FRAMES"))) return false;
++		m_width = ReadCaptureOption("KYTY_STREAM_WIDTH");
++		m_height = ReadCaptureOption("KYTY_STREAM_HEIGHT");
++		const auto fps = ReadCaptureOption("KYTY_STREAM_FPS");
++		if (m_width == UINT32_MAX || m_height == UINT32_MAX ||
++		    !Streaming::IsCaptureFrameRateSupported(fps)) {
++			LOGF("Session socket: invalid capture dimensions/FPS; using metrics only\n");
++			return false;
++		}
++		m_fps = fps == 0 ? 60 : fps;
++		return true;
++	}
++
++	bool UpdateExporting() {
++		bool exporting = false;
++		Streaming::Live().Update([&](Streaming::LiveState& state) {
++			exporting = m_transport.Attached() && UsesFrames();
++			state.exporting = exporting;
++		});
++		return exporting;
++	}
++
++	GraphicContext& m_graphics;
++	CommandScheduler& m_scheduler;
++	std::unique_ptr<Streaming::GpuPool> m_pool;
++	std::vector<std::unique_ptr<Streaming::GpuPool>> m_retired;
++	std::shared_ptr<Streaming::LeaseRing> m_ring;
++	uint64_t m_generation = 0, m_reconnecting_generation = 0, m_epoch = 0, m_last_tick = 0;
++	uint32_t m_width = 0, m_height = 0, m_fps = 60, m_pool_fps = 0;
++	std::atomic_bool m_live_size {false}, m_live_fps {false};
++	std::chrono::steady_clock::time_point m_last_capture {};
++	Streaming::Transport m_transport; // Joins the worker before pool members are destroyed.
++};
++#endif
++
+@@ new line 517
++#if defined(__linux__)
++		if (const char* socket = Streaming::SessionSocket(); socket != nullptr) {
++			stream_export =
++			    std::make_unique<NativeStreamExport>(owner.graphic_ctx, present_scheduler, socket);
++		}
++#endif
++	}
++
++#if defined(__linux__)
++	~Impl() {
++		if (stream_export) {
++			stream_export.reset();
++			Streaming::Live().Update([](Streaming::LiveState& state) { state.exporting = false; });
++		}
++#endif
+@@ new line 571
++#if defined(__linux__)
++	std::unique_ptr<NativeStreamExport> stream_export;
++#endif
+@@ new line 1729
++#if defined(__linux__)
++	if (m_impl->stream_export && m_impl->stream_export->UsesFrames()) return false;
++#endif
+@@ new line 1786
++#if defined(__linux__)
++	if (stream_export) stream_export->Capture(layers);
++#endif
+
+=== engines/kyty/src/graphics/presentation/window/vulkanWindow.cpp
+@@ new line 38
++#include "streaming/sessionEnv.h"
+@@ new line 2460
++#if defined(__linux__)
++		if (Streaming::SessionSocket() != nullptr) {
++			if (HasExtension(available_extensions, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
++			    HasExtension(available_extensions, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME)) {
++				device_extensions.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
++				device_extensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
++				graphic_ctx.streaming_external_enabled = true;
++			} else {
++				LOGF("Session socket: Vulkan memory/semaphore FD extensions unavailable\n");
++			}
++		}
++#endif
++
+
+=== engines/kyty/src/graphics/presentation/window/window.cpp
+@@ new line 25
+@@ new line 976
++	// The presenter starts the session worker during creation. A settings request that
++	// needs the window must wait until g_window is published.
++	std::lock_guard lock(g_window_lifetime_mutex);
++	g_window = std::move(window);
+@@ new line 989
+
+=== engines/kyty/src/streaming/aspectMode.h
+@@ new line 1
++// Modified by AstroPort contributors: ported to AGS session protocol 2.
++#ifndef KYTY_STREAMING_ASPECT_MODE_H
++#define KYTY_STREAMING_ASPECT_MODE_H
++#include <cstdint>
++#include <string_view>
++
++// Pure geometry for presenting a game frame (src) into a stream/window surface (dst) whose
++// aspect ratio may differ (e.g. a 16:9 render shown on a 20:9 phone). No Vulkan here so the
++// rectangle math is unit-testable on its own.
++namespace Streaming {
++
++enum class AspectMode : uint8_t {
++	Fit,     // letter/pillarbox: whole frame visible, correct geometry, black bars
++	Fill,    // crop the frame to cover the whole surface, correct geometry, no bars
++	Stretch, // distort the frame to fill the surface exactly (legacy behaviour)
++};
++
++// Inclusive-min, exclusive-max rectangle in integer pixels.
++struct BlitRect {
++	int32_t src_x0 = 0, src_y0 = 0, src_x1 = 0, src_y1 = 0;
++	int32_t dst_x0 = 0, dst_y0 = 0, dst_x1 = 0, dst_y1 = 0;
++	// True when the destination does not cover the whole surface, so the caller must clear it
++	// to black first (letter/pillarboxing).
++	bool clear_background = false;
++};
++
++constexpr AspectMode ParseAspectMode(std::string_view text) {
++	if (text == "fill") return AspectMode::Fill;
++	if (text == "stretch") return AspectMode::Stretch;
++	return AspectMode::Fit; // default and unknown -> correct geometry with bars
++}
++
++constexpr std::string_view AspectModeName(AspectMode mode) {
++	switch (mode) {
++		case AspectMode::Fill: return "fill";
++		case AspectMode::Stretch: return "stretch";
++		case AspectMode::Fit: break;
++	}
++	return "fit";
++}
++
++// Map src (srcW x srcH) onto dst (dstW x dstH). Degenerate inputs clamp to a full stretch so the
++// caller never divides by zero or emits an empty blit. Rounding keeps the scaled extent within
++// the surface (so a one-pixel overspill never reads past the source or writes past the dst).
++constexpr BlitRect ComputeBlitRect(int32_t srcW, int32_t srcH, int32_t dstW, int32_t dstH,
++                                   AspectMode mode) {
++	BlitRect r;
++	if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) {
++		return r; // all-zero: caller treats as "nothing to blit"
++	}
++	r.src_x0 = 0;
++	r.src_y0 = 0;
++	r.src_x1 = srcW;
++	r.src_y1 = srcH;
++	r.dst_x0 = 0;
++	r.dst_y0 = 0;
++	r.dst_x1 = dstW;
++	r.dst_y1 = dstH;
++
++	if (mode == AspectMode::Stretch) {
++		return r; // full source -> full dst, aspect ignored
++	}
++
++	// Compare aspect ratios with integer cross-products to avoid float rounding:
++	// src is wider than dst  <=>  srcW*dstH > dstW*srcH
++	const int64_t src_cross = int64_t(srcW) * dstH;
++	const int64_t dst_cross = int64_t(dstW) * srcH;
++
++	if (mode == AspectMode::Fit) {
++		r.clear_background = (src_cross != dst_cross);
++		if (src_cross > dst_cross) {
++			// Source wider than dst: fit width, bars top/bottom (letterbox).
++			const int32_t h = int32_t((int64_t(dstW) * srcH) / srcW);
++			const int32_t y = (dstH - h) / 2;
++			r.dst_y0        = y;
++			r.dst_y1        = y + h;
++		} else if (src_cross < dst_cross) {
++			// Source taller than dst: fit height, bars left/right (pillarbox).
++			const int32_t w = int32_t((int64_t(dstH) * srcW) / srcH);
++			const int32_t x = (dstW - w) / 2;
++			r.dst_x0        = x;
++			r.dst_x1        = x + w;
++		}
++		return r;
++	}
++
++	// Fill: scale to cover, crop the overflowing src axis (centred).
++	if (src_cross > dst_cross) {
++		// Source wider than dst: full height, crop src width.
++		const int32_t w = int32_t((int64_t(dstW) * srcH) / dstH);
++		const int32_t x = (srcW - w) / 2;
++		r.src_x0        = x;
++		r.src_x1        = x + w;
++	} else if (src_cross < dst_cross) {
++		// Source taller than dst: full width, crop src height.
++		const int32_t h = int32_t((int64_t(dstH) * srcW) / dstW);
++		const int32_t y = (srcH - h) / 2;
++		r.src_y0        = y;
++		r.src_y1        = y + h;
++	}
++	return r;
++}
++
++} // namespace Streaming
++#endif
+
+=== engines/kyty/src/streaming/captureOptions.h
+@@ new line 1
++// Modified by AstroPort contributors: ported to AGS session protocol 2.
++#ifndef KYTY_STREAMING_CAPTURE_OPTIONS_H
++#define KYTY_STREAMING_CAPTURE_OPTIONS_H
++#include <cstdint>
++
++namespace Streaming {
++// Zero retains the legacy default. All explicit managed rates share this contract.
++constexpr bool IsCaptureFrameRateSupported(std::uint32_t fps) {
++	return fps == 0 || fps == 30 || fps == 60 || fps == 90 || fps == 120;
++}
++} // namespace Streaming
++#endif
+
+=== engines/kyty/src/streaming/exporter.cpp
+@@ new line 1
++// Modified by AstroPort contributors: ported to AGS session protocol 2.
++#include "streaming/exporter.h"
++
++#include "gpu_blit_shaders/gpu_blit_fs_triangle_spv.h"
++#include "gpu_blit_shaders/gpu_video_out_overlay_spv.h"
++
++#include <algorithm>
++#include <cstdio>
++#if defined(__linux__)
++#include <unistd.h>
++#endif
++namespace Streaming {
++namespace {
++bool Check(vk::Result result, const char* operation, std::string& error) {
++	if (result == vk::Result::eSuccess) return true;
++	error = std::string(operation) + ": " + std::to_string(static_cast<int>(result));
++	return false;
++}
++uint32_t MemoryType(vk::PhysicalDevice physical, uint32_t bits) {
++	vk::PhysicalDeviceMemoryProperties memory;
++	physical.getMemoryProperties(&memory);
++	for (uint32_t i = 0; i < memory.memoryTypeCount; i++)
++		if ((bits & (1U << i)) &&
++		    bool(memory.memoryTypes[i].propertyFlags & vk::MemoryPropertyFlagBits::eDeviceLocal))
++			return i;
++	return UINT32_MAX;
++}
++void ImageBarrier(vk::CommandBuffer command, vk::Image image, vk::ImageLayout old_layout,
++                  vk::ImageLayout new_layout, vk::AccessFlags2 src, vk::AccessFlags2 dst) {
++	vk::ImageMemoryBarrier2 barrier {};
++	barrier.srcStageMask        = vk::PipelineStageFlagBits2::eAllCommands;
++	barrier.srcAccessMask       = src;
++	barrier.dstStageMask        = vk::PipelineStageFlagBits2::eAllCommands;
++	barrier.dstAccessMask       = dst;
++	barrier.oldLayout           = old_layout;
++	barrier.newLayout           = new_layout;
++	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++	barrier.image               = image;
++	barrier.subresourceRange    = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
++	vk::DependencyInfo dep {};
++	dep.imageMemoryBarrierCount = 1;
++	dep.pImageMemoryBarriers    = &barrier;
++	command.pipelineBarrier2(dep);
++}
++} // namespace
++std::unique_ptr<GpuPool> GpuPool::Create(vk::PhysicalDevice physical, vk::Device device,
++                                         uint32_t family, uint32_t width, uint32_t height,
++                                         uint64_t epoch, std::string& error, AspectMode aspect) {
++	auto pool = std::unique_ptr<GpuPool>(new GpuPool(device, family, aspect));
++	if (!pool->Initialize(physical, width, height, epoch, error)) return {};
++	return pool;
++}
++bool GpuPool::Initialize(vk::PhysicalDevice physical, uint32_t width, uint32_t height,
++                         uint64_t epoch, std::string& error) {
++#if !defined(__linux__)
++	(void)physical;
++	(void)width;
++	(void)height;
++	(void)epoch;
++	error = "Vulkan FD transport requires Linux";
++	return false;
++#else
++	if (width < 2 || height < 2 || width > 8192 || height > 8192 || epoch == 0) {
++		error = "invalid stream dimensions/epoch";
++		return false;
++	}
++	if (!VULKAN_HPP_DEFAULT_DISPATCHER.vkGetMemoryFdKHR ||
++	    !VULKAN_HPP_DEFAULT_DISPATCHER.vkGetSemaphoreFdKHR) {
++		error = "Vulkan external memory/semaphore FD extensions are unavailable";
++		return false;
++	}
++	vk::PhysicalDeviceExternalBufferInfo external {};
++	external.usage      = vk::BufferUsageFlagBits::eTransferDst;
++	external.handleType = vk::ExternalMemoryHandleTypeFlagBits::eOpaqueFd;
++	vk::ExternalBufferProperties properties {};
++	physical.getExternalBufferProperties(&external, &properties);
++	if (!bool(properties.externalMemoryProperties.externalMemoryFeatures &
++	          vk::ExternalMemoryFeatureFlagBits::eExportable)) {
++		error = "DEVICE_LOCAL buffer opaque FD export unsupported";
++		return false;
++	}
++	vk::PhysicalDeviceExternalSemaphoreInfo semaphore_info {};
++	semaphore_info.handleType = vk::ExternalSemaphoreHandleTypeFlagBits::eOpaqueFd;
++	vk::ExternalSemaphoreProperties sem_props {};
++	physical.getExternalSemaphoreProperties(&semaphore_info, &sem_props);
++	if (!bool(sem_props.externalSemaphoreFeatures &
++	          vk::ExternalSemaphoreFeatureFlagBits::eExportable)) {
++		error = "binary semaphore opaque FD export unsupported";
++		return false;
++	}
++	const auto features = physical.getFormatProperties(CompositeFormat).optimalTilingFeatures;
++	const auto required = vk::FormatFeatureFlagBits::eBlitDst |
++	                      vk::FormatFeatureFlagBits::eColorAttachment |
++	                      vk::FormatFeatureFlagBits::eTransferSrc;
++	if ((features & required) != required) {
++		error = "BGRA stream compositor unsupported";
++		return false;
++	}
++	m_descriptor.epoch  = epoch;
++	m_descriptor.width  = width;
++	m_descriptor.height = height;
++	m_descriptor.stride = (width * 4 + 4095) & ~4095U;
++	vk::PhysicalDeviceIDProperties id {};
++	vk::PhysicalDeviceProperties2  props {};
++	props.pNext = &id;
++	physical.getProperties2(&props);
++	char uuid[33] {};
++	for (size_t i = 0; i < 16; i++)
++		std::snprintf(uuid + i * 2, 3, "%02x", id.deviceUUID[i]);
++	m_descriptor.gpu_uuid = uuid;
++	const auto payload    = uint64_t(m_descriptor.stride) * height;
++	for (size_t i = 0; i < SlotCount; i++) {
++		auto&                              slot = m_slots[i];
++		vk::ExternalMemoryBufferCreateInfo ext_buffer {};
++		ext_buffer.handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eOpaqueFd;
++		vk::BufferCreateInfo buffer {};
++		buffer.pNext       = &ext_buffer;
++		buffer.size        = payload;
++		buffer.usage       = vk::BufferUsageFlagBits::eTransferDst;
++		buffer.sharingMode = vk::SharingMode::eExclusive;
++		if (!Check(m_device.createBuffer(&buffer, nullptr, &slot.buffer),
++		           "create external stream buffer", error))
++			return false;
++		const auto requirements = m_device.getBufferMemoryRequirements(slot.buffer);
++		const auto type         = MemoryType(physical, requirements.memoryTypeBits);
++		if (type == UINT32_MAX || requirements.size > 268435456) {
++			error = "no bounded DEVICE_LOCAL external allocation";
++			return false;
++		}
++		vk::MemoryDedicatedAllocateInfo dedicated {};
++		dedicated.buffer = slot.buffer;
++		vk::ExportMemoryAllocateInfo export_info {};
++		export_info.pNext       = &dedicated;
++		export_info.handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eOpaqueFd;
++		vk::MemoryAllocateInfo allocate {};
++		allocate.pNext           = &export_info;
++		allocate.allocationSize  = requirements.size;
++		allocate.memoryTypeIndex = type;
++		if (!Check(m_device.allocateMemory(&allocate, nullptr, &slot.memory),
++		           "allocate external stream buffer", error) ||
++		    !Check(m_device.bindBufferMemory(slot.buffer, slot.memory, 0),
++		           "bind external stream buffer", error))
++			return false;
++		m_descriptor.allocation_sizes[i] = requirements.size;
++		vk::MemoryGetFdInfoKHR fd_info {};
++		fd_info.memory     = slot.memory;
++		fd_info.handleType = vk::ExternalMemoryHandleTypeFlagBits::eOpaqueFd;
++		if (!Check(m_device.getMemoryFdKHR(&fd_info, &m_fds[i * 3]), "export stream memory FD",
++		           error))
++			return false;
++		vk::ExportSemaphoreCreateInfo export_sem {};
++		export_sem.handleTypes = vk::ExternalSemaphoreHandleTypeFlagBits::eOpaqueFd;
++		vk::SemaphoreCreateInfo sem {};
++		sem.pNext = &export_sem;
++		if (!Check(m_device.createSemaphore(&sem, nullptr, &slot.ready), "create READY", error) ||
++		    !Check(m_device.createSemaphore(&sem, nullptr, &slot.done), "create DONE", error))
++			return false;
++		vk::SemaphoreGetFdInfoKHR sem_fd {};
++		sem_fd.handleType = vk::ExternalSemaphoreHandleTypeFlagBits::eOpaqueFd;
++		sem_fd.semaphore  = slot.ready;
++		if (!Check(m_device.getSemaphoreFdKHR(&sem_fd, &m_fds[i * 3 + 1]), "export READY", error))
++			return false;
++		sem_fd.semaphore = slot.done;
++		if (!Check(m_device.getSemaphoreFdKHR(&sem_fd, &m_fds[i * 3 + 2]), "export DONE", error))
++			return false;
++	}
++	vk::ImageCreateInfo image {};
++	image.imageType   = vk::ImageType::e2D;
++	image.extent      = {width, height, 1};
++	image.mipLevels   = 1;
++	image.arrayLayers = 1;
++	image.format      = CompositeFormat;
++	image.tiling      = vk::ImageTiling::eOptimal;
++	image.usage   = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc |
++	                vk::ImageUsageFlagBits::eColorAttachment;
++	image.samples = vk::SampleCountFlagBits::e1;
++	image.sharingMode = vk::SharingMode::eExclusive;
++	if (!Check(m_device.createImage(&image, nullptr, &m_image), "create stream composite", error))
++		return false;
++	const auto requirements = m_device.getImageMemoryRequirements(m_image);
++	const auto type         = MemoryType(physical, requirements.memoryTypeBits);
++	if (type == UINT32_MAX) {
++		error = "no DEVICE_LOCAL composite memory";
++		return false;
++	}
++	vk::MemoryAllocateInfo allocate {};
++	allocate.allocationSize  = requirements.size;
++	allocate.memoryTypeIndex = type;
++	if (!Check(m_device.allocateMemory(&allocate, nullptr, &m_image_memory),
++	           "allocate stream composite", error) ||
++	    !Check(m_device.bindImageMemory(m_image, m_image_memory, 0), "bind stream composite",
++	           error))
++		return false;
++	vk::ImageViewCreateInfo view {};
++	view.image            = m_image;
++	view.viewType         = vk::ImageViewType::e2D;
++	view.format           = image.format;
++	view.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
++	return Check(m_device.createImageView(&view, nullptr, &m_view), "create stream composite view",
++	             error) &&
++	       CreateOverlay(error);
++#endif
++}
++bool GpuPool::CreateOverlay(std::string& error) {
++	vk::SamplerCreateInfo sampler {};
++	sampler.magFilter    = vk::Filter::eLinear;
++	sampler.minFilter    = vk::Filter::eLinear;
++	sampler.addressModeU = vk::SamplerAddressMode::eClampToEdge;
++	sampler.addressModeV = vk::SamplerAddressMode::eClampToEdge;
++	sampler.addressModeW = vk::SamplerAddressMode::eClampToEdge;
++	if (!Check(m_device.createSampler(&sampler, nullptr, &m_sampler), "create stream sampler",
++	           error))
++		return false;
++	const vk::DescriptorSetLayoutBinding binding {0, vk::DescriptorType::eCombinedImageSampler, 1,
++	                                              vk::ShaderStageFlagBits::eFragment};
++	vk::DescriptorSetLayoutCreateInfo    descriptors {};
++	descriptors.flags        = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR;
++	descriptors.bindingCount = 1;
++	descriptors.pBindings    = &binding;
++	if (!Check(m_device.createDescriptorSetLayout(&descriptors, nullptr, &m_descriptors),
++	           "create stream descriptors", error))
++		return false;
++	const vk::PushConstantRange constants {vk::ShaderStageFlagBits::eFragment, 0, sizeof(uint32_t)};
++	vk::PipelineLayoutCreateInfo layout {};
++	layout.setLayoutCount         = 1;
++	layout.pSetLayouts            = &m_descriptors;
++	layout.pushConstantRangeCount = 1;
++	layout.pPushConstantRanges    = &constants;
++	if (!Check(m_device.createPipelineLayout(&layout, nullptr, &m_layout), "create stream layout",
++	           error))
++		return false;
++	vk::ShaderModule           vertex, fragment;
++	vk::ShaderModuleCreateInfo shader {};
++	shader.codeSize = sizeof(GPU_BLIT_FS_TRIANGLE_SPV);
++	shader.pCode    = GPU_BLIT_FS_TRIANGLE_SPV;
++	if (!Check(m_device.createShaderModule(&shader, nullptr, &vertex),
++	           "create stream vertex shader", error))
++		return false;
++	shader.codeSize = sizeof(GPU_VIDEO_OUT_OVERLAY_SPV);
++	shader.pCode    = GPU_VIDEO_OUT_OVERLAY_SPV;
++	if (!Check(m_device.createShaderModule(&shader, nullptr, &fragment),
++	           "create stream overlay shader", error)) {
++		m_device.destroyShaderModule(vertex);
++		return false;
++	}
++	std::array<vk::PipelineShaderStageCreateInfo, 2> stages {};
++	stages[0].stage  = vk::ShaderStageFlagBits::eVertex;
++	stages[0].module = vertex;
++	stages[0].pName  = "main";
++	stages[1].stage  = vk::ShaderStageFlagBits::eFragment;
++	stages[1].module = fragment;
++	stages[1].pName  = "main";
++	vk::PipelineVertexInputStateCreateInfo   vertex_input {};
++	vk::PipelineInputAssemblyStateCreateInfo assembly {};
++	assembly.topology = vk::PrimitiveTopology::eTriangleList;
++	vk::PipelineViewportStateCreateInfo viewport {};
++	viewport.viewportCount = 1;
++	viewport.scissorCount  = 1;
++	vk::PipelineRasterizationStateCreateInfo raster {};
++	raster.lineWidth = 1;
++	vk::PipelineMultisampleStateCreateInfo multisample {};
++	multisample.rasterizationSamples = vk::SampleCountFlagBits::e1;
++	vk::PipelineColorBlendAttachmentState attachment {};
++	attachment.blendEnable         = VK_TRUE;
++	attachment.srcColorBlendFactor = vk::BlendFactor::eOne;
++	attachment.dstColorBlendFactor = vk::BlendFactor::eOneMinusSrcAlpha;
++	attachment.srcAlphaBlendFactor = vk::BlendFactor::eOne;
++	attachment.dstAlphaBlendFactor = vk::BlendFactor::eOneMinusSrcAlpha;
++	attachment.colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
++	                            vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA;
++	vk::PipelineColorBlendStateCreateInfo blend {};
++	blend.attachmentCount = 1;
++	blend.pAttachments    = &attachment;
++	const std::array states {vk::DynamicState::eViewport, vk::DynamicState::eScissor};
++	vk::PipelineDynamicStateCreateInfo dynamic {};
++	dynamic.dynamicStateCount              = states.size();
++	dynamic.pDynamicStates                 = states.data();
++	const vk::Format                format = CompositeFormat;
++	vk::PipelineRenderingCreateInfo rendering {};
++	rendering.colorAttachmentCount    = 1;
++	rendering.pColorAttachmentFormats = &format;
++	vk::GraphicsPipelineCreateInfo create {};
++	create.pNext               = &rendering;
++	create.stageCount          = stages.size();
++	create.pStages             = stages.data();
++	create.pVertexInputState   = &vertex_input;
++	create.pInputAssemblyState = &assembly;
++	create.pViewportState      = &viewport;
++	create.pRasterizationState = &raster;
++	create.pMultisampleState   = &multisample;
++	create.pColorBlendState    = &blend;
++	create.pDynamicState       = &dynamic;
++	create.layout              = m_layout;
++	const auto result = m_device.createGraphicsPipelines(nullptr, 1, &create, nullptr, &m_pipeline);
++	m_device.destroyShaderModule(fragment);
++	m_device.destroyShaderModule(vertex);
++	return Check(result, "create stream overlay pipeline", error);
++}
++void GpuPool::Record(vk::CommandBuffer command, const Lease& lease, const CaptureLayer& main,
++                     const CaptureLayer& overlay, const OverlayRecorder& system_overlay) {
++	auto&                    slot = m_slots[lease.slot];
++	vk::BufferMemoryBarrier2 acquire {};
++	acquire.srcStageMask  = vk::PipelineStageFlagBits2::eNone;
++	acquire.dstStageMask  = vk::PipelineStageFlagBits2::eTransfer;
++	acquire.dstAccessMask = vk::AccessFlagBits2::eTransferWrite;
++	acquire.srcQueueFamilyIndex =
++	    lease.recycled ? VK_QUEUE_FAMILY_EXTERNAL : VK_QUEUE_FAMILY_IGNORED;
++	acquire.dstQueueFamilyIndex = lease.recycled ? m_family : VK_QUEUE_FAMILY_IGNORED;
++	acquire.buffer              = slot.buffer;
++	acquire.size                = VK_WHOLE_SIZE;
++	vk::DependencyInfo dep {};
++	dep.bufferMemoryBarrierCount = 1;
++	dep.pBufferMemoryBarriers    = &acquire;
++	command.pipelineBarrier2(dep);
++	ImageBarrier(command, m_image, vk::ImageLayout::eUndefined,
++	             vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferRead,
++	             vk::AccessFlagBits2::eTransferWrite);
++	if (main.image) {
++		const BlitRect geometry =
++		    ComputeBlitRect(int32_t(main.extent.width), int32_t(main.extent.height),
++		                    int32_t(m_descriptor.width), int32_t(m_descriptor.height), m_aspect);
++		// Letter/pillarbox: paint the surface black before the inset blit so the bars are
++		// opaque black rather than whatever the composite image held last frame.
++		if (geometry.clear_background) {
++			const vk::ClearColorValue       black {};
++			const vk::ImageSubresourceRange range {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
++			command.clearColorImage(m_image, vk::ImageLayout::eTransferDstOptimal, &black, 1,
++			                        &range);
++		}
++		vk::ImageBlit blit {};
++		blit.srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
++		blit.srcOffsets[0]  = {geometry.src_x0, geometry.src_y0, 0};
++		blit.srcOffsets[1]  = {geometry.src_x1, geometry.src_y1, 1};
++		blit.dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
++		blit.dstOffsets[0]  = {geometry.dst_x0, geometry.dst_y0, 0};
++		blit.dstOffsets[1]  = {geometry.dst_x1, geometry.dst_y1, 1};
++		command.blitImage(main.image, vk::ImageLayout::eTransferSrcOptimal, m_image,
++		                  vk::ImageLayout::eTransferDstOptimal, 1, &blit, vk::Filter::eLinear);
++	} else {
++		const vk::ClearColorValue       black {};
++		const vk::ImageSubresourceRange range {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
++		command.clearColorImage(m_image, vk::ImageLayout::eTransferDstOptimal, &black, 1, &range);
++	}
++	const bool draw_hud = overlay.image && overlay.view;
++	if (draw_hud || system_overlay) {
++		ImageBarrier(command, m_image, vk::ImageLayout::eTransferDstOptimal,
++		             vk::ImageLayout::eColorAttachmentOptimal, vk::AccessFlagBits2::eTransferWrite,
++		             vk::AccessFlagBits2::eColorAttachmentRead |
++		                 vk::AccessFlagBits2::eColorAttachmentWrite);
++	}
++	if (draw_hud) {
++		const vk::DescriptorImageInfo image {m_sampler, overlay.view,
++		                                     vk::ImageLayout::eShaderReadOnlyOptimal};
++		vk::WriteDescriptorSet        write {};
++		write.dstBinding      = 0;
++		write.descriptorCount = 1;
++		write.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
++		write.pImageInfo      = &image;
++		command.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, m_layout, 0, 1, &write);
++		const uint32_t alpha = overlay.premultiplied;
++		command.pushConstants(m_layout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(alpha),
++		                      &alpha);
++		command.bindPipeline(vk::PipelineBindPoint::eGraphics, m_pipeline);
++		vk::RenderingAttachmentInfo color {};
++		color.imageView   = m_view;
++		color.imageLayout = vk::ImageLayout::eColorAttachmentOptimal;
++		color.loadOp      = vk::AttachmentLoadOp::eLoad;
++		color.storeOp     = vk::AttachmentStoreOp::eStore;
++		const vk::Extent2D extent {m_descriptor.width, m_descriptor.height};
++		vk::RenderingInfo  rendering {};
++		rendering.renderArea.extent    = extent;
++		rendering.layerCount           = 1;
++		rendering.colorAttachmentCount = 1;
++		rendering.pColorAttachments    = &color;
++		command.beginRendering(&rendering);
++		const vk::Viewport viewport {0, 0, float(extent.width), float(extent.height), 0, 1};
++		const vk::Rect2D   scissor {{0, 0}, extent};
++		command.setViewport(0, 1, &viewport);
++		command.setScissor(0, 1, &scissor);
++		command.draw(3, 1, 0, 0);
++		command.endRendering();
++	}
++	if (system_overlay) {
++		if (draw_hud) {
++			ImageBarrier(command, m_image, vk::ImageLayout::eColorAttachmentOptimal,
++			             vk::ImageLayout::eColorAttachmentOptimal,
++			             vk::AccessFlagBits2::eColorAttachmentWrite,
++			             vk::AccessFlagBits2::eColorAttachmentRead |
++			                 vk::AccessFlagBits2::eColorAttachmentWrite);
++		}
++		system_overlay(command, m_view);
++	}
++	if (draw_hud || system_overlay) {
++		ImageBarrier(command, m_image, vk::ImageLayout::eColorAttachmentOptimal,
++		             vk::ImageLayout::eTransferSrcOptimal,
++		             vk::AccessFlagBits2::eColorAttachmentWrite,
++		             vk::AccessFlagBits2::eTransferRead);
++	} else
++		ImageBarrier(command, m_image, vk::ImageLayout::eTransferDstOptimal,
++		             vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferWrite,
++		             vk::AccessFlagBits2::eTransferRead);
++	vk::BufferImageCopy copy {};
++	copy.bufferRowLength   = m_descriptor.stride / 4;
++	copy.bufferImageHeight = m_descriptor.height;
++	copy.imageSubresource  = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
++	copy.imageExtent       = {m_descriptor.width, m_descriptor.height, 1};
++	command.copyImageToBuffer(m_image, vk::ImageLayout::eTransferSrcOptimal, slot.buffer, 1, &copy);
++	vk::BufferMemoryBarrier2 release {};
++	release.srcStageMask        = vk::PipelineStageFlagBits2::eTransfer;
++	release.srcAccessMask       = vk::AccessFlagBits2::eTransferWrite;
++	release.dstStageMask        = vk::PipelineStageFlagBits2::eNone;
++	release.srcQueueFamilyIndex = m_family;
++	release.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
++	release.buffer              = slot.buffer;
++	release.size                = VK_WHOLE_SIZE;
++	dep.pBufferMemoryBarriers   = &release;
++	command.pipelineBarrier2(dep);
++}
++GpuPool::~GpuPool() {
++#if defined(__linux__)
++	for (int fd: m_fds)
++		if (fd >= 0) close(fd);
++#endif
++	m_device.destroyPipeline(m_pipeline);
++	m_device.destroyPipelineLayout(m_layout);
++	m_device.destroyDescriptorSetLayout(m_descriptors);
++	m_device.destroySampler(m_sampler);
++	m_device.destroyImageView(m_view);
++	m_device.destroyImage(m_image);
++	m_device.freeMemory(m_image_memory);
++	for (auto& slot: m_slots) {
++		m_device.destroySemaphore(slot.ready);
++		m_device.destroySemaphore(slot.done);
++		m_device.destroyBuffer(slot.buffer);
++		m_device.freeMemory(slot.memory);
++	}
++}
++} // namespace Streaming
+
+=== engines/kyty/src/streaming/exporter.h
+@@ new line 1
++// Modified by AstroPort contributors: ported to AGS session protocol 2.
++#pragma once
++#include "graphics/host_gpu/vulkanCommon.h"
++#include "streaming/aspectMode.h"
++#include "streaming/protocol.h"
++
++#include <functional>
++#include <memory>
++namespace Streaming {
++struct CaptureLayer {
++	vk::Image     image;
++	vk::ImageView view;
++	vk::Extent2D  extent;
++	bool          premultiplied = false;
++};
++// Independently testable Vulkan producer. Caller owns command submission and source transitions.
++class GpuPool {
++public:
++	using OverlayRecorder = std::function<void(vk::CommandBuffer, vk::ImageView)>;
++	static constexpr vk::Format     CompositeFormat = vk::Format::eB8G8R8A8Unorm;
++	static std::unique_ptr<GpuPool> Create(vk::PhysicalDevice physical, vk::Device device,
++	                                       uint32_t family, uint32_t width, uint32_t height,
++	                                       uint64_t epoch, std::string& error,
++	                                       AspectMode aspect = AspectMode::Fit);
++	~GpuPool();
++	GpuPool(const GpuPool&)            = delete;
++	GpuPool& operator=(const GpuPool&) = delete;
++	void     Record(vk::CommandBuffer command, const Lease& lease, const CaptureLayer& main,
++	                const CaptureLayer& overlay, const OverlayRecorder& system_overlay = {});
++	const PoolDescriptor&     Descriptor() const { return m_descriptor; }
++	const std::array<int, 9>& Fds() const { return m_fds; }
++	vk::Semaphore             Ready(uint32_t slot) const { return m_slots[slot].ready; }
++	vk::Semaphore             Done(uint32_t slot) const { return m_slots[slot].done; }
++
++private:
++	GpuPool(vk::Device device, uint32_t family, AspectMode aspect)
++	    : m_device(device), m_family(family), m_aspect(aspect) {
++		m_fds.fill(-1);
++	}
++	bool Initialize(vk::PhysicalDevice physical, uint32_t width, uint32_t height, uint64_t epoch,
++	                std::string& error);
++	bool CreateOverlay(std::string& error);
++	struct Slot {
++		vk::Buffer       buffer;
++		vk::DeviceMemory memory;
++		vk::Semaphore    ready, done;
++	};
++	vk::Device              m_device;
++	uint32_t                m_family;
++	AspectMode              m_aspect = AspectMode::Fit;
++	PoolDescriptor          m_descriptor;
++	std::array<Slot, 3>     m_slots {};
++	std::array<int, 9>      m_fds;
++	vk::Image               m_image;
++	vk::DeviceMemory        m_image_memory;
++	vk::ImageView           m_view;
++	vk::Sampler             m_sampler;
++	vk::DescriptorSetLayout m_descriptors;
++	vk::PipelineLayout      m_layout;
++	vk::Pipeline            m_pipeline;
++};
++} // namespace Streaming

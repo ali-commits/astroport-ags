@@ -1,0 +1,76 @@
+From: Ali <newaaa4@gmail.com>
+Date: Sat, 21 Nov 2026 18:37:16 +0800
+Subject: [PATCH 1/7] AnyPS5: open AGS_CONTROLLER_AUDIO_SINK when set; live
+ haptic gain from the renderer
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+ .../libs/prx/libSceAudioOut/src/AudioOut.cpp  |  3 ++-
+ .../libSceAudioOut/src/AudioOut2Context.cpp   |  8 ++++--
+ .../libSceAudioOut/src/AudioOut2PadMix.cpp    | 25 +++++++++++++++++++
+ .../libSceAudioOut/src/AudioOut2PadMix.hpp    |  2 ++
+ .../libSceAudioOut/tests/AudioOut2PadMix.cpp  |  8 ++++++
+ 5 files changed, 43 insertions(+), 3 deletions(-)
+
+
+=== engines/anyps5/core/libs/prx/libSceAudioOut/src/AudioOut.cpp
+@@ new line 3
++#include <cstdlib>
+@@ new line 168
++        if (!AudioOut2PadDeviceWanted(name, std::getenv("AGS_CONTROLLER_AUDIO_SINK"))) continue;
+
+=== engines/anyps5/core/libs/prx/libSceAudioOut/src/AudioOut2Context.cpp
+@@ new line 160
++        if (!AudioOut2PadDeviceWanted(listed, std::getenv("AGS_CONTROLLER_AUDIO_SINK"))) continue;
+@@ new line 232
++static float LaunchVibrationGain() {
+@@ new line 241
++static float VibrationGain() {
++    return AudioOut2HostVibrationGain(LaunchVibrationGain());
++}
++
+
+=== engines/anyps5/core/libs/prx/libSceAudioOut/src/AudioOut2PadMix.cpp
+@@ new line 1
++#include <atomic>
+@@ new line 30
++bool AudioOut2PadDeviceWanted(const char* name, const char* sink) {
++    if (sink == nullptr || *sink == '\0') return AudioOut2IsPadAudioDevice(name);
++    return name != nullptr && std::strcmp(name, sink) == 0;
++}
++
+@@ new line 91
++float AudioOut2HostVibrationGain(float fallback) {
++    using Fn = float (*)();
++    static std::atomic<Fn> cached{nullptr};
++    Fn fn = cached.load(std::memory_order_relaxed);
++    if (fn == nullptr) {
++#ifdef _WIN32
++        HMODULE mod = GetModuleHandleA("kyty_gpu.dll");
++        if (mod == nullptr) return fallback;
++        fn = reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(mod, "KytyGpuPadVibrationGain")));
++#else
++        fn = reinterpret_cast<Fn>(::dlsym(RTLD_DEFAULT, "KytyGpuPadVibrationGain"));
++#endif
++        if (fn == nullptr) return fallback;
++        cached.store(fn, std::memory_order_relaxed);
++    }
++    const float gain = fn();
++    return std::isfinite(gain) ? std::clamp(gain, 0.0f, 4.0f) : fallback;
++}
++
+
+=== engines/anyps5/core/libs/prx/libSceAudioOut/src/AudioOut2PadMix.hpp
+@@ new line 27
++bool AudioOut2PadDeviceWanted(const char* name, const char* sink);
++float AudioOut2HostVibrationGain(float fallback);
+
+=== engines/anyps5/core/libs/prx/libSceAudioOut/tests/AudioOut2PadMix.cpp
+@@ new line 120
++    Require(AudioOut2PadDeviceWanted("AGS Controller 1", "AGS Controller 1"), "the named sink is used");
++    Require(!AudioOut2PadDeviceWanted("DualSense Wireless Controller", "AGS Controller 1"), "a named sink excludes other pads");
++    Require(!AudioOut2PadDeviceWanted(nullptr, "AGS Controller 1"), "null name with a sink");
++    Require(AudioOut2PadDeviceWanted("DualSense Wireless Controller", ""), "empty sink is today's match");
++    Require(AudioOut2PadDeviceWanted("DualSense Wireless Controller", nullptr), "no sink is today's match");
++    Require(!AudioOut2PadDeviceWanted("HDMI Digital Stereo", nullptr), "no sink still skips other cards");
++    Require(AudioOut2HostVibrationGain(2.5f) == 2.5f, "without the renderer the launch value stays");
++

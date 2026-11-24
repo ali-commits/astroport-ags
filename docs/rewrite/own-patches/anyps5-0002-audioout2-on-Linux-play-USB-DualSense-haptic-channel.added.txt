@@ -1,0 +1,56 @@
+From: Ali <newaaa4@gmail.com>
+Date: Sun, 15 Nov 2026 14:43:43 +0800
+Subject: [PATCH] audioout2: on Linux, play USB DualSense haptic channels
+ through the Kyty backend
+
+Kyty's DualSense backend mutes its rumble reports while haptic audio plays.
+Played on AnyPS5's own controller sound card, the haptics were overridden by
+rumble reports (rumble emulation), so footsteps, jumps and hover were silent.
+The speaker channels stay on the sound card. APS5_PAD_VIBRATION_VIA_HOST=0
+restores the old routing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+ .../libSceAudioOut/src/AudioOut2Context.cpp   | 38 ++++++++++++++++++-
+ 1 file changed, 37 insertions(+), 1 deletion(-)
+
+
+=== core/libs/prx/libSceAudioOut/src/AudioOut2Context.cpp
+@@ new line 217
++// Linux, USB DualSense: the haptic channels go to the Kyty renderer's DualSense backend instead of
++// this context's controller sound card. That backend mutes its rumble reports while haptic audio
++// plays; rumble reports switch the DualSense to rumble emulation, which silences audio haptics
++// (Astro's footsteps, jumps and laser hover were lost that way). The speaker channels stay here.
++// APS5_PAD_VIBRATION_VIA_HOST=0 keeps everything on the sound card.
++static bool VibrationViaHost() {
++#ifdef _WIN32
++    return false;
++#else
++    static const bool enabled = [] {
++        const char* value = std::getenv("APS5_PAD_VIBRATION_VIA_HOST");
++        return value == nullptr || std::strcmp(value, "0") != 0;
++    }();
++    return enabled;
++#endif
++}
++
++static void QueueVibrationOnHost(AudioOut2Context& context, float* pad) {
++    if (!VibrationViaHost()) return;
++    std::vector<float> vibration(static_cast<std::size_t>(context.grain) * 2);
++    for (std::uint32_t frame = 0; frame < context.grain; ++frame) {
++        const float* src = pad + static_cast<std::size_t>(frame) * AUDIO_OUT2_PAD_CHANNELS;
++        vibration[frame * 2 + 0] = src[AUDIO_OUT2_PAD_VIBRATION_LEFT];
++        vibration[frame * 2 + 1] = src[AUDIO_OUT2_PAD_VIBRATION_RIGHT];
++    }
++    if (AudioOut2QueueHostPadAudio(AUDIO_OUT2_SAMPLE_RATE, false, vibration.data(), context.grain, 2, true, 1.0f) == 0) return;
++    for (std::uint32_t frame = 0; frame < context.grain; ++frame) {
++        float* dst = pad + static_cast<std::size_t>(frame) * AUDIO_OUT2_PAD_CHANNELS;
++        dst[AUDIO_OUT2_PAD_VIBRATION_LEFT] = 0.0f;
++        dst[AUDIO_OUT2_PAD_VIBRATION_RIGHT] = 0.0f;
++    }
++}
++
+@@ new line 288
++        if (context.padDevice != 0) {
++            QueueVibrationOnHost(context, pad);
++            QueuePadGrain(context);
++        }

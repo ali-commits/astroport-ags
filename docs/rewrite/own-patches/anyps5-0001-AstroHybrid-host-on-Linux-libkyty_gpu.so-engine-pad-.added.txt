@@ -1,0 +1,95 @@
+From: Claude <noreply@anthropic.com>
+Date: Sun, 15 Nov 2026 13:36:56 +0800
+Subject: [PATCH] AstroHybrid host on Linux: libkyty_gpu.so engine, pad audio,
+ APR staging, driver area
+
+- DirectMemory: APS5_GPU_ENGINE=kyty loads libkyty_gpu.so (KYTY_GPU_LIBRARY) via dlopen
+- AudioOut2PadMix: KytyGpuQueuePadAudio through dlsym on Linux
+- Apr: staged reads into guest memory under the Kyty engine (Kyty write tracking)
+- AgcDriver Lifecycle: the PS5 driver area is Kyty's under the Kyty engine on Linux
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+ .../Execution/src/Driver/Lifecycle.cpp        | 14 +++++++++-
+ .../libSceAudioOut/src/AudioOut2PadMix.cpp    | 20 ++++++++------
+ core/libs/prx/libkernel/Apr/src/Apr.cpp       | 27 ++++++++++++++++---
+ .../prx/libkernel/DirectMemory/Export.cpp     | 15 ++++++++++-
+ 4 files changed, 63 insertions(+), 13 deletions(-)
+
+
+=== core/libs/prx/libSceAgcDriver/Execution/src/Driver/Lifecycle.cpp
+@@ new line 1
++#include <cstdlib>
++#include <cstring>
+@@ new line 194
++    // APS5_GPU_ENGINE=kyty on Linux: Kyty's renderer owns the PS5 driver area at 0xfe0000000 (the host
++    // donated it to Kyty, AstroHybrid's kytyGpuBridge start_graphics). On Windows guest addresses are
++    // offset (GuestAddressOffset), so the two never meet; here they would be the same pages.
++    static const bool driverMemory = [] {
++#ifndef _WIN32
++        const char* engine = std::getenv("APS5_GPU_ENGINE");
++        if (engine != nullptr && std::strcmp(engine, "kyty") == 0) return true;
++#endif
++        MapDriverMemory();
++        return true;
++    }();
+
+=== core/libs/prx/libSceAudioOut/src/AudioOut2PadMix.cpp
+@@ new line 7
++#else
++#include <dlfcn.h>
+@@ new line 91
++    // Linux: libkyty_gpu.so is loaded RTLD_GLOBAL by the GPU engine (DirectMemory/Export.cpp).
++    using Fn = std::uint64_t (*)(std::uint32_t, int, const void*, std::uint32_t, std::uint32_t, int, float);
++    static Fn cached = nullptr;
++    Fn fn = cached;
++    if (fn == nullptr) {
++        fn = reinterpret_cast<Fn>(::dlsym(RTLD_DEFAULT, "KytyGpuQueuePadAudio"));
++        if (fn == nullptr) return 0;
++        cached = fn;
++    }
++    return fn(freq, speaker ? 1 : 0, data, frames, channels, isFloat ? 1 : 0, gain);
+
+=== core/libs/prx/libkernel/Apr/src/Apr.cpp
+@@ new line 179
++    // APS5_GPU_ENGINE=kyty: Kyty write-protects GPU-visible guest pages to track CPU writes, and the
++    // kernel fails a read() into such a page (EFAULT) instead of faulting. Copy through a staging
++    // buffer then, as on Windows, so the stores fault and Kyty's handler records them.
++    static const bool staged = [] {
++        const char* engine = std::getenv("APS5_GPU_ENGINE");
++        return engine != nullptr && std::strcmp(engine, "kyty") == 0;
++    }();
++    std::uint64_t read = 0;
++    if (staged) {
++        std::vector<char> staging(static_cast<std::size_t>(std::min<std::uint64_t>(command.size, 64u * 1024u)));
++        while (read < command.size) {
++            const auto wanted = static_cast<std::streamsize>(std::min<std::uint64_t>(command.size - read, staging.size()));
++            stream.read(staging.data(), wanted);
++            const auto obtained = static_cast<std::uint64_t>(stream.gcount());
++            if (obtained != 0) std::memcpy(reinterpret_cast<char*>(command.destination) + read, staging.data(), static_cast<std::size_t>(obtained));
++            read += obtained;
++            if (stream.bad()) throw std::runtime_error("APR: read failed for " + file.path.string());
++            if (obtained != static_cast<std::uint64_t>(wanted)) break;
++        }
++    } else {
++        stream.read(reinterpret_cast<char*>(command.destination), static_cast<std::streamsize>(command.size));
++        if (stream.bad()) throw std::runtime_error("APR: read failed for " + file.path.string());
++        read = static_cast<std::uint64_t>(stream.gcount());
++    }
+
+=== core/libs/prx/libkernel/DirectMemory/Export.cpp
+@@ new line 21
++#include <dlfcn.h>
+@@ new line 246
++    // Linux: libkyty_gpu.so (KYTY_GPU_LIBRARY, default next to the game or on the loader path),
++    // exporting the same NID symbols the Windows DLL's .def file names.
++    static void* module = [] {
++        const char* path = std::getenv("KYTY_GPU_LIBRARY");
++        void* handle = ::dlopen(path != nullptr ? path : "libkyty_gpu.so", RTLD_NOW | RTLD_GLOBAL);
++        if (handle == nullptr) {
++            throw std::runtime_error(std::string("APS5_GPU_ENGINE=kyty: libkyty_gpu.so is not loadable: ") + ::dlerror());
++        }
++        return handle;
++    }();
++    void* function = ::dlsym(module, nid);
++    if (function == nullptr) throw std::runtime_error(std::string("APS5_GPU_ENGINE=kyty: libkyty_gpu.so does not export ") + nid);
++    return reinterpret_cast<Function>(function);

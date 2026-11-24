@@ -1,0 +1,31 @@
+From: Ali <newaaa4@gmail.com>
+Date: Sun, 15 Nov 2026 15:58:23 +0800
+Subject: [PATCH] DualSense: ASTROHYBRID_DUALSENSE_RUMBLE=0 keeps rumble
+ reports off
+
+A rumble report switches the DualSense to rumble emulation, which silences
+its audio haptics (Astro Bot's footsteps worked for about a second after a
+strong haptic effect, then stopped).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+ src/libs/dualSenseHaptics.cpp | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+
+=== src/libs/dualSenseHaptics.cpp
+@@ new line 1
++#include <cstdlib>
++#include <cstring>
+@@ new line 70
++// ASTROHYBRID_DUALSENSE_RUMBLE=0: never send rumble (motor emulation) to a DualSense. A rumble report
++// switches the controller to rumble emulation, which silences its audio haptics; games made for
++// the DualSense play everything through audio haptics.
++bool RumbleAllowed() {
++	static const bool allowed = [] {
++		const char* value = std::getenv("ASTROHYBRID_DUALSENSE_RUMBLE");
++		return value == nullptr || std::strcmp(value, "0") != 0;
++	}();
++	return allowed;
++}
++
++		const bool muted = g_haptics_until > now || g_rumble_until <= now || !RumbleAllowed();

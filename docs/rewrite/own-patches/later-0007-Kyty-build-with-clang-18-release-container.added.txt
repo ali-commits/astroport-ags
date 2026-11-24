@@ -1,0 +1,12 @@
+From: Ali <newaaa4@gmail.com>
+Date: Sun, 22 Nov 2026 06:51:25 +0800
+Subject: [PATCH 7/7] Kyty: build with clang 18 (release container)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+ .../graphics/shader/recompiler/ir/passes/ResourceTracking.cpp   | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+
+=== engines/kyty/src/graphics/shader/recompiler/ir/passes/ResourceTracking.cpp
+@@ new line 4913
++		runtime.indirect_descriptor = DescriptorSource::IndirectDescriptor {}; // not emplace(): clang 18 sees the nested type as not default-constructible

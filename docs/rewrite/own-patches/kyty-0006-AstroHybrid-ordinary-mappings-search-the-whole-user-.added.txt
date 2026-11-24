@@ -1,0 +1,35 @@
+From: Ali <newaaa4@gmail.com>
+Date: Thu, 19 Nov 2026 16:42:01 +0800
+Subject: [PATCH] AstroHybrid: ordinary mappings search the whole user range
+ when the host donated memory
+
+int22 ends the search for free guest ranges at the AMM window (kAmmWindowBase,
+0xec00000000). AnyPS5 donates its 64 GiB guest window at exactly that address,
+so Astro Bot's first non-fixed direct-memory map (3.2 GiB) found no range and
+failed with ENOMEM. With host placeholders the search covers the user range to
+its end again, as before int22; the AMM calls are AnyPS5's own in the hybrid.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+ src/kernel/memory.cpp             |  6 +++---
+ src/kernel/memoryAddressSpace.inc | 13 +++++++++----
+ 2 files changed, 12 insertions(+), 7 deletions(-)
+
+
+=== src/kernel/memory.cpp
+@@ new line 1606
++		if (search_addr < UserAllocEnd()) {
++			return find_in(search_addr, UserAllocEnd());
++		addr = find_in(HOST_USER_MIN, UserAllocEnd());
+
+=== src/kernel/memoryAddressSpace.inc
+@@ new line 16
++// AstroHybrid: the host (AnyPS5) donates its guest window at the AMM window base; with no AMM
++// map commands in that window, ordinary mappings search the whole user range as before int22.
++static uint64_t UserAllocEnd() {
++	return g_host_placeholders.empty() ? HOST_USER_ALLOC_END : HOST_USER_MAX + 1u;
++}
+@@ new line 1617
++		if (search_addr != 0 && search_addr < UserAllocEnd()) {
++			return FindFreeAlignedUnlocked(search_addr, UserAllocEnd(), size, alignment);
++		// No hint, or one at or above the AMM window (UserAllocEnd()): the default search, as
++		                 : FindFreeAlignedUnlocked(HOST_USER_MIN, UserAllocEnd(), size, alignment);

@@ -1,0 +1,29 @@
+From: Ali <newaaa4@gmail.com>
+Date: Wed, 18 Nov 2026 18:17:50 +0800
+Subject: [PATCH] fix(libSceAudioPropagation): accept path calculation without
+ rays and audio path entries
+
+Astro Bot's Slo-Mo Casino calls sceAudioPropagationSourceCalculateAudioPaths with no rays
+(order 1, 36 paths) and hands paths to sceAudioPropagationSourceSetAudioPaths; both failed
+or threw, and the game crashed on entering the level. Without propagation there are no paths
+to compute, and sources render their input directly, so both now succeed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+ core/libs/prx/libSceAudioPropagation/Export.cpp | 6 ++----
+ core/libs/tests/GuestAudioPropagation.cpp       | 7 +++++--
+ 2 files changed, 7 insertions(+), 6 deletions(-)
+
+
+=== core/libs/prx/libSceAudioPropagation/Export.cpp
+@@ new line 373
++    if ((rayCount != 0 && rayCount != 6) || reflectionOrder == 0 || pathCount == 0) return ErrorInvalidArgument;
+@@ new line 381
++    require(count == 0 || entries != nullptr, __func__);
+
+=== core/libs/tests/GuestAudioPropagation.cpp
+@@ new line 223
++    Require(sceAudioPropagationSourceCalculateAudioPaths(source, rays, 0, 1, rays, 36) == 0, "path calculation without rays (Astro Bot, Slo-Mo Casino)");
++    Require(sceAudioPropagationSourceCalculateAudioPaths(source, rays, 3, 1, rays, 6) == AudioPropagation::ErrorInvalidArgument, "path calculation partial rays");
++    Require(sceAudioPropagationSourceCalculateAudioPaths(source, rays, 6, 1, rays, 6) == 0, "path calculation");
++    Require(sceAudioPropagationSourceSetAudioPaths(source, rays, 1) == 0, "set audio paths");
++    RequireThrows<std::runtime_error>([&] { sceAudioPropagationSourceSetAudioPaths(source, nullptr, 1); }, "set audio paths null entries");

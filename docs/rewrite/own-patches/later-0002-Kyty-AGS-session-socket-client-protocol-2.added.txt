@@ -1,0 +1,1238 @@
+From: Ali <newaaa4@gmail.com>
+Date: Sat, 21 Nov 2026 18:44:27 +0800
+Subject: [PATCH 2/7] Kyty: AGS session socket client, protocol 2
+
+Ported from KytyPS5-AGS src/streaming (064e7b9c6): version 2 handshake,
+metrics, settings.apply dispatch and output; no remote input or legacy socket.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+ engines/kyty/CMakeLists.txt                   |   9 +
+ .../graphics/presentation/window/window.cpp   |  34 +-
+ engines/kyty/src/streaming/metrics.h          | 124 ++++++
+ engines/kyty/src/streaming/metricsSource.cpp  |  39 ++
+ engines/kyty/src/streaming/metricsSource.h    |   8 +
+ engines/kyty/src/streaming/protocol.cpp       |  75 ++++
+ engines/kyty/src/streaming/protocol.h         |  66 +++
+ engines/kyty/src/streaming/sessionEnv.h       |  34 ++
+ engines/kyty/src/streaming/transport.cpp      | 404 ++++++++++++++++++
+ engines/kyty/src/streaming/transport.h        |  77 ++++
+ engines/kyty/tests/SessionSocketTests.cpp     | 302 +++++++++++++
+ 11 files changed, 1170 insertions(+), 2 deletions(-)
+ create mode 100644 engines/kyty/src/streaming/metrics.h
+ create mode 100644 engines/kyty/src/streaming/metricsSource.cpp
+ create mode 100644 engines/kyty/src/streaming/metricsSource.h
+ create mode 100644 engines/kyty/src/streaming/protocol.cpp
+ create mode 100644 engines/kyty/src/streaming/protocol.h
+ create mode 100644 engines/kyty/src/streaming/sessionEnv.h
+ create mode 100644 engines/kyty/src/streaming/transport.cpp
+ create mode 100644 engines/kyty/src/streaming/transport.h
+ create mode 100644 engines/kyty/tests/SessionSocketTests.cpp
+
+
+=== engines/kyty/CMakeLists.txt
+@@ new line 283
++	"${KYTY_SOURCE_DIR}/streaming/*.cpp"
++	"${KYTY_SOURCE_DIR}/streaming/*.h"
+@@ new line 797
++
++	add_executable(session_socket_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SessionSocketTests.cpp"
++		"${KYTY_SOURCE_DIR}/streaming/protocol.cpp" "${KYTY_SOURCE_DIR}/streaming/transport.cpp")
++	target_include_directories(session_socket_tests PRIVATE "${KYTY_SOURCE_DIR}")
++	target_link_libraries(session_socket_tests PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
++	add_test(NAME session_socket COMMAND session_socket_tests)
++	set_tests_properties(session_socket PROPERTIES TIMEOUT 30)
+
+=== engines/kyty/src/graphics/presentation/window/window.cpp
+@@ new line 24
++#include "streaming/transport.h"
+@@ new line 48
++namespace Streaming {
++OutputState ReadLiveOutput() {
++	// Until Task 4 owns live display state, only the launch configuration is available.
++	uint32_t fps = 60;
++	if (const char* value = std::getenv("ASTROHYBRID_FPS_LIMIT")) {
++		char* end = nullptr;
++		const auto parsed = std::strtoul(value, &end, 10);
++		if (end != value && *end == '\0' && parsed >= 10 && parsed <= 240)
++			fps = static_cast<uint32_t>(parsed);
++	}
++	return {Config::GetScreenWidth(), Config::GetScreenHeight(), fps};
++}
++} // namespace Streaming
++
+@@ new line 155
++std::mutex                     g_window_lifetime_mutex;
++uint64_t PresentedFrames() {
++	std::lock_guard lock(g_window_lifetime_mutex);
++	return g_window ? g_window->loop.presented_frames.load(std::memory_order_relaxed) : 0;
++}
++
+@@ new line 960
++	{
++		std::lock_guard lock(g_window_lifetime_mutex);
++		g_window = std::move(window);
++	}
+@@ new line 979
++		// The presenter can join a worker that is sampling PresentedFrames().
++		// Destroy the window after releasing the lifetime lock.
++		std::unique_ptr<WindowContext> window;
++		{
++			std::lock_guard lock(g_window_lifetime_mutex);
++			window = std::move(g_window);
++		}
+
+=== engines/kyty/src/streaming/metrics.h
+@@ new line 1
++#ifndef KYTY_STREAMING_METRICS_H
++#define KYTY_STREAMING_METRICS_H
++// Live metrics on the AGS session socket.
++#include "streaming/protocol.h"
++
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <cstdint>
++#include <ctime>
++#include <functional>
++#include <optional>
++#include <string_view>
++
++namespace Streaming {
++
++// Catalog keys, units and types match the adapter's hello catalog.
++enum class Metric : uint8_t { GameFps, FrameTimeMs, Count };
++constexpr size_t MetricCount = static_cast<size_t>(Metric::Count);
++
++struct MetricInfo {
++	std::string_view key, unit, type;
++};
++inline constexpr std::array<MetricInfo, MetricCount> MetricCatalog {{
++    {"game_fps", "fps", "number"},
++    {"frame_time_ms", "ms", "number"},
++}};
++
++// The hello catalog says 1000: the fps window is aggregated once per second.
++constexpr uint32_t MetricsMinIntervalMs = 1000;
++constexpr uint32_t MetricsMaxIntervalMs = 3600000;
++
++using MetricMask = uint32_t; // Bit n is Metric n.
++constexpr MetricMask MetricBit(Metric metric) {
++	return MetricMask {1} << static_cast<unsigned>(metric);
++}
++
++struct MetricsSubscription {
++	MetricMask keys        = 0; // Empty means send nothing.
++	uint32_t   interval_ms = MetricsMinIntervalMs;
++};
++
++// Parses {"type":"metrics.subscribe","keys":[...],"interval_ms":n}. Unknown keys are ignored, an
++// empty list stops metrics, and the interval is clamped to the catalog minimum (a missing or
++// non-integer interval counts as the minimum). Returns false, leaving `output` alone, when `keys`
++// is absent or not an array: the host's packet is malformed and the old subscription stays.
++inline bool ParseMetricsSubscribe(const Json& packet, MetricsSubscription& output) noexcept {
++	if (!packet.is_object() || !packet.contains("keys") || !packet["keys"].is_array()) return false;
++	MetricsSubscription parsed;
++	for (const auto& key: packet["keys"]) {
++		if (!key.is_string()) continue;
++		const auto& name = key.get_ref<const std::string&>();
++		for (size_t i = 0; i < MetricCount; i++)
++			if (MetricCatalog[i].key == name) parsed.keys |= MetricMask {1} << i;
++	}
++	if (packet.contains("interval_ms") && packet["interval_ms"].is_number_integer()) {
++		const auto& interval = packet["interval_ms"];
++		if (interval.is_number_unsigned()) {
++			parsed.interval_ms = static_cast<uint32_t>(
++			    std::clamp<uint64_t>(interval.get<uint64_t>(), MetricsMinIntervalMs, MetricsMaxIntervalMs));
++		} else {
++			parsed.interval_ms = static_cast<uint32_t>(
++			    std::clamp<int64_t>(interval.get<int64_t>(), MetricsMinIntervalMs, MetricsMaxIntervalMs));
++		}
++	}
++	output = parsed;
++	return true;
++}
++
++struct MetricValues {
++	std::array<std::optional<double>, MetricCount> value {};
++	void Set(Metric metric, double v) { value[static_cast<size_t>(metric)] = v; }
++};
++
++// {"type":"metrics","t_ms":..,"values":{..}} with only subscribed keys that have a value.
++// Returns nullopt when nothing would be reported.
++inline std::optional<Json> BuildMetricsMessage(MetricMask subscribed, const MetricValues& values,
++                                               uint64_t t_ms) {
++	Json out = Json::object();
++	for (size_t i = 0; i < MetricCount; i++) {
++		if ((subscribed & (MetricMask {1} << i)) == 0 || !values.value[i]) continue;
++		out[std::string(MetricCatalog[i].key)] = *values.value[i];
++	}
++	if (out.empty()) return std::nullopt;
++	return Json {{"type", "metrics"}, {"t_ms", t_ms}, {"values", std::move(out)}};
++}
++
++// CLOCK_MONOTONIC in milliseconds.
++inline uint64_t MonotonicMs() noexcept {
++#if defined(CLOCK_MONOTONIC)
++	timespec now {};
++	clock_gettime(CLOCK_MONOTONIC, &now);
++	return static_cast<uint64_t>(now.tv_sec) * 1000 + static_cast<uint64_t>(now.tv_nsec) / 1000000;
++#else
++	return std::chrono::duration_cast<std::chrono::milliseconds>(
++	           std::chrono::steady_clock::now().time_since_epoch())
++	    .count();
++#endif
++}
++
++// When the next metrics message is due. The interval restarts after every attempt, whether or not
++// the send went through: under socket backpressure the source is read once per interval, not on
++// every pass of the 2 ms run loop.
++class MetricsPacer {
++public:
++	using Clock = std::chrono::steady_clock;
++	[[nodiscard]] bool Due(Clock::time_point now, uint32_t interval_ms) const {
++		return !m_last || now - *m_last >= std::chrono::milliseconds(interval_ms);
++	}
++	void Attempted(Clock::time_point now) { m_last = now; }
++	void Reset() { m_last.reset(); }
++
++private:
++	std::optional<Clock::time_point> m_last;
++};
++
++// Both hooks run on the transport thread. A zero key mask ends sampling and clears its baseline.
++struct MetricsHooks {
++	std::function<void(MetricMask)>         subscribed;
++	std::function<MetricValues(MetricMask)> sample;
++};
++
++} // namespace Streaming
++#endif
+
+=== engines/kyty/src/streaming/metricsSource.cpp
+@@ new line 1
++#include "streaming/metricsSource.h"
++
++#include <memory>
++#include <utility>
++
++namespace Libs::Graphics {
++uint64_t PresentedFrames();
++}
++
++namespace Streaming {
++namespace {
++struct Sample {
++	std::chrono::steady_clock::time_point time;
++	uint64_t frames;
++};
++} // namespace
++
++MetricsHooks MakeEmulatorMetricsHooks() {
++	const auto previous = std::make_shared<std::optional<Sample>>();
++	return {
++	    [previous](MetricMask keys) {
++		    if (keys == 0) previous->reset();
++	    },
++	    [previous](MetricMask) {
++		    const Sample current {std::chrono::steady_clock::now(), Libs::Graphics::PresentedFrames()};
++		    const auto last = std::exchange(*previous, current);
++		    MetricValues values;
++		    if (last && current.time > last->time && current.frames >= last->frames) {
++			    const auto seconds = std::chrono::duration<double>(current.time - last->time).count();
++			    const double fps = static_cast<double>(current.frames - last->frames) / seconds;
++			    values.Set(Metric::GameFps, fps);
++			    if (fps > 0) values.Set(Metric::FrameTimeMs, 1000.0 / fps);
++		    }
++		    return values;
++	    },
++	};
++}
++
++} // namespace Streaming
+
+=== engines/kyty/src/streaming/metricsSource.h
+@@ new line 1
++#pragma once
++
++#include "streaming/metrics.h"
++
++namespace Streaming {
++// Samples the window's presented-frame counter at the subscribed interval.
++MetricsHooks MakeEmulatorMetricsHooks();
++} // namespace Streaming
+
+=== engines/kyty/src/streaming/protocol.cpp
+@@ new line 1
++#include "streaming/protocol.h"
++
++#include <algorithm>
++
++namespace Streaming {
++namespace {
++bool Unsigned(const Json& value, uint64_t minimum, uint64_t maximum) {
++	if (!value.is_number_unsigned() && !value.is_number_integer()) return false;
++	if (value.is_number_integer() && !value.is_number_unsigned() && value.get<int64_t>() < 0)
++		return false;
++	const auto n = value.get<uint64_t>();
++	return n >= minimum && n <= maximum;
++}
++} // namespace
++bool ValidateHello(const Json& p, size_t fd_count, PoolDescriptor& output) noexcept {
++	for (const char* key:
++	     {"type", "version", "frames", "epoch", "width", "height", "stride", "fourcc", "gpu_uuid", "slots",
++	      "allocation_sizes", "offset", "dedicated", "transport"})
++		if (!p.is_object() || !p.contains(key)) return false;
++	if (fd_count != 9 || p.at("type") != "hello" ||
++	    !Unsigned(p.at("version"), ProtocolVersion, ProtocolVersion) || p.at("frames") != true ||
++	    !Unsigned(p.at("epoch"), 1, UINT64_MAX) ||
++	    !Unsigned(p.at("width"), 2, 8192) || !Unsigned(p.at("height"), 2, 8192) ||
++	    !Unsigned(p.at("stride"), 4096, 268435456) || p.at("fourcc") != "BGRA" ||
++	    !Unsigned(p.at("slots"), 3, 3) || !Unsigned(p.at("offset"), 0, 0) ||
++	    !p.at("dedicated").is_boolean() || p.at("dedicated") != true ||
++	    p.at("transport") != "vulkan-buffer-fd")
++		return false;
++	PoolDescriptor d;
++	d.epoch  = p.at("epoch");
++	d.width  = p.at("width");
++	d.height = p.at("height");
++	d.stride = p.at("stride");
++	if (d.stride % 4096 != 0 || uint64_t(d.stride) < uint64_t(d.width) * 4) return false;
++	if (!p.at("gpu_uuid").is_string()) return false;
++	d.gpu_uuid = p.at("gpu_uuid").get<std::string>();
++	if (d.gpu_uuid.size() != 32 || !std::all_of(d.gpu_uuid.begin(), d.gpu_uuid.end(), [](char c) {
++		    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
++	    }))
++		return false;
++	auto& sizes = p.at("allocation_sizes");
++	if (!sizes.is_array() || sizes.size() != 3) return false;
++	for (size_t i = 0; i < SlotCount; i++) {
++		if (!Unsigned(sizes[i], uint64_t(d.stride) * d.height, 268435456)) return false;
++		d.allocation_sizes[i] = sizes[i];
++	}
++	output = std::move(d);
++	return true;
++}
++std::optional<Lease> LeaseRing::TryAcquire() {
++	std::unique_lock lock(m_mutex, std::try_to_lock);
++	if (!lock.owns_lock()) return {};
++	if (!m_connected || m_sequence == UINT64_MAX) return {};
++	for (uint32_t i = 0; i < SlotCount; i++)
++		if (m_leased[i] == 0) {
++			m_leased[i] = ++m_sequence;
++			Lease lease {m_epoch, m_sequence, i, m_used[i]};
++			m_used[i] = true;
++			return lease;
++		}
++	return {};
++}
++bool LeaseRing::Release(uint64_t epoch, uint32_t slot, uint64_t sequence) {
++	std::lock_guard lock(m_mutex);
++	if (!m_connected || epoch != m_epoch || slot >= SlotCount || sequence == 0 ||
++	    m_leased[slot] != sequence)
++		return false;
++	m_leased[slot] = 0;
++	return true;
++}
++void LeaseRing::Disconnect() {
++	std::lock_guard lock(m_mutex);
++	m_connected = false;
++}
++} // namespace Streaming
+
+=== engines/kyty/src/streaming/protocol.h
+@@ new line 1
++#pragma once
++
++#include <array>
++#include <cstdint>
++#include <mutex>
++#include <nlohmann/json.hpp>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <vector>
++
++namespace Streaming {
++constexpr int    ProtocolVersion = 2;
++constexpr size_t PacketLimit = 8192;
++constexpr size_t SlotCount   = 3;
++using Json                   = nlohmann::json;
++struct PoolDescriptor {
++	uint64_t                        epoch = 0;
++	uint32_t                        width = 0, height = 0, stride = 0;
++	std::array<uint64_t, SlotCount> allocation_sizes {};
++	std::string                     gpu_uuid;
++};
++bool ValidateHello(const Json& packet, size_t fd_count, PoolDescriptor& output) noexcept;
++// Packet types this emulator understands.
++// Any other type from the host is ignored instead of dropping the connection.
++[[nodiscard]] inline bool IsKnownPacketType(std::string_view type) noexcept {
++	for (const auto known: {"welcome", "accepted", "refused", "error", "release",
++	                        "metrics.subscribe", "settings.apply", "session.state"})
++		if (type == known) return true;
++	return false;
++}
++// Remembers which unknown packet types were already reported, so each is logged once.
++class UnknownTypeLog {
++public:
++	// True the first time `type` is seen. Past a small cap of distinct types nothing is reported.
++	[[nodiscard]] bool First(std::string_view type) {
++		for (const auto& seen: m_seen)
++			if (seen == type) return false;
++		if (m_seen.size() >= 16) return false;
++		m_seen.emplace_back(type);
++		return true;
++	}
++
++private:
++	std::vector<std::string> m_seen;
++};
++struct Lease {
++	uint64_t epoch, sequence;
++	uint32_t slot;
++	bool     recycled;
++};
++class LeaseRing {
++public:
++	explicit LeaseRing(uint64_t epoch): m_epoch(epoch) {}
++	std::optional<Lease> TryAcquire();
++	bool                 Release(uint64_t epoch, uint32_t slot, uint64_t sequence);
++	void                 Disconnect();
++
++private:
++	std::mutex                      m_mutex;
++	uint64_t                        m_epoch, m_sequence = 0;
++	bool                            m_connected = true;
++	std::array<uint64_t, SlotCount> m_leased {};
++	std::array<bool, SlotCount>     m_used {};
++};
++} // namespace Streaming
+
+=== engines/kyty/src/streaming/sessionEnv.h
+@@ new line 1
++#pragma once
++
++#include <atomic>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++namespace Streaming {
++
++struct SessionSocketChoice {
++	const char* path = nullptr;
++};
++
++[[nodiscard]] inline SessionSocketChoice SelectSessionSocket(const char* ags_socket,
++                                                             const char* ags_protocol) noexcept {
++	if (ags_socket == nullptr || *ags_socket == '\0') return {};
++	if (ags_protocol != nullptr && std::strcmp(ags_protocol, "2") == 0) return {ags_socket};
++
++	static std::atomic_flag logged = ATOMIC_FLAG_INIT;
++	if (!logged.test_and_set(std::memory_order_relaxed))
++		std::fprintf(stderr, "AGS session socket ignored: AGS_SESSION_PROTOCOL must be 2\n");
++	return {};
++}
++
++[[nodiscard]] inline const char* SessionSocket() noexcept {
++	return SelectSessionSocket(std::getenv("AGS_SESSION_SOCKET"),
++	                           std::getenv("AGS_SESSION_PROTOCOL")).path;
++}
++
++[[nodiscard]] inline bool FramesRequested(const char* kyty_stream_frames) noexcept {
++	return kyty_stream_frames == nullptr || std::strcmp(kyty_stream_frames, "0") != 0;
++}
++
++} // namespace Streaming
+
+=== engines/kyty/src/streaming/transport.cpp
+@@ new line 1
++#include "streaming/transport.h"
++
++#include <algorithm>
++#include <cerrno>
++#include <chrono>
++#include <cstdio>
++#include <cstring>
++#if defined(__linux__)
++#include <fcntl.h>
++#include <poll.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/un.h>
++#include <unistd.h>
++#endif
++namespace Streaming {
++Packet::~Packet() {
++#if defined(__linux__)
++	for (int fd: fds)
++		if (fd >= 0) close(fd);
++#endif
++}
++#if defined(__linux__)
++bool SameUser(int socket) {
++	ucred     peer {};
++	socklen_t size = sizeof(peer);
++	return getsockopt(socket, SOL_SOCKET, SO_PEERCRED, &peer, &size) == 0 && size == sizeof(peer) &&
++	       peer.uid == geteuid();
++}
++ReceiveResult ReceivePacket(int socket, Packet& packet, size_t expected_fds) {
++	char                  bytes[PacketLimit];
++	alignas(cmsghdr) char ancillary[CMSG_SPACE(sizeof(int) * 16)] {};
++	iovec                 iov {bytes, sizeof(bytes)};
++	msghdr                message {};
++	message.msg_iov        = &iov;
++	message.msg_iovlen     = 1;
++	message.msg_control    = ancillary;
++	message.msg_controllen = sizeof(ancillary);
++	const auto count       = recvmsg(socket, &message, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
++	if (count < 0)
++		return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR ? ReceiveResult::Again
++		                                                                 : ReceiveResult::Closed;
++	bool bad = false;
++	for (auto* c = CMSG_FIRSTHDR(&message); c; c = CMSG_NXTHDR(&message, c)) {
++		if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS ||
++		    c->cmsg_len < CMSG_LEN(0)) {
++			bad = true;
++			continue;
++		}
++		const size_t size = c->cmsg_len - CMSG_LEN(0);
++		if (size % sizeof(int) != 0) bad = true;
++		auto* fds = reinterpret_cast<int*>(CMSG_DATA(c));
++		for (size_t i = 0; i < size / sizeof(int); i++)
++			packet.fds.push_back(fds[i]);
++	}
++	if (count == 0) return packet.fds.empty() ? ReceiveResult::Closed : ReceiveResult::Invalid;
++	if (bad || (message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) || packet.fds.size() != expected_fds)
++		return ReceiveResult::Invalid;
++	packet.json = Json::parse(bytes, bytes + count, nullptr, false);
++	return packet.json.is_object() ? ReceiveResult::Packet : ReceiveResult::Invalid;
++}
++bool SendPacket(int socket, const Json& packet, const std::array<int, 9>* fds) {
++	if (!packet.is_object()) return false;
++	const std::string data = packet.dump();
++	if (data.size() > PacketLimit) return false;
++	iovec  iov {const_cast<char*>(data.data()), data.size()};
++	msghdr message {};
++	message.msg_iov    = &iov;
++	message.msg_iovlen = 1;
++	alignas(cmsghdr) char ancillary[CMSG_SPACE(sizeof(int) * 9)] {};
++	if (fds) {
++		message.msg_control    = ancillary;
++		message.msg_controllen = sizeof(ancillary);
++		auto* c                = CMSG_FIRSTHDR(&message);
++		c->cmsg_level          = SOL_SOCKET;
++		c->cmsg_type           = SCM_RIGHTS;
++		c->cmsg_len            = CMSG_LEN(sizeof(int) * 9);
++		std::memcpy(CMSG_DATA(c), fds->data(), sizeof(int) * 9);
++	}
++	return sendmsg(socket, &message, MSG_DONTWAIT | MSG_NOSIGNAL) ==
++	       static_cast<ssize_t>(data.size());
++}
++static int Connect(const std::string& path) {
++	if (path.empty() || path.size() >= sizeof(sockaddr_un::sun_path) ||
++	    path.find('\0') != std::string::npos) return -1;
++	const auto slash = path.rfind('/');
++	if (slash == std::string::npos) return -1;
++	struct stat status {};
++	if (lstat(path.c_str(), &status) != 0 || !S_ISSOCK(status.st_mode) ||
++	    status.st_uid != geteuid() || (status.st_mode & 077) != 0)
++		return -1;
++	if (lstat(path.substr(0, slash).c_str(), &status) != 0 || !S_ISDIR(status.st_mode) ||
++	    status.st_uid != geteuid() || (status.st_mode & 077) != 0)
++		return -1;
++	int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
++	if (fd < 0) return -1;
++	sockaddr_un address {};
++	address.sun_family = AF_UNIX;
++	std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
++	if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 || !SameUser(fd)) {
++		close(fd);
++		return -1;
++	}
++	return fd;
++}
++#else
++bool SameUser(int) {
++	return false;
++}
++ReceiveResult ReceivePacket(int, Packet&, size_t) {
++	return ReceiveResult::Closed;
++}
++bool SendPacket(int, const Json&, const std::array<int, 9>*) {
++	return false;
++}
++#endif
++Transport::Transport(std::string path, Completion complete, MetricsHooks metrics,
++                     SettingsHook settings, bool metrics_only)
++    : m_path(std::move(path)), m_metrics(std::move(metrics)), m_complete(std::move(complete)),
++      m_settings(std::move(settings)), m_metrics_only(metrics_only),
++      m_worker([this](std::stop_token stop) { Run(stop); }) {}
++Transport::~Transport() {
++	m_worker.request_stop();
++	m_worker.join();
++}
++void Transport::SetPool(PoolDescriptor descriptor, std::array<int, 9> fds,
++                        std::shared_ptr<LeaseRing> ring, uint64_t generation) {
++	std::lock_guard lock(m_mutex);
++	if (MetricsOnly() || generation == 0 || generation != Generation()) return;
++	if (m_ring) m_ring->Disconnect();
++	m_descriptor      = std::move(descriptor);
++	m_fds             = fds;
++	m_ring            = std::move(ring);
++	m_pool_generation = generation;
++	for (auto& pending: m_pending)
++		pending.published.store(false, std::memory_order_relaxed);
++	m_active_epoch.store(m_descriptor.epoch, std::memory_order_release);
++}
++void Transport::Publish(PendingFrame frame) {
++	if (frame.lease.slot >= SlotCount ||
++	    m_active_epoch.load(std::memory_order_acquire) != frame.lease.epoch) {
++		Drop();
++		return;
++	}
++	auto& pending = m_pending[frame.lease.slot];
++	pending.frame = frame;
++	pending.published.store(true, std::memory_order_release);
++}
++void Transport::Reconnect() {
++	m_reconnect.store(true, std::memory_order_release);
++}
++void Transport::ClearPool() {
++	m_active_epoch = 0;
++	if (m_ring) m_ring->Disconnect();
++	m_ring.reset();
++	m_fds = {}; // The exporter owns these descriptors.
++	m_pool_generation = 0;
++	for (auto& pending: m_pending)
++		pending.published.store(false, std::memory_order_relaxed);
++}
++
++void Transport::SetMetricsOnly(bool metrics_only) {
++	std::lock_guard lock(m_mutex);
++	if (m_attached || metrics_only == MetricsOnly()) return;
++	m_metrics_only.store(metrics_only, std::memory_order_release);
++	if (metrics_only) ClearPool();
++}
++
++void Transport::Run(std::stop_token stop) {
++#if defined(__linux__)
++	int socket = -1;
++	uint64_t generation = 0, last_apply_id = 0;
++	bool welcomed = false, hello_sent = false;
++	// Zero denotes a frame-less hello; a frame hello always has a positive epoch.
++	uint64_t offered_epoch = 0;
++	auto retry = std::chrono::steady_clock::now();
++	MetricsSubscription subscription;
++	MetricsPacer metrics_pacer;
++	UnknownTypeLog unknown_types;
++	bool logged_early_apply = false, logged_bad_apply_id = false, logged_refusal = false;
++	const auto version_matches = [](const Json& p) {
++		const auto version = p.find("version");
++		return version != p.end() && version->is_number_integer() && *version == ProtocolVersion;
++	};
++	const auto set_subscription = [&](const MetricsSubscription& next) {
++		const bool changed = next.keys != subscription.keys;
++		subscription = next;
++		if (changed && m_metrics.subscribed) m_metrics.subscribed(subscription.keys);
++	};
++	const auto disconnect = [&] {
++		if (socket >= 0) close(socket);
++		socket = -1;
++		welcomed = hello_sent = false;
++		offered_epoch = 0;
++		last_apply_id = 0;
++		m_attached = false;
++		{
++			std::lock_guard lock(m_mutex);
++			m_generation = 0;
++			ClearPool();
++		}
++		set_subscription({});
++		metrics_pacer.Reset();
++		retry = std::chrono::steady_clock::now() + std::chrono::seconds(1);
++	};
++
++	while (!stop.stop_requested()) {
++		if (m_reconnect.exchange(false)) disconnect();
++		const auto now = std::chrono::steady_clock::now();
++		if (socket < 0) {
++			if (now >= retry) {
++				socket = Connect(m_path);
++				retry = now + std::chrono::seconds(1);
++			}
++			if (socket < 0) {
++				std::this_thread::sleep_for(std::chrono::milliseconds(10));
++				continue;
++			}
++		}
++		pollfd poller {socket, POLLIN, 0};
++		if ((poll(&poller, 1, 2) < 0 && errno != EINTR) ||
++		    (poller.revents & (POLLERR | POLLHUP | POLLNVAL))) {
++			disconnect();
++			continue;
++		}
++		bool invalid = false;
++		for (size_t count = 0; count < 32; count++) {
++			Packet packet;
++			const auto result = ReceivePacket(socket, packet);
++			if (result == ReceiveResult::Again) break;
++			const auto& p = packet.json;
++			const auto type_field = p.find("type");
++			if (result != ReceiveResult::Packet || type_field == p.end() || !type_field->is_string()) {
++				invalid = true;
++				break;
++			}
++			const auto& type = type_field->get_ref<const std::string&>();
++			if (type == "settings.apply" && !m_attached) {
++				if (!logged_early_apply) {
++					std::fprintf(stderr, "AGS session: ignoring settings.apply before accepted\n");
++					logged_early_apply = true;
++				}
++				continue;
++			}
++			if (!welcomed) {
++				if (type != "welcome" || !version_matches(p)) {
++					invalid = true;
++					break;
++				}
++				welcomed = true;
++				m_generation = ++generation;
++				continue;
++			}
++			if (type == "accepted") {
++				const bool correct_mode =
++				    offered_epoch == 0
++				        ? p.contains("frames") && p["frames"] == false
++				        : p.contains("epoch") && p["epoch"].is_number_unsigned() &&
++				              p["epoch"] == offered_epoch && p.contains("transport") &&
++				              p["transport"] == "vulkan-buffer-fd";
++				if (!hello_sent || m_attached || !version_matches(p) || !correct_mode) {
++					invalid = true;
++					break;
++				}
++				m_attached = true;
++			} else if (type == "refused") {
++				if (!hello_sent || offered_epoch == 0 || m_attached || !version_matches(p)) {
++					invalid = true;
++					break;
++				}
++				if ((!p.contains("reason") || p["reason"] != "local") && !logged_refusal) {
++					std::fprintf(stderr, "AGS session: frame hello refused, falling back to frame-less\n");
++					logged_refusal = true;
++				}
++				SetMetricsOnly(true);
++				offered_epoch = 0;
++				hello_sent = false;
++			} else if (type == "error" || type == "welcome") {
++				invalid = true;
++				break;
++			} else if (type == "metrics.subscribe") {
++				MetricsSubscription next;
++				if (ParseMetricsSubscribe(p, next)) {
++					set_subscription(next);
++				} else if (unknown_types.First("metrics.subscribe(malformed)")) {
++					std::fprintf(stderr, "AGS session: ignoring malformed metrics.subscribe\n");
++				}
++			} else if (type == "settings.apply") {
++				const auto id = p.find("id");
++				if (id == p.end() || !id->is_number_unsigned() || id->get<uint64_t>() <= last_apply_id) {
++					if (!logged_bad_apply_id) {
++						std::fprintf(stderr, "AGS session: ignoring invalid settings.apply id\n");
++						logged_bad_apply_id = true;
++					}
++					continue;
++				}
++				last_apply_id = id->get<uint64_t>();
++				if (!m_settings) continue;
++				const auto old_fps = offered_epoch == 0 ? ReadLiveOutput().fps : 0;
++				const auto reply = m_settings(p);
++				if (!SendPacket(socket, reply)) {
++					invalid = true;
++					break;
++				}
++				const auto applied = reply.find("applied");
++				if (offered_epoch == 0 && applied != reply.end() && applied->is_object() &&
++				    (applied->contains("display.resolution") ||
++				     (applied->contains("display.fps") && (*applied)["display.fps"] != old_fps))) {
++					const auto output = ReadLiveOutput();
++					if (!SendPacket(socket, {{"type", "output"},
++					                         {"width", std::clamp(output.width, 2u, 8192u)},
++					                         {"height", std::clamp(output.height, 2u, 8192u)},
++					                         {"fps", std::clamp(output.fps, 1u, 360u)}})) {
++						invalid = true;
++						break;
++					}
++				}
++			} else if (type == "session.state") {
++				const auto state = p.find("state");
++				if (state != p.end() && (*state == "paused" || *state == "resumed"))
++					std::fprintf(stderr, "AGS session: %s\n", state->get_ref<const std::string&>().c_str());
++			} else if (type == "release" && offered_epoch != 0) {
++				if (!m_attached || !p.contains("epoch") || !p.contains("slot") ||
++				    !p.contains("sequence") || !p["epoch"].is_number_unsigned() ||
++				    !p["slot"].is_number_unsigned() || !p["sequence"].is_number_unsigned() ||
++				    p["slot"].get<uint64_t>() >= SlotCount) {
++					invalid = true;
++					break;
++				}
++				std::lock_guard lock(m_mutex);
++				if (m_ring) m_ring->Release(p["epoch"], p["slot"], p["sequence"]);
++			} else if (!IsKnownPacketType(type) && unknown_types.First(type)) {
++				const bool printable = std::all_of(type.begin(), type.end(),
++				    [](unsigned char c) { return c >= 0x20 && c < 0x7f; });
++				std::fprintf(stderr, "AGS session: ignoring unknown packet type \"%.40s\"\n",
++				             printable ? type.c_str() : "<non-printable>");
++			}
++		}
++		if (invalid) {
++			disconnect();
++			continue;
++		}
++		if (welcomed && !hello_sent) {
++			std::lock_guard lock(m_mutex);
++			if (MetricsOnly()) {
++				hello_sent = SendPacket(socket, {{"type", "hello"}, {"version", ProtocolVersion},
++				                                 {"frames", false}});
++			} else if (m_ring && m_pool_generation == generation) {
++				const auto& d = m_descriptor;
++				const Json hello = {{"type", "hello"},
++				                    {"version", ProtocolVersion},
++				                    {"frames", true},
++				                    {"epoch", d.epoch},
++				                    {"width", d.width},
++				                    {"height", d.height},
++				                    {"stride", d.stride},
++				                    {"fourcc", "BGRA"},
++				                    {"gpu_uuid", d.gpu_uuid},
++				                    {"slots", SlotCount},
++				                    {"allocation_sizes", d.allocation_sizes},
++				                    {"offset", 0},
++				                    {"dedicated", true},
++				                    {"transport", "vulkan-buffer-fd"}};
++				if (SendPacket(socket, hello, &m_fds)) {
++					hello_sent = true;
++					offered_epoch = d.epoch;
++				}
++			}
++		}
++		if (m_attached && offered_epoch != 0) {
++			std::lock_guard lock(m_mutex);
++			for (size_t count = 0; count < SlotCount; count++) {
++				Mailbox* next = nullptr;
++				for (auto& pending: m_pending) {
++					if (pending.published.load(std::memory_order_acquire) &&
++					    (next == nullptr ||
++					     pending.frame.lease.sequence < next->frame.lease.sequence))
++						next = &pending;
++				}
++				if (next == nullptr || !m_complete || !m_complete(next->frame.tick)) break;
++				const auto& pending = next->frame;
++				Json        frame   = {{"type", "frame"},
++				                       {"epoch", pending.lease.epoch},
++				                       {"slot", pending.lease.slot},
++				                       {"sequence", pending.lease.sequence},
++				                       {"pts_ns", pending.pts_ns}};
++				if (!SendPacket(socket, frame)) break;
++				next->published.store(false, std::memory_order_release);
++			}
++		}
++		if (m_attached && subscription.keys != 0 && m_metrics.sample &&
++		    metrics_pacer.Due(now, subscription.interval_ms)) {
++			metrics_pacer.Attempted(now);
++			if (const auto message = BuildMetricsMessage(
++			        subscription.keys, m_metrics.sample(subscription.keys), MonotonicMs()))
++				SendPacket(socket, *message);
++		}
++	}
++	disconnect();
++#else
++	(void)stop;
++#endif
++}
++} // namespace Streaming
+
+=== engines/kyty/src/streaming/transport.h
+@@ new line 1
++#pragma once
++#include "streaming/metrics.h"
++#include "streaming/protocol.h"
++
++#include <atomic>
++#include <functional>
++#include <memory>
++#include <mutex>
++#include <thread>
++#include <vector>
++namespace Streaming {
++struct Packet {
++	Json             json;
++	std::vector<int> fds;
++	Packet() = default;
++	~Packet();
++	Packet(const Packet&)            = delete;
++	Packet& operator=(const Packet&) = delete;
++};
++enum class ReceiveResult { Packet, Again, Closed, Invalid };
++ReceiveResult ReceivePacket(int socket, Packet& packet, size_t expected_fds = 0);
++bool          SameUser(int socket);
++bool          SendPacket(int socket, const Json& packet, const std::array<int, 9>* fds = nullptr);
++// Task 4 supplies the current display state from Live().
++struct OutputState {
++	uint32_t width, height, fps;
++};
++OutputState ReadLiveOutput();
++
++struct PendingFrame {
++	Lease    lease;
++	uint64_t tick, pts_ns;
++};
++class Transport {
++public:
++	using Completion   = std::function<bool(uint64_t)>;
++	using SettingsHook = std::function<Json(const Json& apply)>;
++
++	Transport(std::string path, Completion complete, MetricsHooks metrics, SettingsHook settings,
++	          bool metrics_only);
++	~Transport();
++	uint64_t Generation() const { return m_generation.load(std::memory_order_acquire); }
++	bool     Attached() const { return m_attached.load(std::memory_order_acquire); }
++	void SetPool(PoolDescriptor descriptor, std::array<int, 9> fds, std::shared_ptr<LeaseRing> ring,
++	             uint64_t generation);
++	void Publish(PendingFrame frame);
++	void Reconnect();
++	// A frame-less producer can still be attached for metrics and settings.
++	void     SetMetricsOnly(bool metrics_only = true);
++	bool     MetricsOnly() const { return m_metrics_only.load(std::memory_order_acquire); }
++	uint64_t Dropped() const { return m_dropped.load(std::memory_order_relaxed); }
++	void     Drop() { m_dropped.fetch_add(1, std::memory_order_relaxed); }
++
++private:
++	void                       Run(std::stop_token stop);
++	void                       ClearPool(); // Caller holds m_mutex.
++	std::string                m_path;
++	MetricsHooks               m_metrics;
++	Completion                 m_complete;
++	SettingsHook               m_settings;
++	std::mutex                 m_mutex;
++	PoolDescriptor             m_descriptor;
++	std::array<int, 9>         m_fds {};
++	std::shared_ptr<LeaseRing> m_ring;
++	struct Mailbox {
++		std::atomic<bool> published {false};
++		PendingFrame      frame {};
++	};
++	// A lease owns this slot until the worker has sent FRAME and processed its ACK.
++	// Present publishes without acquiring the socket worker's mutex.
++	std::array<Mailbox, SlotCount> m_pending;
++	uint64_t                       m_pool_generation = 0;
++	std::atomic<uint64_t>          m_generation {0}, m_dropped {0}, m_active_epoch {0};
++	std::atomic<bool>              m_attached {false}, m_reconnect {false}, m_metrics_only {false};
++	std::jthread                   m_worker;
++};
++} // namespace Streaming
+
+=== engines/kyty/tests/SessionSocketTests.cpp
+@@ new line 1
++#include "streaming/sessionEnv.h"
++#include "streaming/transport.h"
++
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <fcntl.h>
++#include <poll.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++namespace Streaming {
++// Task 4 replaces this fixture state with Live().
++static OutputState& Live() {
++	static OutputState state {};
++	return state;
++}
++
++OutputState ReadLiveOutput() {
++	return Live();
++}
++} // namespace Streaming
++
++namespace {
++using namespace Streaming;
++using namespace std::chrono_literals;
++
++void Check(bool ok, const char* message) {
++	if (!ok) {
++		std::fprintf(stderr, "SessionSocketTests: failed: %s\n", message);
++		std::abort();
++	}
++}
++
++int Poll(int fd, int timeout = 2000) {
++	pollfd event {fd, POLLIN, 0};
++	Check(poll(&event, 1, timeout) >= 0, "poll socket");
++	return event.revents;
++}
++
++class Host {
++public:
++	Host() {
++		char dir[] = "/tmp/kyty-session-XXXXXX";
++		Check(mkdtemp(dir) != nullptr, "make private socket directory");
++		m_dir = dir;
++		path = m_dir + "/socket";
++		m_listener = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
++		Check(m_listener >= 0, "create seqpacket listener");
++		sockaddr_un addr {};
++		addr.sun_family = AF_UNIX;
++		std::memcpy(addr.sun_path, path.c_str(), path.size() + 1);
++		Check(bind(m_listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0, "bind socket");
++		Check(chmod(path.c_str(), 0600) == 0 && listen(m_listener, 1) == 0, "listen on private socket");
++	}
++
++	~Host() {
++		if (peer >= 0) close(peer);
++		close(m_listener);
++		unlink(path.c_str());
++		rmdir(m_dir.c_str());
++	}
++
++	void Welcome(int version = 2) {
++		Check(Poll(m_listener) & POLLIN, "producer connects");
++		peer = accept4(m_listener, nullptr, nullptr, SOCK_CLOEXEC);
++		Check(peer >= 0 && SameUser(peer), "accept same-user producer");
++		Send({{"type", "welcome"}, {"version", version}});
++	}
++
++	void Send(const Json& json) const {
++		Check(SendPacket(peer, json), "send host packet");
++	}
++
++	void Receive(Packet& packet, size_t fds = 0) const {
++		Check(Poll(peer) & POLLIN, "producer packet is readable");
++		Check(ReceivePacket(peer, packet, fds) == ReceiveResult::Packet, "receive producer packet");
++	}
++
++	void Expect(const Json& expected) const {
++		Packet packet;
++		Receive(packet);
++		Check(packet.json == expected, "producer packet matches");
++	}
++
++	void ExpectFramelessHello() const {
++		Expect({{"type", "hello"}, {"version", 2}, {"frames", false}});
++	}
++
++	void AcceptFrameless(const Transport& transport) const {
++		Send({{"type", "accepted"}, {"version", 2}, {"frames", false}});
++		const auto until = std::chrono::steady_clock::now() + 2s;
++		while (!transport.Attached() && std::chrono::steady_clock::now() < until)
++			std::this_thread::sleep_for(1ms);
++		Check(transport.Attached(), "producer attached after accepted");
++	}
++
++	void ConnectFrameless(const Transport& transport) {
++		Welcome();
++		ExpectFramelessHello();
++		Check(!transport.Attached(), "hello alone does not attach");
++		AcceptFrameless(transport);
++	}
++
++	void ExpectClosed() const {
++		Check(Poll(peer) & (POLLIN | POLLHUP), "rejected connection closes");
++		Packet packet;
++		Check(ReceivePacket(peer, packet) == ReceiveResult::Closed, "no reply before close");
++	}
++
++	std::string path;
++	int peer = -1;
++
++private:
++	std::string m_dir;
++	int m_listener = -1;
++};
++
++Json Apply(uint64_t id, Json values) {
++	return {{"type", "settings.apply"}, {"id", id}, {"values", std::move(values)}};
++}
++
++Json Applied(uint64_t id, Json applied = Json::object(), Json values = Json::object()) {
++	return {{"type", "settings.applied"}, {"id", id}, {"applied", std::move(applied)},
++	        {"values", std::move(values)}, {"refused", Json::object()}};
++}
++
++void TestEnvironment() {
++	Check(SelectSessionSocket("/s", "2").path != nullptr, "protocol 2 selects the socket");
++	Check(SelectSessionSocket("/s", "1").path == nullptr, "protocol 1 is ignored");
++	Check(SelectSessionSocket("/s", nullptr).path == nullptr, "missing protocol is ignored");
++	Check(SelectSessionSocket("", "2").path == nullptr, "empty socket is unset");
++	Check(!FramesRequested("0") && FramesRequested(nullptr) && FramesRequested("1"),
++	      "KYTY_STREAM_FRAMES");
++}
++
++void TestMetricsOnlyHandshake() {
++	Host host;
++	Transport transport(host.path, {}, {}, {}, true);
++	host.ConnectFrameless(transport);
++}
++
++void TestWelcomeVersion1Rejected() {
++	Host host;
++	Transport transport(host.path, {}, {}, {}, true);
++	host.Welcome(1);
++	host.ExpectClosed();
++}
++
++void TestAcceptedVersion1Rejected() {
++	Host host;
++	Transport transport(host.path, {}, {}, {}, true);
++	host.Welcome();
++	host.ExpectFramelessHello();
++	host.Send({{"type", "accepted"}, {"version", 1}, {"frames", false}});
++	host.ExpectClosed();
++	Check(!transport.Attached(), "accepted version 1 does not attach");
++}
++
++void TestSettingsApplyRoundTrip() {
++	Host host;
++	const auto request = Apply(7, {{"controller.haptics", 300}});
++	const auto reply = Applied(7, Json::object(), {{"controller.haptics", 300}});
++	Transport::SettingsHook settings = [&](const Json& apply) {
++		Check(apply == request, "settings hook receives whole request");
++		return reply;
++	};
++	Transport transport(host.path, {}, {}, settings, true);
++	host.ConnectFrameless(transport);
++	host.Send(request);
++	host.Expect(reply);
++}
++
++void TestSettingsApplyBeforeAccepted() {
++	Host host;
++	Transport transport(host.path, {}, {}, [](const Json& apply) {
++		Check(apply["id"] == 8, "no settings hook call before accepted");
++		return Applied(8);
++	}, true);
++	host.Welcome();
++	host.ExpectFramelessHello();
++	host.Send(Apply(7, {{"controller.haptics", 300}}));
++	Check(Poll(host.peer, 50) == 0, "no reply or disconnect before accepted");
++	host.AcceptFrameless(transport);
++	host.Send(Apply(8, {{"controller.haptics", 300}}));
++	host.Expect(Applied(8));
++}
++
++void TestOutputAfterResolution() {
++	Host host;
++	Live() = {1920, 1080, 30};
++	Transport transport(host.path, {}, {}, [](const Json& apply) {
++		const auto& values = apply["values"];
++		if (values.contains("display.resolution")) Live() = {1280, 720, 30};
++		if (values.contains("display.fps")) Live().fps = values["display.fps"];
++		return Applied(apply["id"], values);
++	}, true);
++	host.ConnectFrameless(transport);
++	host.Send(Apply(7, {{"display.resolution", "1280x720"}}));
++	host.Expect(Applied(7, {{"display.resolution", "1280x720"}}));
++	host.Expect({{"type", "output"}, {"width", 1280}, {"height", 720}, {"fps", 30}});
++	host.Send(Apply(8, {{"display.fps", 30}}));
++	host.Expect(Applied(8, {{"display.fps", 30}}));
++	Check(Poll(host.peer, 50) == 0, "unchanged fps has no output");
++	host.Send(Apply(9, {{"display.fps", 60}}));
++	host.Expect(Applied(9, {{"display.fps", 60}}));
++	host.Expect({{"type", "output"}, {"width", 1280}, {"height", 720}, {"fps", 60}});
++}
++
++void TestLocalRefusedFallsBackToFrameless() {
++	Host host;
++	const int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
++	Check(fd >= 0, "open test descriptor");
++	Transport transport(host.path, {}, {}, {}, false);
++	host.Welcome();
++	const auto until = std::chrono::steady_clock::now() + 2s;
++	while (transport.Generation() == 0 && std::chrono::steady_clock::now() < until)
++		std::this_thread::sleep_for(1ms);
++	const auto generation = transport.Generation();
++	Check(generation != 0, "welcome sets generation");
++	const PoolDescriptor descriptor {3, 1280, 720, 8192,
++	                                 {5898240, 5898240, 5898240},
++	                                 "0123456789abcdef0123456789abcdef"};
++	std::array<int, 9> fds;
++	fds.fill(fd);
++	const auto ring = std::make_shared<LeaseRing>(descriptor.epoch);
++	transport.SetPool(descriptor, fds, ring, generation);
++
++	Packet hello;
++	host.Receive(hello, 9);
++	PoolDescriptor parsed;
++	Check(ValidateHello(hello.json, hello.fds.size(), parsed), "valid v2 pool hello");
++	Check(hello.json["frames"] == true && parsed.epoch == 3, "pool hello carries frames and epoch");
++	host.Send({{"type", "refused"}, {"version", 2}, {"reason", "local"}});
++	host.ExpectFramelessHello();
++	host.AcceptFrameless(transport);
++	Check(!ring->TryAcquire(), "refused pool leases are retired");
++	close(fd);
++}
++
++void TestUnknownAndSessionState() {
++	Host host;
++	Transport transport(host.path, {}, {}, [](const Json& apply) { return Applied(apply["id"]); }, true);
++	host.ConnectFrameless(transport);
++	host.Send({{"type", "session.state"}, {"state", "paused"}});
++	host.Send({{"type", "x.y"}});
++	host.Send(Apply(7, Json::object()));
++	host.Expect(Applied(7));
++}
++
++void TestMetrics() {
++	MetricsSubscription subscription;
++	const Json first = {{"type", "metrics.subscribe"}, {"keys", {"game_fps", "nope"}},
++	                    {"interval_ms", 10}};
++	const Json second = {{"type", "metrics.subscribe"}, {"keys", {"frame_time_ms"}},
++	                     {"interval_ms", 1000}};
++	Check(ParseMetricsSubscribe(first, subscription), "parse metrics subscription");
++	Check(subscription.interval_ms == 1000, "metrics interval clamps to 1000");
++	MetricValues values;
++	values.Set(Metric::GameFps, 50);
++	values.Set(Metric::FrameTimeMs, 20);
++	const Json fps = {{"type", "metrics"}, {"t_ms", 123}, {"values", {{"game_fps", 50}}}};
++	Check(BuildMetricsMessage(subscription.keys, values, 123) == fps, "only game_fps subscribed");
++	Check(ParseMetricsSubscribe(second, subscription), "replace metrics subscription");
++	const Json frame_time = {{"type", "metrics"}, {"t_ms", 124}, {"values", {{"frame_time_ms", 20}}}};
++	Check(BuildMetricsMessage(subscription.keys, values, 124) == frame_time,
++	      "only frame_time_ms subscribed");
++
++	Host host;
++	Transport transport(host.path, {}, {{}, [values](MetricMask) { return values; }}, {}, true);
++	host.ConnectFrameless(transport);
++	host.Send(first);
++	{
++		Packet packet;
++		host.Receive(packet);
++		Check(packet.json["type"] == "metrics" && packet.json["values"] == fps["values"],
++		      "first subscription applies on the connection");
++	}
++	host.Send(second);
++	Packet packet;
++	host.Receive(packet);
++	Check(packet.json["type"] == "metrics" && packet.json["values"] == frame_time["values"],
++	      "second subscription replaces the first on the connection");
++}
++} // namespace
++
++int main() {
++	TestEnvironment();
++	TestMetricsOnlyHandshake();
++	TestWelcomeVersion1Rejected();
++	TestAcceptedVersion1Rejected();
++	TestSettingsApplyRoundTrip();
++	TestSettingsApplyBeforeAccepted();
++	TestOutputAfterResolution();
++	TestLocalRefusedFallsBackToFrameless();
++	TestUnknownAndSessionState();
++	TestMetrics();
++	std::puts("session socket tests: ok");
++}

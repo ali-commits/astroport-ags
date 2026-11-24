@@ -1,0 +1,30 @@
+From: Ali <newaaa4@gmail.com>
+Date: Sun, 15 Nov 2026 16:59:59 +0800
+Subject: [PATCH] feat(audioout2): APS5_PAD_VIBRATION_DUMP writes the mixed
+ haptic channels to a file
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+ .../prx/libSceAudioOut/src/AudioOut2Context.cpp  | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+
+=== core/libs/prx/libSceAudioOut/src/AudioOut2Context.cpp
+@@ new line 6
++#include <cstdio>
+@@ new line 293
++static void DumpVibration(const AudioOut2Context& context, const float* pad) {
++    static std::FILE* file = [] {
++        const char* path = std::getenv("APS5_PAD_VIBRATION_DUMP");
++        return path != nullptr && path[0] != '\0' ? std::fopen(path, "wb") : nullptr;
++    }();
++    if (file == nullptr) return;
++    for (std::uint32_t frame = 0; frame < context.grain; ++frame) {
++        const float* src = pad + static_cast<std::size_t>(frame) * AUDIO_OUT2_PAD_CHANNELS;
++        const float pair[2] = {src[AUDIO_OUT2_PAD_VIBRATION_LEFT], src[AUDIO_OUT2_PAD_VIBRATION_RIGHT]};
++        std::fwrite(pair, sizeof(float), 2, file);
++    }
++    std::fflush(file);
++}
++
+@@ new line 316
++    if (pad != nullptr) DumpVibration(context, pad);

@@ -1,0 +1,409 @@
+From: Claude <noreply@anthropic.com>
+Date: Sun, 15 Nov 2026 13:36:56 +0800
+Subject: [PATCH] AstroHybrid on Linux: libkyty_gpu.so bridge, .prx forwarders,
+ Linux fault and memory paths
+
+- kytyGpuBridge: dlopen/dlsym host, dladdr guest-code check, System V resolver argument,
+  hidden slots, NID export aliases
+- tools/hybrid/build_kyty_gpu_linux.py: link libkyty_gpu.so from a -fPIC emulator build
+  (version script: bridge names and thunks only)
+- tools/hybrid/build_linux_shims.py: libSceAgc/AgcDriver/VideoOut forwarders to the thunks
+- hostException: Linux first-chance SIGSEGV/SIGBUS handler chaining to the host's
+- memoryAddressSpace: adopt the host's donated ranges on Linux
+- dlss.cpp, frameGen.cpp, videoOut.cpp: Windows-only parts guarded, Linux game-step check
+- window.cpp: KYTY_WAYLAND_NATIVE (1:1 Wayland surface under desktop scaling)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+ src/common/hostException.cpp                |  57 +++++++++
+ src/graphics/host_gpu/renderer/dlss.cpp     |   6 +
+ src/graphics/host_gpu/renderer/frameGen.cpp |   2 +
+ src/graphics/presentation/videoOut.cpp      |  19 +++
+ src/graphics/presentation/window/window.cpp |   6 +
+ src/hybrid/kytyGpuBridge.cpp                |  50 +++++++-
+ src/kernel/memoryAddressSpace.inc           |  17 +++
+ tools/hybrid/build_kyty_gpu_linux.py        | 122 ++++++++++++++++++++
+ tools/hybrid/build_linux_shims.py           |  63 ++++++++++
+ 9 files changed, 341 insertions(+), 1 deletion(-)
+ create mode 100644 tools/hybrid/build_kyty_gpu_linux.py
+ create mode 100644 tools/hybrid/build_linux_shims.py
+
+
+=== src/common/hostException.cpp
+@@ new line 320
++static std::atomic<Handler> g_first_handler {nullptr};
++static struct sigaction     g_first_previous_segv {};
++static struct sigaction     g_first_previous_bus {};
++
++static void FirstSignalHandler(int signal_number, siginfo_t* signal_info, void* native_context) {
++	auto* context = static_cast<ucontext_t*>(native_context);
++	auto* gregs   = context->uc_mcontext.gregs;
++	ExceptionInfo info {};
++	info.type              = ExceptionType::AccessViolation;
++	info.exception_address = static_cast<uint64_t>(gregs[REG_RIP]);
++	info.native_code       = static_cast<uint32_t>(signal_number);
++	info.native_context    = context;
++	const auto error_code  = static_cast<uint64_t>(gregs[REG_ERR]);
++	info.access_violation_type = (error_code & PAGE_FAULT_ERROR_INSTRUCTION) != 0 ? AccessViolationType::Execute
++	                             : (error_code & PAGE_FAULT_ERROR_WRITE) != 0     ? AccessViolationType::Write
++	                                                                              : AccessViolationType::Read;
++	info.access_violation_vaddr = reinterpret_cast<uint64_t>(signal_info->si_addr);
++	info.rsp                    = static_cast<uint64_t>(gregs[REG_RSP]);
++	const auto handler          = g_first_handler.load(std::memory_order_acquire);
++	if (handler != nullptr && handler(info)) {
++		return;
++	}
++	// Not Kyty's: the previous handler, as the host installed it.
++	const auto& previous = signal_number == SIGBUS ? g_first_previous_bus : g_first_previous_segv;
++	if ((previous.sa_flags & SA_SIGINFO) != 0 && previous.sa_sigaction != nullptr) {
++		previous.sa_sigaction(signal_number, signal_info, native_context);
++		return;
++	}
++	if (previous.sa_handler != SIG_DFL && previous.sa_handler != SIG_IGN && previous.sa_handler != nullptr) {
++		previous.sa_handler(signal_number);
++		return;
++	}
++	ChainToDefault(signal_number);
++}
++
+@@ new line 431
++#elif !defined(__APPLE__)
++	// Linux (AstroHybrid): a first-chance SIGSEGV/SIGBUS handler in front of the host's own (AnyPS5's
++	// guest write watch, its crash reporter): Kyty decides first, everything else goes to the handler
++	// that was installed before, as a Windows first vectored handler passes it on.
++	if (handler == nullptr) {
++		return false;
++	}
++	Handler expected = nullptr;
++	if (!g_first_handler.compare_exchange_strong(expected, handler, std::memory_order_acq_rel)) {
++		return expected == handler;
++	}
++	struct sigaction action {};
++	action.sa_sigaction = FirstSignalHandler;
++	sigemptyset(&action.sa_mask);
++	action.sa_flags = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
++	if (::sigaction(SIGSEGV, &action, &g_first_previous_segv) != 0 ||
++	    ::sigaction(SIGBUS, &action, &g_first_previous_bus) != 0) {
++		g_first_handler.store(nullptr, std::memory_order_release);
++		printf("sigaction(first) failed\n");
++		return false;
++	}
++	return true;
+
+=== src/graphics/host_gpu/renderer/dlss.cpp
+@@ new line 14
++#ifdef _WIN32
+@@ new line 22
++#endif
+@@ new line 99
++#ifndef _WIN32
++	std::printf("DLSS probe (%s): only on Windows\n", when);
++#else
+@@ new line 177
++#endif
+
+=== src/graphics/host_gpu/renderer/frameGen.cpp
+@@ new line 11
++#ifdef _WIN32
+@@ new line 19
++#endif
+
+=== src/graphics/presentation/videoOut.cpp
+@@ new line 952
++#ifdef _WIN32
++#else
++		// Linux: the 24-byte block must lie in one readable and writable mapping.
++		const auto writable = [](uint64_t a) {
++			FILE* maps = std::fopen("/proc/self/maps", "r");
++			if (maps == nullptr) return false;
++			unsigned long long lo = 0, hi = 0;
++			char perms[8] = {};
++			char line[512];
++			bool ok = false;
++			while (!ok && std::fgets(line, sizeof(line), maps) != nullptr) {
++				ok = std::sscanf(line, "%llx-%llx %7s", &lo, &hi, perms) == 3 && a >= lo && a + 24 <= hi &&
++				     perms[0] == 'r' && perms[1] == 'w';
++			}
++			std::fclose(maps);
++			return ok;
++		};
++		if (!writable(addr)) {
++#endif
+
+=== src/graphics/presentation/window/window.cpp
+@@ new line 848
++	} else if (const char* native = std::getenv("KYTY_WAYLAND_NATIVE");
++	           native != nullptr && std::strcmp(native, "1") == 0) {
++		// KYTY_WAYLAND_NATIVE=1: a Wayland window at the display's real resolution under desktop
++		// scaling (KDE at 150% otherwise gives a 4K screen a stretched 2560x1440 surface).
++		SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "wayland,x11");
++		SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY, "1");
+
+=== src/hybrid/kytyGpuBridge.cpp
+@@ new line 54
++#else
++#include <dlfcn.h>
++#include <sys/auxv.h>
+@@ new line 108
++#if !defined(_WIN32)
++__attribute__((visibility("hidden")))
++#endif
+@@ new line 128
++#if !defined(_WIN32)
++__attribute__((visibility("hidden")))
++#endif
+@@ new line 155
++#if defined(_WIN32)
++#else
++	                 "movl %r11d, %edi\n\t"
++#endif
+@@ new line 189
++#if !defined(_WIN32)
++// Linux: each thunk is also exported under its NID, as kyty_gpu.def names them for the DLL.
++#define KYTY_GPU_NID(index, nid, library, function, binding) \
++	__asm__(".globl \"" nid "\"\n\t.type \"" nid "\", @function\n\t.set \"" nid "\", kyty_gpu_nid_" #index "\n\t");
++#include "hybrid/kytyGpuNids.inc"
++#undef KYTY_GPU_NID
++#endif
++
+@@ new line 578
++#if defined(_WIN32)
++#else
++		static void* const game = [] {
++			Dl_info self {};
++			return dladdr(reinterpret_cast<void*>(getauxval(AT_PHDR)), &self) != 0 ? self.dli_fbase : nullptr;
++		}();
++		Dl_info where {};
++		guest_code = game != nullptr && dladdr(reinterpret_cast<const void*>(info.exception_address), &where) != 0 && where.dli_fbase == game;
++#endif
+@@ new line 847
++#if defined(_WIN32)
++#else
++	// Linux: the host .prx is normally loaded already (RTLD_NOLOAD finds it by its path or soname).
++	const char* path   = name != nullptr ? name : KYTY_GPU_HOST_MODULE_DEFAULT;
++	void*       module = dlopen(path, RTLD_NOW | RTLD_NOLOAD);
++	if (module == nullptr) {
++		module = dlopen(path, RTLD_NOW);
++	}
++	if (module == nullptr) {
++		Log(2, dlerror());
++		return nullptr;
++	}
++	const auto entry = reinterpret_cast<KytyGpuHostEntryFn>(dlsym(module, KYTY_GPU_HOST_ENTRY));
++#endif
+@@ new line 891
++extern "C" __attribute__((used))
++#if !defined(_WIN32)
++__attribute__((visibility("hidden")))
++#endif
++void* KytyGpuLazyResolve(uint32_t index) {
+
+=== src/kernel/memoryAddressSpace.inc
+@@ new line 1932
++		// AstroHybrid on Linux: the host (AnyPS5) donated these ranges to Kyty (AdoptHostPlaceholders).
++		// AnyPS5 keeps its PROT_NONE arena mapping over them and only records the donation, so Kyty
++		// takes them over in place, as the Windows build adopts the host's placeholders, and reserves
++		// nothing else: the rest of the PS5 regions is the host's.
++		if (!g_host_placeholders.empty()) {
++			for (const auto& [start, size]: g_host_placeholders) {
++				void* ptr = mmap(reinterpret_cast<void*>(start), size, PROT_NONE,
++				                 MAP_PRIVATE | MAP_ANON | MAP_NORESERVE | MAP_FIXED, -1, 0);
++				if (ptr == MAP_FAILED || reinterpret_cast<uint64_t>(ptr) != start) {
++					EXIT("failed to adopt the host's guest range 0x%016" PRIx64 ", size 0x%016" PRIx64 "\n", start, size);
++				}
++				AddFreeUnlocked(start, size);
++				m_owned.emplace_back(start, size);
++				m_adopted.emplace_back(start, size);
++			}
++			return;
++		}
+
+=== tools/hybrid/build_kyty_gpu_linux.py
+@@ new line 1
++"""Build libkyty_gpu.so from an existing Linux kyty_emulator build (the Linux counterpart of
++build_kyty_gpu.py).
++
++The emulator must be built with position-independent code (-DCMAKE_POSITION_INDEPENDENT_CODE=ON,
++-fPIC). Takes the compile command of one emulator source and the final link command from
++`ninja -t commands`, compiles src/hybrid/kytyGpuBridge.cpp with the same flags, and links the
++emulator's objects (minus main.cpp.o) with it into <out>/libkyty_gpu.so. Only KytyGpuGetApi,
++KytyGpuQueuePadAudio and the NID names in src/hybrid/kyty_gpu.def are exported (version script),
++so the many libraries Kyty links statically (SDL3, ...) stay private to it: AnyPS5 loads the
++library with RTLD_GLOBAL next to its own SDL2.
++
++Usage: python3 -I tools/hybrid/build_kyty_gpu_linux.py <kyty build dir> <out dir>
++"""
++
++import pathlib
++import re
++import shlex
++import subprocess
++import sys
++
++ROOT = pathlib.Path(__file__).resolve().parents[2]
++
++
++def compile_command(build, source):
++    """The emulator's compile command for `source` (compile_commands.json; configure with
++    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON)."""
++    import json
++    for entry in json.loads((build / "compile_commands.json").read_text()):
++        if entry["file"].endswith(source) and "kyty_emulator.dir" in entry.get("output", entry["command"]):
++            return shlex.split(entry["command"])
++    sys.exit(f"compile_commands.json has no kyty_emulator entry for {source}")
++
++
++def link_block(build):
++    """Objects and variables of the kyty_emulator link (build.ninja; the .rsp file is temporary)."""
++    text = (build / "build.ninja").read_text(encoding="utf-8", errors="replace")
++    start = text.find("build kyty_emulator:")
++    if start < 0:
++        sys.exit("build.ninja has no 'build kyty_emulator:'")
++    block = text[start:text.find("\n\n", start)]
++    lines = block.splitlines()
++    inputs = lines[0].split(":", 1)[1].split("|")[0].split()[1:]  # drop the rule name
++    variables = {}
++    for line in lines[1:]:
++        match = re.match(r"\s+(\w+) = (.*)", line)
++        if match:
++            variables[match.group(1)] = match.group(2)
++    objects = [i for i in inputs if i.endswith(".o")]
++    return objects, variables
++
++
++def exported_names():
++    names = []
++    for line in (ROOT / "src/hybrid/kyty_gpu.def").read_text().splitlines():
++        line = line.strip()
++        if not line or line in ("EXPORTS",) or line.startswith("LIBRARY"):
++            continue
++        match = re.match(r'"([^"]+)"=', line)
++        names.append(match.group(1) if match else line.split("=")[0])
++    return names
++
++
++def main():
++    if len(sys.argv) != 3:
++        sys.exit(__doc__)
++    build = pathlib.Path(sys.argv[1]).resolve()
++    out = pathlib.Path(sys.argv[2]).resolve()
++    out.mkdir(parents=True, exist_ok=True)
++    compile_cmd = compile_command(build, "src/libs/agc.cpp")
++    objects, link_vars = link_block(build)
++
++    # The bridge, with the emulator's own compile flags.
++    bridge_obj = out / "kytyGpuBridge.cpp.o"
++    cmd = []
++    skip = False
++    for arg in compile_cmd:
++        if skip:
++            skip = False
++            continue
++        if arg in ("-o", "-MF", "-MT", "-c"):
++            skip = True
++            continue
++        if arg in ("-MD", "-MMD", "-fPIE", "-fpie"):
++            continue
++        cmd.append(arg)
++    cmd += ["-c", str(ROOT / "src/hybrid/kytyGpuBridge.cpp"), "-o", str(bridge_obj)]
++    print("compile: src/hybrid/kytyGpuBridge.cpp", flush=True)
++    subprocess.run(cmd, cwd=build, check=True)
++
++    # Version script: only the bridge's names are global.
++    script = out / "kyty_gpu.map"
++    names = exported_names()
++    script.write_text("{\n  global:\n" + "".join(f'    "{n}";\n' for n in names) +
++                      "    kyty_gpu_nid_*;\n  local: *;\n};\n")  # thunks: the Linux .prx forwarders jump to them
++
++    # The emulator's link, as a shared library without main.cpp.o. The -Map and dependency-file
++    # options are the executable's own and are left out.
++    objects = [o for o in objects if not o.endswith("/main.cpp.o")]
++    flags = [f for f in shlex.split(link_vars.get("FLAGS", "")) if f not in ("-pie", "-fPIE")]
++    raw = shlex.split(link_vars.get("LINK_FLAGS", ""))
++    link_flags = []
++    i = 0
++    while i < len(raw):
++        f = raw[i]
++        if f == "-Xlinker" and i + 1 < len(raw) and raw[i + 1].startswith("--dependency-file"):
++            i += 2  # "-Xlinker --dependency-file=..." pair
++            continue
++        if not f.startswith("-Wl,-Map=") and not f.startswith("--dependency-file"):
++            link_flags.append(f)
++        i += 1
++    libraries = shlex.split(link_vars.get("LINK_LIBRARIES", ""))
++    so = out / "libkyty_gpu.so"
++    cmd = [compile_cmd[0]] + flags + link_flags + ["-shared", "-o", str(so), str(bridge_obj)] + objects + \
++        libraries + [f"-Wl,--version-script={script}", "-Wl,-Bsymbolic", "-Wl,-soname,libkyty_gpu.so"]
++    print(f"link: {len(names)} exports, {len(objects)} emulator objects, {len(libraries)} libraries",
++          flush=True)
++    subprocess.run(cmd, cwd=build, check=True)
++    print(f"built {so}")
++
++
++if __name__ == "__main__":
++    main()
+
+=== tools/hybrid/build_linux_shims.py
+@@ new line 1
++"""Build the Linux forwarders for AstroHybrid: libSceAgc.prx, libSceAgcDriver.prx, libSceVideoOut.prx.
++
++The Linux counterpart of make_run_hybrid.py's build_shim (port repository): each library exports the
++NIDs src/hybrid/kytyGpuNids.inc lists for it, every one a single jump to libkyty_gpu.so's thunk
++for that NID (kyty_gpu_nid_<index>), and libSceAgcDriver.prx also the two AnyPS5-internal HDR calls,
++which go to libAstroHybridHost.prx. The game and AnyPS5's other libraries (libSceJobManager.prx,
++libSceSystemService.prx) then reach Kyty's renderer instead of AnyPS5's own. Because the forwarders
++link against libkyty_gpu.so, the dynamic loader loads it at startup.
++
++Usage: python3 -I tools/hybrid/build_linux_shims.py <run libs dir> <out dir>
++"""
++
++import pathlib
++import re
++import subprocess
++import sys
++
++ROOT = pathlib.Path(__file__).resolve().parents[2]
++SHIMS = ("libSceAgc.prx", "libSceAgcDriver.prx", "libSceVideoOut.prx")
++HOST_FORWARDS = {
++    "libSceAgcDriver.prx": {
++        "doCCHPPfxkI": "AstroHybridHostHdr_nid_no_patch",
++        "KMphJjTcNgk": "AstroHybridNoteReportedToneMapPeak_nid_no_patch",
++    },
++}
++
++
++def main():
++    if len(sys.argv) != 3:
++        sys.exit(__doc__)
++    libs = pathlib.Path(sys.argv[1]).resolve()
++    out = pathlib.Path(sys.argv[2]).resolve()
++    out.mkdir(parents=True, exist_ok=True)
++    rows = re.findall(r'KYTY_GPU_NID\((\d+), "([^"]+)", "([^"]+)"',
++                      (ROOT / "src/hybrid/kytyGpuNids.inc").read_text(encoding="utf-8"))
++    for library in SHIMS:
++        lines = ["\t.text"]
++        count = 0
++        for index, nid, owner in rows:
++            if owner != library:
++                continue
++            lines += [f'\t.globl "{nid}"', f'\t.type "{nid}", @function', f'"{nid}":',
++                      f"\tjmp kyty_gpu_nid_{index}@PLT", f'\t.size "{nid}", .-"{nid}"']
++            count += 1
++        for nid, target in HOST_FORWARDS.get(library, {}).items():
++            lines += [f'\t.globl "{nid}"', f'\t.type "{nid}", @function', f'"{nid}":',
++                      f"\tjmp {target}@PLT", f'\t.size "{nid}", .-"{nid}"']
++            count += 1
++        lines.append('\t.section .note.GNU-stack,"",@progbits')
++        source = out / (library + ".s")
++        source.write_text("\n".join(lines) + "\n", encoding="ascii")
++        target = out / library
++        cmd = ["clang", "-shared", "-nostdlib", "-o", str(target), str(source),
++               str(libs / "libkyty_gpu.so")]
++        if library in HOST_FORWARDS:
++            cmd.append(str(libs / "libAstroHybridHost.prx"))
++        cmd += [f"-Wl,-soname,{library}", "-Wl,-rpath,$ORIGIN", "-Wl,-z,now"]
++        subprocess.run(cmd, check=True)
++        print(f"{library}: {count} NIDs forwarded")
++
++
++if __name__ == "__main__":
++    main()

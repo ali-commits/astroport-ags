@@ -1,0 +1,239 @@
+From: Local Build <local@invalid>
+Date: Sat, 14 Nov 2026 21:32:07 +0000
+Subject: [PATCH] feat(hybrid): Bluetooth DualSense speaker/haptics bridge,
+ rumble scale, SaveDataTransferringMount
+
+ src/hybrid/kytyGpuBridge.cpp    | 105 ++++++++++++++++++++++++++++++++
+ src/hybrid/kyty_gpu.def         |   1 +
+ src/libs/dualSenseBluetooth.cpp |  43 +++++++++----
+ src/libs/dualSenseHaptics.cpp   |  34 ++++++++++-
+ src/libs/libSaveData.cpp        |  30 ++++++++-
+ tools/hybrid/build_kyty_gpu.py  |   6 +-
+ 6 files changed, 202 insertions(+), 17 deletions(-)
+
+
+=== src/hybrid/kytyGpuBridge.cpp
+@@ new line 32
++#include "libs/dualSenseHaptics.h"
+@@ new line 613
++		if (const char* rumble = std::getenv("ASTROHYBRID_RUMBLE_SCALE"); rumble != nullptr && rumble[0] != '\0') {
++			options.controller_vibration_intensity =
++			    static_cast<uint32_t>(std::clamp(std::atoi(rumble), 0, 100));
++		}
+@@ new line 716
++std::mutex                                     g_pad_audio_mutex;
++Libs::Controller::DualSenseHaptics::Stream*    g_pad_speaker_stream = nullptr;
++uint32_t                                       g_pad_speaker_freq   = 0;
++Libs::Controller::DualSenseHaptics::Stream*    g_pad_haptics_stream = nullptr;
++uint32_t                                       g_pad_haptics_freq   = 0;
++
++void ClosePadAudioStreams() {
++	std::lock_guard lock(g_pad_audio_mutex);
++	if (g_pad_speaker_stream != nullptr) {
++		Libs::Controller::DualSenseHaptics::Close(g_pad_speaker_stream);
++		g_pad_speaker_stream = nullptr;
++		g_pad_speaker_freq   = 0;
++	}
++	if (g_pad_haptics_stream != nullptr) {
++		Libs::Controller::DualSenseHaptics::Close(g_pad_haptics_stream);
++		g_pad_haptics_stream = nullptr;
++		g_pad_haptics_freq   = 0;
++	}
++}
++
++	ClosePadAudioStreams();
+@@ new line 879
++
++static int ResolvePadAudioController(bool prefer_ps5) {
++	int controller = Libs::Controller::GetActiveControllerId();
++	if (controller > 0) {
++		SDL_LockJoysticks();
++		auto* pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(controller));
++		const bool valid = pad != nullptr && (!prefer_ps5 || SDL_GetGamepadType(pad) == SDL_GAMEPAD_TYPE_PS5);
++		SDL_UnlockJoysticks();
++		if (valid) {
++			return controller;
++		}
++	}
++	if (!SDL_WasInit(SDL_INIT_GAMEPAD)) {
++		SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "1");
++		SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "1");
++		SDL_SetHint(SDL_HINT_JOYSTICK_ENHANCED_REPORTS, "1");
++		(void)SDL_InitSubSystem(SDL_INIT_GAMEPAD);
++	}
++	SDL_UpdateGamepads();
++	int   count    = 0;
++	auto* pads     = SDL_GetGamepads(&count);
++	int   chosen   = -1;
++	int   fallback = -1;
++	if (pads != nullptr) {
++		for (int i = 0; i < count; i++) {
++			const SDL_JoystickID id = pads[i];
++			if (SDL_GetGamepadFromID(id) == nullptr) {
++				(void)SDL_OpenGamepad(id);
++			}
++			if (fallback < 0) {
++				fallback = static_cast<int>(id);
++			}
++			if (SDL_GetGamepadTypeForID(id) == SDL_GAMEPAD_TYPE_PS5) {
++				chosen = static_cast<int>(id);
++				break;
++			}
++		}
++		SDL_free(pads);
++	}
++	if (chosen > 0) {
++		return chosen;
++	}
++	return controller > 0 ? controller : fallback;
++}
++
++extern "C" KYTY_GPU_EXPORT uint64_t KytyGpuQueuePadAudio(uint32_t freq, int is_speaker,
++                                                         const void* data, uint32_t frames,
++                                                         uint32_t channels, int is_float,
++                                                         float gain) {
++	if (data == nullptr || frames == 0 || channels == 0 || freq == 0) {
++		return 0;
++	}
++	std::lock_guard lock(g_pad_audio_mutex);
++	const int controller = ResolvePadAudioController(is_speaker != 0);
++	if (controller <= 0) {
++		return 0;
++	}
++	auto*& stream_slot = is_speaker != 0 ? g_pad_speaker_stream : g_pad_haptics_stream;
++	auto&  freq_slot   = is_speaker != 0 ? g_pad_speaker_freq : g_pad_haptics_freq;
++	if (stream_slot != nullptr && freq_slot != freq) {
++		Libs::Controller::DualSenseHaptics::Close(stream_slot);
++		stream_slot = nullptr;
++		freq_slot   = 0;
++	}
++	if (stream_slot == nullptr) {
++		stream_slot = Libs::Controller::DualSenseHaptics::Open(freq, is_speaker != 0);
++		if (stream_slot == nullptr) {
++			return 0;
++		}
++		freq_slot = freq;
++	}
++	const float setting_scale = Libs::Controller::GetSettingScale(
++	    is_speaker != 0 ? Libs::Controller::Setting::SpeakerVolume
++	                    : Libs::Controller::Setting::VibrationIntensity);
++	static constexpr int kUnityVolume[8] = {32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768};
++	return Libs::Controller::DualSenseHaptics::Queue(
++	    stream_slot, controller, data, frames, channels, is_float != 0, kUnityVolume,
++	    gain * setting_scale, nullptr);
++}
+
+=== src/hybrid/kyty_gpu.def
+@@ new line 1
++    KytyGpuQueuePadAudio
+
+=== src/libs/dualSenseBluetooth.cpp
+@@ new line 67
++	                      SDL_GetGamepadConnectionState(pad) != SDL_JOYSTICK_CONNECTION_WIRED;
++	if (vendor != 0x054c || (product != 0x0ce6 && product != 0x0df2)) {
++	auto*       devices            = SDL_hid_enumerate(vendor, product);
++	std::string path               = {};
++	std::string fallback_path      = {};
++	bool        ambiguous          = false;
++	bool        fallback_ambiguous = false;
++		const bool is_bt =
++		    device->bus_type == SDL_HID_API_BUS_BLUETOOTH ||
++		    (device->path != nullptr &&
++		     (SDL_strcasestr(device->path, "00001124-0000-1000-8000-00805f9b34fb") != nullptr ||
++		      SDL_strcasestr(device->path, "bthenum") != nullptr));
++		if (is_bt && device->path != nullptr &&
++			const auto dev_address = Address(device->serial_number);
++			if (!address.empty() && dev_address == address) {
++				if (!path.empty()) {
++					ambiguous = true;
++					break;
++				}
++				path = device->path;
++			}
++			if (address.empty() || dev_address.empty() ||
++			    SDL_strcasestr(device->path, address.c_str()) != nullptr) {
++				if (!fallback_path.empty()) {
++					fallback_ambiguous = true;
++				} else {
++					fallback_path = device->path;
++				}
++	const std::string& chosen =
++	    (!ambiguous && !path.empty()) ? path : (!fallback_ambiguous ? fallback_path : std::string {});
++	return !chosen.empty() ? SDL_hid_open_path(chosen.c_str()) : nullptr;
+
+=== src/libs/dualSenseHaptics.cpp
+@@ new line 102
++		report[1]  = 0x82; // Audio control 2 valid + audio mute bits valid
++		report[9]  = 0x10; // Mute headphones, unmute internal speaker
+@@ new line 178
++	    pad != nullptr && SDL_GetGamepadType(pad) == SDL_GAMEPAD_TYPE_PS5 &&
++	    SDL_GetGamepadConnectionState(pad) != SDL_JOYSTICK_CONNECTION_WIRED;
++bool WirelessFeatureEnabled(bool speaker) {
++	static const bool speaker_enabled = [] {
++		const char* value = std::getenv("ASTROHYBRID_DS_WIRELESS_SPEAKER");
++		return value == nullptr || std::strcmp(value, "0") != 0;
++	}();
++	static const bool haptics_enabled = [] {
++		const char* value = std::getenv("ASTROHYBRID_DS_WIRELESS_HAPTICS");
++		return value == nullptr || std::strcmp(value, "0") != 0;
++	}();
++	return speaker ? speaker_enabled : haptics_enabled;
++}
++
+@@ new line 405
++	if (wireless && !WirelessFeatureEnabled(stream->speaker)) {
++		CloseDevice(stream);
++		return 0;
++	}
+@@ new line 435
++		float values[2] {};
++			values[ch] = value;
++		}
++		if (stream->speaker && channels >= 2) {
++			const float mono = (values[0] != 0.0f && values[1] != 0.0f)
++			                       ? 0.5f * (values[0] + values[1])
++			                       : (values[0] + values[1]);
++			values[0] = mono;
++			values[1] = mono;
++		}
++		for (uint32_t ch = 0; ch < 2; ch++) {
++			const float value = values[ch];
+
+=== src/libs/libSaveData.cpp
+@@ new line 931
++	// If the directory doesn't exist, create it with a default block size.
++	// This handles game versions (like 01.007.000) that call SaveDataTransferringMount
++	// before the save directory has been created by SaveDataMount3.
++		constexpr uint64_t default_blocks = 256; // Reasonable default for game saves
++		if (default_blocks < SAVE_DATA_BLOCKS_MIN || default_blocks > SAVE_DATA_BLOCKS_MAX) {
++			return SAVE_DATA_ERROR_PARAMETER;
++		}
++		const auto metadata = mount_dir / "sce_sys";
++		std::error_code error;
++		std::filesystem::create_directories(metadata, error);
++		if (error) {
++			return SAVE_DATA_ERROR_INTERNAL;
++		}
++		const int status = write_save_file(metadata / "blocks.bin", &default_blocks,
++		                                   sizeof(default_blocks));
++		if (status != OK) {
++			std::filesystem::remove_all(mount_dir, error);
++			return status;
++		}
++		const SaveDataParam initial {};
++		const int param_status = write_save_file(save_param_path(mount_dir), &initial,
++		                                         sizeof(initial));
++		if (param_status != OK) {
++			std::filesystem::remove_all(mount_dir, error);
++			return param_status;
++		}
++		LOGF("\t created save directory at %s\n", Common::PathToString(mount_dir).c_str());
++	return mount_save_data(slot, mount_dir, 1, mount_result); // 1 = newly created
+
+=== tools/hybrid/build_kyty_gpu.py
+@@ new line 17
++HYBRID_SOURCES = (
++    "src/kernel/memory.cpp",
++    "src/libs/dualSenseBluetooth.cpp",
++    "src/libs/dualSenseHaptics.cpp",
++)

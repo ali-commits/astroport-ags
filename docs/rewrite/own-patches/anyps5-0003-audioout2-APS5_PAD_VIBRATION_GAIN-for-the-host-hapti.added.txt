@@ -1,0 +1,21 @@
+From: Ali <newaaa4@gmail.com>
+Date: Sun, 15 Nov 2026 14:44:58 +0800
+Subject: [PATCH] audioout2: APS5_PAD_VIBRATION_GAIN for the host haptic
+ channels
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+ core/libs/prx/libSceAudioOut/src/AudioOut2Context.cpp | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+
+=== core/libs/prx/libSceAudioOut/src/AudioOut2Context.cpp
+@@ new line 242
++    // APS5_PAD_VIBRATION_GAIN=x (default 1.0, 0..4): haptic strength; samples are clipped at full scale.
++    static const float gain = [] {
++        const char* value = std::getenv("APS5_PAD_VIBRATION_GAIN");
++        const float parsed = value != nullptr ? std::strtof(value, nullptr) : 1.0f;
++        return std::isfinite(parsed) ? std::clamp(parsed, 0.0f, 4.0f) : 1.0f;
++    }();
++    if (gain != 1.0f) {
++        for (float& sample : vibration) sample = std::clamp(sample * gain, -1.0f, 1.0f);
++    }
