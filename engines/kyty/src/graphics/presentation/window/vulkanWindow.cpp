@@ -34,6 +34,7 @@
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
 #include "graphics/presentation/window/f32FlushSelfTest.h"
+#include "graphics/presentation/window/frameGen.h"
 #include "graphics/presentation/window/lowLatency.h"
 #include "graphics/presentation/window/windowInternal.h"
 #include "graphics/shader/recompiler/CodegenOptions.h"
@@ -1393,6 +1394,13 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	    supported_features2.features.shaderStorageImageReadWithoutFormat;
 	graphics.storage_image_read_without_format_enabled =
 	    device_features.shaderStorageImageReadWithoutFormat == VK_TRUE;
+#if KYTY_FSR_FRAMEGEN
+	// AMD's frame-generation shaders declare StorageImageExtendedFormats (checked in frameGen.cpp).
+	if (FrameGen::Requested()) {
+		device_features.shaderStorageImageExtendedFormats =
+		    supported_features2.features.shaderStorageImageExtendedFormats;
+	}
+#endif
 	device_features.shaderImageGatherExtended            = VK_TRUE;
 	device_features.shaderResourceMinLod = shader_resource_min_lod ? VK_TRUE : VK_FALSE;
 	device_features.independentBlend                     = VK_TRUE;
@@ -2224,6 +2232,8 @@ void WindowContext::CreateVulkan() {
 	VULKAN_HPP_DEFAULT_DISPATCHER.init(get_instance_proc_addr);
 
 	Vr::OpenXrInit();
+	// FSR frame generation decides by the display's refresh rate whether it can run.
+	FrameGen::NoteDisplay(window);
 	Dlss::Load();
 
 	VulkanExtensions r;
@@ -2651,7 +2661,7 @@ void WindowContext::CreateVulkan() {
 		}
 		Vr::OpenXrAppendExtensions(device_extensions, available_extensions, true);
 		Dlss::AppendExtensions(device_extensions, available_extensions, true);
-		LowLatency::AppendExtensions(device_extensions, available_extensions);
+		LowLatency::AppendExtensions(device_extensions, available_extensions, graphic_ctx.physical_device);
 		if (Streaming::SessionSocket() != nullptr) {
 			if (HasExtension(available_extensions, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
 			    HasExtension(available_extensions, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME)) {
@@ -2752,6 +2762,7 @@ WindowContext::~WindowContext() {
 	LibKernel::Memory::InstallGpuResources(nullptr);
 	render_context.reset();
 	Dlss::Shutdown();
+	FrameGen::Shutdown();
 	graphic_ctx.submission_queue.Shutdown();
 
 	if (graphic_ctx.device != nullptr) {

@@ -49,9 +49,16 @@ static_assert(sizeof(Layout) == sizeof(Embed::Options::upscale_pass_layout));
 }
 
 // Whether draws are looked at. One load per draw in the stand-alone emulator, where it is false.
+// FSR frame generation (presentation/window/frameGen.h) copies the same pass's depth and motion
+// vectors, with or without DLSS.
 [[nodiscard]] inline bool Enabled() {
 	const auto& options = Embed::GetOptions();
-	return options.dlss && options.upscale_pass_hash != 0;
+#if KYTY_FSR_FRAMEGEN
+	const bool frame_gen = options.fsr_fg;
+#else
+	const bool frame_gen = false;
+#endif
+	return (options.dlss || frame_gen) && options.upscale_pass_hash != 0;
 }
 
 // The constant words the layout reads.
@@ -157,7 +164,7 @@ private:
 
 enum class Outcome : uint8_t {
 	Evaluated,
-	Off,       // NGX did not start
+	Off,       // DLSS is not asked for, or NGX did not start
 	Continued, // the draw continues the previous one
 	Bindings,  // not the images, buffers or target the layout names
 	Constants, // unreadable constants or no layout

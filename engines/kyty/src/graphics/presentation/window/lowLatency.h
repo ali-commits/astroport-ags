@@ -16,8 +16,10 @@
 namespace Libs::Graphics::LowLatency {
 
 // Device creation: adds the two extensions when both are offered, logs "unavailable" otherwise.
+// Off while FSR frame generation is requested, built in and possible on physical_device.
 void AppendExtensions(std::vector<const char*>&                   extensions,
-                      const std::vector<vk::ExtensionProperties>& available);
+                      const std::vector<vk::ExtensionProperties>& available,
+                      vk::PhysicalDevice                          physical_device);
 // After the device dispatcher is initialised.
 void Init(vk::Device device);
 [[nodiscard]] bool Active();

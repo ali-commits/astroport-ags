@@ -6,6 +6,7 @@
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/threads.h"
+#include "common/timer.h"
 #include "gpu_blit_shaders/gpu_blit_fs_triangle_spv.h"
 #include "gpu_blit_shaders/gpu_video_out_downscale_spv.h"
 #include "gpu_blit_shaders/gpu_video_out_overlay_spv.h"
@@ -20,6 +21,7 @@
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
+#include "graphics/presentation/window/frameGen.h"
 #include "graphics/presentation/window/lowLatency.h"
 #include "graphics/presentation/window/windowInternal.h"
 #include "streaming/exporter.h"
@@ -38,6 +40,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 #include <vulkan/vk_platform.h>
 
@@ -49,11 +52,14 @@ struct Presenter::Frame {
 	VulkanImage   image;
 	vk::ImageView view         = nullptr;
 	uint64_t      present_tick = 0;
+	uint64_t      capture      = 0; // FrameGen::LastCapture() when the frame was prepared
 	bool          busy         = false;
 	bool          hdr          = false;
 	bool          blank        = false;
 
-	void Configure(GraphicContext& graphics, vk::Extent2D extent, vk::Format format);
+	// extra: usage beyond a frame's own (the frame FrameGen writes is a storage image).
+	void Configure(GraphicContext& graphics, vk::Extent2D extent, vk::Format format,
+	               vk::ImageUsageFlags extra = {});
 	void Transit(vk::CommandBuffer command, vk::ImageLayout layout, vk::AccessFlags2 access);
 	void CopyFrom(CommandBuffer& command, Image& source);
 	void Clear(CommandBuffer& command, const vk::ClearColorValue& color);
@@ -139,14 +145,16 @@ private:
 	vk::Format                                     m_format = vk::Format::eUndefined;
 };
 
-void Presenter::Frame::Configure(GraphicContext& graphics, vk::Extent2D extent, vk::Format format) {
+void Presenter::Frame::Configure(GraphicContext& graphics, vk::Extent2D extent, vk::Format format,
+                                 vk::ImageUsageFlags extra) {
 	if (extent.width == 0 || extent.height == 0 || format == vk::Format::eUndefined) {
 		EXIT("unsupported prepared frame, extent=%ux%u format=%d\n", extent.width, extent.height,
 		     static_cast<int>(format));
 	}
 	auto&      dst        = image;
 	const bool compatible = dst.image != nullptr && dst.extent.width == extent.width &&
-	                        dst.extent.height == extent.height && dst.format == format;
+	                        dst.extent.height == extent.height && dst.format == format &&
+	                        (dst.usage & extra) == extra;
 	if (compatible) {
 		return;
 	}
@@ -177,7 +185,7 @@ void Presenter::Frame::Configure(GraphicContext& graphics, vk::Extent2D extent, 
 	create.tiling        = vk::ImageTiling::eOptimal;
 	create.initialLayout = vk::ImageLayout::eUndefined;
 	create.usage = vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst |
-	               vk::ImageUsageFlagBits::eSampled;
+	               vk::ImageUsageFlagBits::eSampled | extra;
 	create.sharingMode = vk::SharingMode::eExclusive;
 	create.samples     = vk::SampleCountFlagBits::e1;
 	if (!graphics.CreateImage(create, dst)) {
@@ -269,6 +277,7 @@ public:
 		return static_cast<uint32_t>(m_images.size());
 	}
 	[[nodiscard]] vk::Format Format() const noexcept { return m_format; }
+	[[nodiscard]] vk::PresentModeKHR PresentMode() const noexcept { return m_present_mode; }
 	[[nodiscard]] bool       IsMinimized() const noexcept { return m_minimized; }
 	[[nodiscard]] bool IsHdrSupported() const noexcept { return m_hdr_supported.load(); }
 	bool SetHdr(bool hdr) {
@@ -287,6 +296,7 @@ private:
 	WindowContext&   m_window;
 	vk::SwapchainKHR m_handle = nullptr;
 	vk::Format       m_format = vk::Format::eUndefined;
+	vk::PresentModeKHR m_present_mode = vk::PresentModeKHR::eFifo; // of the swapchain made last
 	std::atomic_bool m_hdr_supported {false};
 	bool             m_hdr_requested = false;
 	bool             m_hdr_active    = false;
@@ -524,6 +534,9 @@ struct Presenter::Impl {
 		swapchain.Create();
 		const uint32_t image_count = swapchain.ImageCount() > 0 ? swapchain.ImageCount() : 3;
 		frames.Initialize(image_count, swapchain.Format());
+		if (FrameGen::Requested()) {
+			frame_gen = std::make_unique<FrameGen::Generator>(owner.graphic_ctx, present_scheduler);
+		}
 	}
 
 	void RecoverSwapchain(Swapchain::Status status) {
@@ -556,7 +569,12 @@ struct Presenter::Impl {
 		cache.UpdateImage(image_id);
 		return image;
 	}
-	void Present();
+	enum class Shown : uint8_t { Yes, Minimized, Dropped };
+	void                 Present();
+	// One acquire, blit of `main` under the other layer and the overlays, and present.
+	[[nodiscard]] Shown  PresentOnce(Frame* main);
+	// FrameGen: the frame between the new main frame and the one before it, or null.
+	[[nodiscard]] Frame* Generate(Frame& frame);
 
 	RenderContext&        renderer;
 	WindowContext&        window;
@@ -566,6 +584,12 @@ struct Presenter::Impl {
 	Common::Mutex         present_mutex;
 	std::array<Layer, 2>  layers {};
 	std::atomic<uint64_t> presented_overlay_revision {0};
+	// FrameGen. new_main: bus 0 took a frame that was not shown yet. generated: the frame it
+	// writes, taken from the pool once and kept. Declared after the scheduler and the pool: the
+	// generator ends before them.
+	bool                                 new_main  = false;
+	Frame*                               generated = nullptr;
+	std::unique_ptr<FrameGen::Generator> frame_gen;
 	// Last member: it ends before the scheduler it records on.
 	std::unique_ptr<NativeStreamExport> stream_export;
 };
@@ -709,6 +733,7 @@ void Swapchain::Create() {
 		create_info.presentMode = vk::PresentModeKHR::eFifo;
 	}
 	create_info.clipped = VK_TRUE;
+	m_present_mode      = create_info.presentMode;
 #if defined(_WIN32)
 	// KYTY_FULLSCREEN_EXCLUSIVE (GraphicContext::full_screen_exclusive): exclusive fullscreen
 	// disallowed or allowed. (VkSurfaceFullScreenExclusiveInfoEXT is vulkan_win32.h's, not included
@@ -1667,6 +1692,8 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 	auto* frame = m_impl->frames.Acquire({info.extent.width, info.extent.height}, frame_format);
 	frame->hdr   = hdr;
 	frame->blank = false;
+	// The upscale pass of this guest frame ran before its flip; a headset's eye is not generated.
+	frame->capture = headset ? 0 : FrameGen::LastCapture();
 	RenderLockGuard   render_lock(m_impl->renderer.GetMutex());
 	auto&             image = m_impl->ResolveSurface(info);
 	if (image.backing.format == vk::Format::eUndefined) {
@@ -1690,8 +1717,9 @@ Presenter::Frame& Presenter::PrepareBlankFrame(uint32_t width, uint32_t height, 
 	KYTY_PROFILER_FUNCTION();
 	auto              format = m_impl->frames.GetFormat();
 	auto*             frame  = m_impl->frames.Acquire({width, height}, format);
-	frame->hdr   = false;
-	frame->blank = true;
+	frame->hdr     = false;
+	frame->blank   = true;
+	frame->capture = 0;
 	// Into the GPU thread's command buffer (its flip) under the renderer's lock; the present
 	// thread's blank frame (no producer) uses only the presenter's scheduler and frame.
 	std::optional<RenderLockGuard> render_lock;
@@ -1758,6 +1786,7 @@ void Presenter::Present(std::span<const Layer> layers) {
 		if (previous.frame != nullptr) {
 			m_impl->frames.Release(previous.frame);
 		}
+		m_impl->new_main |= layer.bus == 0 && previous.frame != layer.frame;
 		previous = layer;
 	}
 	m_impl->Present();
@@ -1789,30 +1818,83 @@ void Presenter::Impl::Present() {
 		stream_export->Capture(layers);
 	}
 
-	const auto overlay_visual = GetSystemOverlayVisualState();
 	// Keep black/blank flips in the current color space; only real main-bus frames switch it.
-	const auto* main_frame = layers[0].frame;
+	auto*      main_frame  = layers[0].frame;
 	const bool hdr_changed = main_frame != nullptr && !main_frame->blank &&
 	                         swapchain.SetHdr(main_frame->hdr);
 	// Some window systems keep presenting an old swapchain after a resize.
 	if (hdr_changed || swapchain.NeedsResize()) {
 		RecoverSwapchain(Swapchain::Status::Recreate);
 	}
+	const bool fresh = std::exchange(new_main, false);
 	if (swapchain.IsMinimized()) {
 		return;
 	}
+	// FrameGen: the generated frame first, the real one half a frame interval later.
+	if (fresh && frame_gen != nullptr && main_frame != nullptr) {
+		if (auto* between = Generate(*main_frame); between != nullptr) {
+			const auto shown_ns = Common::SteadyNs();
+			if (PresentOnce(between) == Shown::Yes) {
+				frame_gen->Pace(swapchain.PresentMode(), shown_ns);
+			}
+		}
+	}
+	if (PresentOnce(main_frame) == Shown::Dropped) {
+		LOGF("Vulkan presentation retry exhausted; dropping frame\n");
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::DroppedPresents);
+	}
+}
+
+Presenter::Frame* Presenter::Impl::Generate(Frame& frame) {
+	const FrameGen::Source source {frame.image.image,
+	                               {frame.image.extent.width, frame.image.extent.height},
+	                               frame.image.format,
+	                               frame.hdr,
+	                               frame.blank,
+	                               frame.capture};
+	if (!frame_gen->Prepare(source, swapchain.PresentMode())) {
+		return nullptr;
+	}
+	if (generated == nullptr) {
+		generated = frames.Acquire(source.extent, source.format);
+	}
+	present_scheduler.Wait(generated->present_tick);
+	std::optional<RenderLockGuard> render_lock;
+	if (!PresentUnlocked()) {
+		render_lock.emplace(renderer.GetMutex());
+	}
+	// Prepare made AMD's contexts for this size and format, so none of its views is on an image
+	// that Configure replaces.
+	generated->Configure(window.graphic_ctx, source.extent, source.format, vk::ImageUsageFlagBits::eStorage);
+	generated->hdr   = frame.hdr;
+	generated->blank = false;
+	auto& command    = present_scheduler.BeginCommand();
+	auto  vk_command = command.Handle();
+	frame.Transit(vk_command, vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead);
+	generated->Transit(vk_command, vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite);
+	const bool written = frame_gen->Record(vk_command, source, generated->image.image);
+	const auto tick    = present_scheduler.Submit();
+	frame.present_tick      = tick;
+	generated->present_tick = tick;
+	return written ? generated : nullptr;
+}
+
+Presenter::Impl::Shown Presenter::Impl::PresentOnce(Frame* main) {
+	using Common::DebugCounters::Counter;
+	using Common::DebugCounters::ScopedTimer;
+	const auto overlay_visual = GetSystemOverlayVisualState();
 	for (uint32_t attempt = 0; attempt < 2; attempt++) {
 		auto status = [&] {
 			ScopedTimer acquire_time(Counter::PresentAcquireNs);
 			return swapchain.AcquireNextImage(present_scheduler);
 		}();
 		if (status == Swapchain::Status::Minimized) {
-			return;
+			return Shown::Minimized;
 		}
 		if (status != Swapchain::Status::Success) {
 			RecoverSwapchain(status);
 			if (swapchain.IsMinimized()) {
-				return;
+				return Shown::Minimized;
 			}
 			continue;
 		}
@@ -1827,33 +1909,32 @@ void Presenter::Impl::Present() {
 				return (overlay_visual.active || PerformanceOverlayEnabled()) &&
 				       swapchain.PrepareSystemOverlay();
 			}();
-			swapchain.RecordPresentCommands(command, layers[0].frame, layers[1],
-			                                draw_system_overlay);
+			swapchain.RecordPresentCommands(command, main, layers[1], draw_system_overlay);
 			const auto tick = swapchain.Submit(present_scheduler);
-			for (const auto& layer: layers) {
-				if (layer.frame != nullptr) {
-					layer.frame->present_tick = tick;
-				}
+			if (main != nullptr) {
+				main->present_tick = tick;
+			}
+			if (layers[1].frame != nullptr) {
+				layers[1].frame->present_tick = tick;
 			}
 		}
 		status = swapchain.Present();
 		if (status == Swapchain::Status::Minimized) {
-			return;
+			return Shown::Minimized;
 		}
 		if (status != Swapchain::Status::Success) {
 			RecoverSwapchain(status);
 			if (swapchain.IsMinimized()) {
-				return;
+				return Shown::Minimized;
 			}
 			continue;
 		}
 
 		presented_overlay_revision.store(overlay_visual.revision, std::memory_order_release);
 		window.loop.presented_frames.fetch_add(1, std::memory_order_relaxed);
-		return;
+		return Shown::Yes;
 	}
-	LOGF("Vulkan presentation retry exhausted; dropping frame\n");
-	Common::DebugCounters::Add(Common::DebugCounters::Counter::DroppedPresents);
+	return Shown::Dropped;
 }
 
 void Presenter::Discard(Frame& frame) {

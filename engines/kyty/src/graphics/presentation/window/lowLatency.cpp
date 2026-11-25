@@ -1,6 +1,7 @@
 #include "graphics/presentation/window/lowLatency.h"
 
 #include "embed/embedOptions.h"
+#include "graphics/presentation/window/frameGen.h"
 
 #include <algorithm>
 #include <array>
@@ -105,12 +106,13 @@ void Report() {
 } // namespace
 
 void AppendExtensions(std::vector<const char*>&                   extensions,
-                      const std::vector<vk::ExtensionProperties>& available) {
+                      const std::vector<vk::ExtensionProperties>& available,
+                      vk::PhysicalDevice                          physical_device) {
 	const auto& options = Embed::GetOptions();
 	if (!options.low_latency) {
 		return;
 	}
-	if (options.fsr_fg) {
+	if (FrameGen::Requested() && FrameGen::DeviceSupports(physical_device)) {
 		Log("off while frame generation is requested");
 		return;
 	}

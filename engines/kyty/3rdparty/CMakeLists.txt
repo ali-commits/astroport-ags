@@ -169,6 +169,62 @@ else()
 	target_compile_options(imgui PRIVATE -w)
 endif()
 
+# KYTY_FSR_FRAMEGEN: AMD FidelityFX SDK 1.1.4 (MIT) for FSR frame generation in the presenter
+# (src/graphics/presentation/window/frameGen.h). Seven of its source files are compiled, into
+# kyty_ffx: frame interpolation, optical flow, the Vulkan backend and their helpers. Its CMake
+# files, tools, swapchain proxy, shader accessors and prebuilt binaries are not used (SOURCE_SUBDIR
+# names a folder that does not exist), and its GLSL is built by the top-level CMakeLists.txt.
+if(KYTY_FSR_FRAMEGEN)
+	if(NOT LINUX)
+		message(FATAL_ERROR "KYTY_FSR_FRAMEGEN is Linux-only")
+	endif()
+	# A tag, because a shallow clone cannot name a commit; the commit is checked below.
+	set(KYTY_FFX_SDK_COMMIT c6efa6bf7f2027b3ec94f28578bb5965eabb9e55)
+	FetchContent_Declare(
+		fidelityfx_sdk
+		GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git
+		GIT_TAG v1.1.4
+		GIT_SHALLOW TRUE
+		# Fetched and patched once, as ZArchive above.
+		UPDATE_DISCONNECTED TRUE
+		# The contexts' fixed size assumes a 16-bit wchar_t.
+		PATCH_COMMAND "${GIT_EXECUTABLE}" apply --ignore-whitespace
+			"${CMAKE_CURRENT_SOURCE_DIR}/patches/fidelityfx-context-size.patch"
+		SOURCE_SUBDIR kyty-none
+	)
+	FetchContent_MakeAvailable(fidelityfx_sdk)
+	execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse HEAD
+		WORKING_DIRECTORY "${fidelityfx_sdk_SOURCE_DIR}"
+		OUTPUT_VARIABLE kyty_ffx_sdk_head OUTPUT_STRIP_TRAILING_WHITESPACE)
+	if(NOT kyty_ffx_sdk_head STREQUAL KYTY_FFX_SDK_COMMIT)
+		message(FATAL_ERROR "FidelityFX SDK: tag v1.1.4 is at ${kyty_ffx_sdk_head}, expected ${KYTY_FFX_SDK_COMMIT}")
+	endif()
+	set(kyty_ffx_sdk "${fidelityfx_sdk_SOURCE_DIR}/sdk")
+	add_library(kyty_ffx STATIC
+		"${kyty_ffx_sdk}/src/backends/vk/ffx_vk.cpp"
+		"${kyty_ffx_sdk}/src/components/frameinterpolation/ffx_frameinterpolation.cpp"
+		"${kyty_ffx_sdk}/src/components/opticalflow/ffx_opticalflow.cpp"
+		"${kyty_ffx_sdk}/src/shared/ffx_assert.cpp"
+		"${kyty_ffx_sdk}/src/shared/ffx_message.cpp"
+		"${kyty_ffx_sdk}/src/shared/ffx_object_management.cpp"
+		"${kyty_ffx_sdk}/src/shared/ffx_breadcrumbs_list.cpp"
+	)
+	target_include_directories(kyty_ffx SYSTEM PUBLIC "${kyty_ffx_sdk}/include")
+	target_include_directories(kyty_ffx PRIVATE
+		"${kyty_ffx_sdk}/src/shared"
+		"${kyty_ffx_sdk}/src/components"
+		"${kyty_ffx_sdk}/src/backends/shared"
+	)
+	target_link_libraries(kyty_ffx PUBLIC Vulkan::Headers)
+	target_compile_features(kyty_ffx PRIVATE cxx_std_20)
+	set_target_properties(kyty_ffx PROPERTIES POSITION_INDEPENDENT_CODE ON)
+	# ffxCompat.h: the MSVC names the sources use outside their Windows blocks.
+	target_compile_options(kyty_ffx PRIVATE -w -include
+		"${CMAKE_CURRENT_SOURCE_DIR}/../src/graphics/presentation/window/ffxCompat.h")
+	install(FILES "${fidelityfx_sdk_SOURCE_DIR}/LICENSE.txt" DESTINATION "licenses/fidelityfx-sdk")
+	set(KYTY_FFX_SDK_DIR "${kyty_ffx_sdk}" PARENT_SCOPE)
+endif()
+
 set(SPIRV_SKIP_TESTS ON CACHE BOOL "" FORCE)
 set(SPIRV_SKIP_EXECUTABLES ON CACHE BOOL "" FORCE)
 set(SKIP_SPIRV_TOOLS_INSTALL ON CACHE BOOL "" FORCE)

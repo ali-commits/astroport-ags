@@ -71,6 +71,7 @@ Each library keeps its own licence, at the path given. The folder `engines/kyty/
 
 Fetched at configure time (Kyty's `3rdparty/CMakeLists.txt`; not in this repository, each keeps its own licence):
 opus, OpenXR-SDK, xbyak, zydis, zstd, ZArchive (with `engines/kyty/3rdparty/patches/zarchive-reader.patch`) and Noto Sans.
+Only with the build option `KYTY_FSR_FRAMEGEN` (off by default): AMD's FidelityFX SDK, section 5.
 
 ## 4. NVIDIA DLSS
 
@@ -81,10 +82,37 @@ licence. Packages that carry it also carry that licence as `licenses/NVIDIA-DLSS
 runtime is not in this repository: the release build fetches it from https://github.com/NVIDIA/DLSS, and a
 source build without it has no DLSS. DLSS is offered on NVIDIA GPUs only.
 
-## 5. Also used
+## 5. AMD FidelityFX SDK
+
+Only a renderer built with the CMake option `KYTY_FSR_FRAMEGEN` (off by default) contains AMD code: FSR 3.1
+frame interpolation, optical flow and the Vulkan backend of the FidelityFX SDK 1.1.4
+(https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK, tag `v1.1.4`, commit
+`c6efa6bf7f2027b3ec94f28578bb5965eabb9e55`), compiled from source together with its GLSL shaders. The SDK is
+not in this repository: the build fetches it at configure time and applies
+`engines/kyty/3rdparty/patches/fidelityfx-context-size.patch`. The licence below ships with
+every package inside `licenses/NOTICE.md`. The SDK is under the MIT licence:
+
+> Copyright (C) 2024 Advanced Micro Devices, Inc.
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+> associated documentation files(the "Software"), to deal in the Software without restriction, including
+> without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
+> copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the
+> following conditions :
+>
+> The above copyright notice and this permission notice shall be included in all copies or substantial
+> portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+> LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
+> EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+> IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR
+> THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+## 6. Also used
 
 lsfg-vk provides frame generation on Linux. It is not bundled.
 
-## 6. Trademarks
+## 7. Trademarks
 
 "Astro Bot" and "PlayStation" are trademarks of their owners. This is a fan project. It is not affiliated with, endorsed by, or supported by Sony Interactive Entertainment or Team Asobi.

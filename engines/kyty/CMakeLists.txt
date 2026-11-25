@@ -186,6 +186,10 @@ if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0.0)
 endif()
 
 option(KYTY_BUILD_LAUNCHER "Build Qt launcher" ON)
+# FSR frame generation in the presenter (src/graphics/presentation/window/frameGen.h), Linux only.
+# ON fetches AMD's FidelityFX SDK (3rdparty/CMakeLists.txt). OFF: nothing of it is fetched, compiled
+# or referenced.
+option(KYTY_FSR_FRAMEGEN "FSR 3.1 frame generation (fetches AMD's FidelityFX SDK)" OFF)
 
 config_compiler_and_linker()
 
@@ -649,6 +653,83 @@ if(LINUX)
 	find_package(Threads REQUIRED)
 	list(APPEND kyty_emulator_link_libraries m ${CMAKE_DL_LIBS} Threads::Threads)
 endif()
+
+# BEGIN KYTY_FSR_FRAMEGEN
+# The two sources that need the SDK, and the SDK's shaders: 11 frame-interpolation and 7
+# optical-flow passes from its GLSL, each in the two variants this build selects between (reversed
+# depth; HDR input), embedded like Kyty's own shaders. ffx_blob_table.h lists them for ffxBlobs.cpp.
+set(kyty_ffx_sources
+	"${KYTY_SOURCE_DIR}/graphics/presentation/window/frameGen.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/presentation/window/ffxBlobs.cpp"
+)
+if(KYTY_FSR_FRAMEGEN)
+	set(ffx_generated_dir "${PROJECT_BINARY_DIR}/ffx_shaders")
+	set(ffx_gpu_dir "${KYTY_FFX_SDK_DIR}/include/FidelityFX/gpu")
+	set(ffx_blob_includes "")
+	set(ffx_blob_rows "")
+	# effect: frameinterpolation or opticalflow. key: the define that takes 0 and 1. passes:
+	# "<file name after ffx_<effect>_>|<pass enumerator after FFX_<EFFECT>_PASS_>". ARGN: fixed defines.
+	function(add_ffx_shaders effect key passes)
+		string(TOUPPER "${effect}" effect_upper)
+		foreach(entry IN LISTS passes)
+			string(REPLACE "|" ";" entry "${entry}")
+			list(GET entry 0 file)
+			list(GET entry 1 pass)
+			set(shader_source "${KYTY_FFX_SDK_DIR}/src/backends/vk/shaders/${effect}/ffx_${effect}_${file}.glsl")
+			foreach(value IN ITEMS 0 1)
+				set(shader_name "ffx_${effect}_${file}_${value}")
+				set(shader_spv "${ffx_generated_dir}/${shader_name}.spv")
+				set(shader_header "${ffx_generated_dir}/${shader_name}_spv.h")
+				string(TOUPPER "${shader_name}_SPV" shader_symbol)
+				add_custom_command(
+					OUTPUT "${shader_header}"
+					COMMAND ${CMAKE_COMMAND} -E make_directory "${ffx_generated_dir}"
+					COMMAND "${KYTY_GLSLANG_VALIDATOR}" -V --target-env vulkan1.2 -S comp -Os
+					        -DFFX_GLSL=1 -DFFX_GPU=1 ${ARGN} "-D${key}=${value}"
+					        "-I${ffx_gpu_dir}" "-I${ffx_gpu_dir}/${effect}"
+					        -o "${shader_spv}" "${shader_source}"
+					COMMAND ${CMAKE_COMMAND} -DINPUT=${shader_spv} -DOUTPUT=${shader_header}
+					        -DSYMBOL=${shader_symbol} -P "${KYTY_SOURCE_DIR}/embed_spirv.cmake"
+					DEPENDS "${shader_source}"
+					VERBATIM
+				)
+				list(APPEND ffx_shader_headers "${shader_header}")
+				string(APPEND ffx_blob_includes "#include \"${shader_name}_spv.h\"\n")
+				string(APPEND ffx_blob_rows
+					" \\\n\tX(FFX_EFFECT_${effect_upper}, FFX_${effect_upper}_PASS_${pass}, ${value}, ${shader_symbol})")
+			endforeach()
+		endforeach()
+		set(ffx_shader_headers "${ffx_shader_headers}" PARENT_SCOPE)
+		set(ffx_blob_includes "${ffx_blob_includes}" PARENT_SCOPE)
+		set(ffx_blob_rows "${ffx_blob_rows}" PARENT_SCOPE)
+	endfunction()
+	# The fixed defines are the SDK's own (gpu/frameinterpolation/CMakeCompileFrameinterpolationShaders.txt);
+	# motion vectors are at render size and include the jitter.
+	add_ffx_shaders(frameinterpolation FFX_FRAMEINTERPOLATION_OPTION_INVERTED_DEPTH
+		"reconstruct_and_dilate_pass|RECONSTRUCT_AND_DILATE;setup_pass|SETUP;reconstruct_previous_depth_pass|RECONSTRUCT_PREV_DEPTH;game_motion_vector_field_pass|GAME_MOTION_VECTOR_FIELD;optical_flow_vector_field_pass|OPTICAL_FLOW_VECTOR_FIELD;disocclusion_mask_pass|DISOCCLUSION_MASK;pass|INTERPOLATION;compute_inpainting_pyramid_pass|INPAINTING_PYRAMID;inpainting_pass|INPAINTING;compute_game_vector_field_inpainting_pyramid_pass|GAME_VECTOR_FIELD_INPAINTING_PYRAMID;debug_view_pass|DEBUG_VIEW"
+		-DFFX_FRAMEINTERPOLATION_OPTION_UPSAMPLE_SAMPLERS_USE_DATA_HALF=0
+		-DFFX_FRAMEINTERPOLATION_OPTION_ACCUMULATE_SAMPLERS_USE_DATA_HALF=0
+		-DFFX_FRAMEINTERPOLATION_OPTION_REPROJECT_SAMPLERS_USE_DATA_HALF=1
+		-DFFX_FRAMEINTERPOLATION_OPTION_POSTPROCESSLOCKSTATUS_SAMPLERS_USE_DATA_HALF=0
+		-DFFX_FRAMEINTERPOLATION_OPTION_UPSAMPLE_USE_LANCZOS_TYPE=2
+		-DFFX_FRAMEINTERPOLATION_OPTION_LOW_RES_MOTION_VECTORS=1
+		-DFFX_FRAMEINTERPOLATION_OPTION_JITTER_MOTION_VECTORS=1)
+	add_ffx_shaders(opticalflow FFX_OPTICALFLOW_OPTION_HDR_COLOR_INPUT
+		"prepare_luma_pass|PREPARE_LUMA;compute_luminance_pyramid_pass|GENERATE_OPTICAL_FLOW_INPUT_PYRAMID;generate_scd_histogram_pass|GENERATE_SCD_HISTOGRAM;compute_scd_divergence_pass|COMPUTE_SCD_DIVERGENCE;compute_optical_flow_advanced_pass_v5|COMPUTE_OPTICAL_FLOW_ADVANCED_V5;filter_optical_flow_pass_v5|FILTER_OPTICAL_FLOW_V5;scale_optical_flow_advanced_pass_v5|SCALE_OPTICAL_FLOW_ADVANCED_V5")
+	file(GENERATE OUTPUT "${ffx_generated_dir}/ffx_blob_table.h" CONTENT
+		"#pragma once\n${ffx_blob_includes}// X(effect, pass, key, words)\n#define KYTY_FFX_BLOBS(X)${ffx_blob_rows}\n")
+	list(APPEND kyty_emulator_src ${ffx_shader_headers})
+	list(APPEND kyty_emulator_link_libraries kyty_ffx)
+	# ffxBlobs.cpp reads the SDK's own headers for the shader accessors it replaces.
+	set_source_files_properties(${kyty_ffx_sources} PROPERTIES INCLUDE_DIRECTORIES
+		"${ffx_generated_dir};${KYTY_FFX_SDK_DIR}/src/backends/shared;${KYTY_FFX_SDK_DIR}/src/components")
+	add_compile_definitions(KYTY_FSR_FRAMEGEN=1)
+	message(STATUS "FSR frame generation: built in (FidelityFX SDK ${KYTY_FFX_SDK_DIR})")
+else()
+	# By name, whatever way the glob spells the folder.
+	list(FILTER kyty_emulator_src EXCLUDE REGEX "/graphics/presentation/window/(frameGen|ffxBlobs)\\.cpp$")
+endif()
+# END KYTY_FSR_FRAMEGEN
 
 set(inc_headers
 	${KYTY_SOURCE_DIR}
@@ -1558,6 +1639,17 @@ target_include_directories(gyro_bias_tests PRIVATE "${KYTY_SOURCE_DIR}")
 add_executable(image_memory_pressure_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ImageMemoryPressureTests.cpp")
 target_link_libraries(image_memory_pressure_tests kyty_test_gtest)
 target_include_directories(image_memory_pressure_tests PRIVATE "${KYTY_SOURCE_DIR}")
+# FSR frame generation: the pacing, display, continuity and ring decisions and the SPIR-V binding
+# reader (header-only); with KYTY_FSR_FRAMEGEN also the SDK's shaders through ffxBlobs.cpp.
+add_executable(frame_gen_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/FrameGenTests.cpp")
+target_link_libraries(frame_gen_tests kyty_test_gtest)
+target_include_directories(frame_gen_tests PRIVATE "${KYTY_SOURCE_DIR}")
+if(KYTY_FSR_FRAMEGEN)
+	target_sources(frame_gen_tests PRIVATE
+		"${KYTY_SOURCE_DIR}/graphics/presentation/window/ffxBlobs.cpp" ${ffx_shader_headers})
+	target_link_libraries(frame_gen_tests kyty_ffx)
+	target_include_directories(frame_gen_tests PRIVATE "${KYTY_FFX_SDK_DIR}/src/backends/shared")
+endif()
 
 add_executable(psml_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PsmlTests.cpp"
@@ -1826,6 +1918,7 @@ if(BUILD_TESTING)
 	# Upstream's gtest targets (not registered upstream; built by name here).
 	add_test(NAME dlss COMMAND $<TARGET_FILE:dlss_tests>)
 	add_test(NAME gyro_bias COMMAND $<TARGET_FILE:gyro_bias_tests>)
+	add_test(NAME frame_gen COMMAND $<TARGET_FILE:frame_gen_tests>)
 	add_test(NAME image_memory_pressure COMMAND $<TARGET_FILE:image_memory_pressure_tests>)
 	add_test(NAME net_resolver COMMAND $<TARGET_FILE:net_resolver_tests>)
 	add_test(NAME gpu_blit_shader COMMAND $<TARGET_FILE:gpu_blit_shader_tests>)

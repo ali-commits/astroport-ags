@@ -11,6 +11,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/window/frameGen.h"
 #include "graphics/shader/shader.h"
 #include "graphics/shader/shaderBindings.h"
 #include "kernel/memory.h"
@@ -44,6 +45,7 @@ struct PassState {
 	uint64_t                         sizes     = 0; // the input and output size `refused` is about
 	bool                             refused   = false;
 	bool                             described = false;
+	bool                             uncopyable_said = false; // FrameGen: said once
 	std::chrono::steady_clock::time_point reported = std::chrono::steady_clock::now();
 };
 
@@ -202,13 +204,45 @@ bool RenderExecutor::UpscalePassDraw(CommandBuffer& buffer, const ShaderStageRun
 			       image->backing.extent.width >> level >= size[0] &&
 			       image->backing.extent.height >> level >= size[1];
 		};
-		const auto& target_view = target.desc.view_info;
+		// The inputs: also what FSR frame generation copies, with or without DLSS.
 		if (!usable(motion_image, motion.desc.view_info.base_level, input) ||
-		    !usable(color_image, color.desc.view_info.base_level, input) ||
-		    !usable(depth_image, 0, input) || !usable(output_image, target_view.base_level, output) ||
+		    !usable(depth_image, 0, input) ||
 		    !(depth_image->backing.usage & vk::ImageUsageFlagBits::eSampled) ||
-		    motion.image_view == nullptr || color.image_view == nullptr ||
-		    motion_image->info.IsDepth() || color_image->info.IsDepth() ||
+		    motion.image_view == nullptr || motion_image->info.IsDepth()) {
+			return Outcome::Images;
+		}
+		if (FrameGen::Capturing()) {
+			constexpr auto copied = vk::ImageUsageFlagBits::eTransferSrc;
+			if ((depth_image->backing.usage & copied) && (motion_image->backing.usage & copied)) {
+				// Ends rendering, as DLSS below does; the pass's own draw acquires its images anew.
+				buffer.EndRendering();
+				auto  command      = buffer.Handle();
+				auto& depth_source = cache.GetImage(depth_use->id);
+				auto& motion_source = cache.GetImage(motion.image_id);
+				depth_source.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {},
+				                     command);
+				motion_source.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {},
+				                      command);
+				const auto& motion_view = motion.desc.view_info;
+				FrameGen::Capture(m_context.GetCommandScheduler(), command,
+				                  {depth_source.backing.image, depth_source.backing.format, depth_use->layer,
+				                   motion_source.backing.image, motion_source.backing.format, motion_view.base_level,
+				                   motion_view.base_layer, vk::Extent2D {input[0], input[1]},
+				                   vk::Extent2D {output[0], output[1]},
+				                   {constants->jitter[0] * static_cast<float>(input[0]),
+				                    constants->jitter[1] * static_cast<float>(input[1])},
+				                   constants->frame});
+			} else if (!std::exchange(state.uncopyable_said, true)) {
+				Say("frame generation: the depth or motion image cannot be a copy source");
+			}
+		}
+		if (!options.dlss) {
+			return Outcome::Off;
+		}
+		const auto& target_view = target.desc.view_info;
+		if (!usable(color_image, color.desc.view_info.base_level, input) ||
+		    !usable(output_image, target_view.base_level, output) ||
+		    color.image_view == nullptr || color_image->info.IsDepth() ||
 		    output_image->info.IsDepth() || output_image == motion_image ||
 		    output_image == color_image || !output_image->registered ||
 		    output_image->binding.needs_rebind || output_image->depth_id ||
@@ -280,7 +314,8 @@ bool RenderExecutor::UpscalePassDraw(CommandBuffer& buffer, const ShaderStageRun
 	}
 	if (const auto now = std::chrono::steady_clock::now(); now - state.reported >= std::chrono::seconds(10)) {
 		state.reported = now;
-		if (const auto text = state.stats.Take(); !text.empty()) {
+		// Without DLSS the pass is only looked at for frame generation, which has its own line.
+		if (const auto text = state.stats.Take(); !text.empty() && options.dlss) {
 			Log::WriteToConsoleAndLog(text + "\n");
 		}
 	}

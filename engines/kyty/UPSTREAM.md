@@ -87,6 +87,14 @@ project.
 - **DualSense.** `dualSenseBluetooth.cpp`, `dualSenseHaptics.cpp`: a pad of unknown connection counts as
   wireless, the only Bluetooth DualSense is used when its address is unknown, the speaker is unmuted and
   plays both channels as mono, and a switch keeps motor rumble reports off.
+- **FSR frame generation (build option `KYTY_FSR_FRAMEGEN`, off by default).** In
+  `src/graphics/presentation/window/`: `frameGen.h`, `frameGen.cpp` (the capture ring and the generator),
+  `frameGenLogic.h` (pacing, display gate, continuity), `ffxBlobs.h`, `ffxBlobs.cpp`, `ffxReflect.h` (the
+  SDK's shaders and their binding lists) and `ffxCompat.h` (force-included into the SDK's sources); hooks
+  in `swapchain.cpp`, `vulkanWindow.cpp`, `upscalePass.h` and `upscalePass.cpp`; `tests/FrameGenTests.cpp`;
+  the fetch and the library `kyty_ffx` in `3rdparty/CMakeLists.txt`, with
+  `3rdparty/patches/fidelityfx-context-size.patch`; the shaders, the option and the test in
+  `CMakeLists.txt`. With the option off none of it is compiled and the hooks do nothing.
 - **Build on Linux with clang.** One line or a few each in `src/common/CMakeLists.txt`, `hleWaitStats.h`,
   `descriptors.cpp`, `ProgramCodec.cpp` and `ResourceTracking.cpp`.
 - **AGS session socket client.** `src/streaming/`, `tests/SessionSocketTests.cpp`, with its CMake wiring and
@@ -171,3 +179,9 @@ Pruned from the snapshot (licence files are kept at every root, including inside
 CMake downloads these (`3rdparty/CMakeLists.txt`), so configuring needs network access:
 opus `ddbe4838`, OpenXR-SDK `f2448a87`, xbyak `44a72f36`, zydis `120e0e70`, zstd `f8745da6`,
 ZArchive `d2c71773` (with `3rdparty/patches/zarchive-reader.patch`), Noto Sans `42af67cc`.
+
+Only with `-DKYTY_FSR_FRAMEGEN=ON`: AMD FidelityFX SDK, tag `v1.1.4`, checked to be commit
+`c6efa6bf7f2027b3ec94f28578bb5965eabb9e55` (https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK,
+MIT, `LICENSE.txt` at its root), with `3rdparty/patches/fidelityfx-context-size.patch`. Seven of its
+source files and eighteen of its GLSL shaders are built; none of its build files, tools or binaries is
+used.

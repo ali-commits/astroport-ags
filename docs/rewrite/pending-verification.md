@@ -156,6 +156,7 @@ Open points:
 - K7: start with KYTY_PIPELINE_LIST_PREPARE=1 and no readable param.json: confirm whether the game then runs with a hidden window (finding 3).
 - K3: the window or task-bar icon shows the game's icon0.png under X11/XWayland.
 - K4: the log shows 'Pipeline list' lines in the embedded run and the prepare run starts (title id from param.json is not empty).
+- FSR frame generation (docs/rewrite/fsr-framegen.md section 8): configure engines/kyty with KYTY_FSR_FRAMEGEN OFF and ON; `ninja frame_gen_tests && ctest -R '^frame_gen$'` in build-rewrite/kyty (9 tests OFF, 11 ON; the ctest registration is untested); link of libkyty_renderer.so with --no-undefined; the game run.
 
 Open points:
 
