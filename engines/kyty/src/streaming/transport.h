@@ -39,6 +39,11 @@ public:
 	Transport(std::string path, Completion complete, MetricsHooks metrics, SettingsHook settings,
 	          bool metrics_only);
 	~Transport();
+	// The process's one session transport, null without a session socket; its creator sets it.
+	static Transport* Session() noexcept { return s_session.load(std::memory_order_acquire); }
+	static void SetSession(Transport* transport) noexcept { s_session.store(transport, std::memory_order_release); }
+	// The frame producer's test that the GPU work up to a tick is done; it clears it before it goes.
+	void SetCompletion(Completion complete);
 	uint64_t Generation() const { return m_generation.load(std::memory_order_acquire); }
 	bool     Attached() const { return m_attached.load(std::memory_order_acquire); }
 	void SetPool(PoolDescriptor descriptor, std::array<int, 9> fds, std::shared_ptr<LeaseRing> ring,
@@ -72,6 +77,7 @@ private:
 	uint64_t                       m_pool_generation = 0;
 	std::atomic<uint64_t>          m_generation {0}, m_dropped {0}, m_active_epoch {0};
 	std::atomic<bool>              m_attached {false}, m_reconnect {false}, m_metrics_only {false};
+	static inline std::atomic<Transport*> s_session {nullptr};
 	std::jthread                   m_worker;
 };
 } // namespace Streaming

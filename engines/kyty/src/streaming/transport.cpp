@@ -136,6 +136,10 @@ void Transport::SetPool(PoolDescriptor descriptor, std::array<int, 9> fds,
 		pending.published.store(false, std::memory_order_relaxed);
 	m_active_epoch.store(m_descriptor.epoch, std::memory_order_release);
 }
+void Transport::SetCompletion(Completion complete) {
+	std::lock_guard lock(m_mutex); // the worker calls it under this lock
+	m_complete = std::move(complete);
+}
 void Transport::Publish(PendingFrame frame) {
 	if (frame.lease.slot >= SlotCount ||
 	    m_active_epoch.load(std::memory_order_acquire) != frame.lease.epoch) {

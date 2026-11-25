@@ -175,3 +175,39 @@ Open points:
 - engines/anyps5 libSceAvPlayer Player.cpp calls the renderer's videoActive while holding shownMutex and the player's lock; I did not review whether the bridge side can block or re-enter. Worth a look by the AnyPS5 reviewer.
 - NOTICE.md says release packages 'may' carry the DLSS runtime; the redistribution checkbox in docs/release.md is still unticked while scripts/release/inside.sh requires the runtime. The owner's licence decision is open.
 - Submodule pins in UPSTREAM.md section 5 were not re-verified against upstream.
+
+## Pad output re-apply, low-latency counters, native session frames
+
+- Full build first: libkyty_renderer.so and kyty_emulator must link with the new streaming/exporter.cpp object and the changed objects (nothing was linked here).
+- Pad re-apply: start with no pad, then connect a DualSense; also let a Bluetooth pad sleep and wake. Light bar colour, adaptive trigger effects and any running rumble must come back without the game changing them.
+- Pad re-apply with two pads (ASTROPORT_PAD_PREFER=auto): when the second pad takes player 1 it gets the current light bar and trigger effects, and the old pad is stopped; alternating button presses on both pads must not flood either pad.
+- Light bar reset: after the game resets the light bar, a device change must not bring the old colour back.
+- Low latency with the flip queue full ('FlipsRejected' counter above 0): the ten-second 'LowLatency: N of M driver reports filled' line keeps N > 0 afterwards and frame pacing stays at the cap.
+- Session frames under AGS (AGS_SESSION_SOCKET set, AGS_SESSION_PROTOCOL=2): the log shows 'Streaming GPU pool: WxH pitch=... epoch=1 UUID=...', the host accepts the frame hello and shows the picture, including the overlay layer.
+- Stream frame rate (new pacing): with the game at 60 fps and the default KYTY_STREAM_FPS, the host receives close to 60 frames per second, evenly; with the game above 60 fps the stream stays at about 60.
+- Session frames with the Khronos validation layer once, including KYTY_STREAM_ASPECT=fit with a stream aspect different from the game's: the capture commands (queue-family transfer to and from VK_QUEUE_FAMILY_EXTERNAL, READY/DONE semaphores, clear then blit, composite pass) raise no error.
+- Session frames with the window minimized: the stream keeps running.
+- Session reconnect (changed behaviour): detach and re-attach the host five or more times. The picture must return each time, 'retired GPU pool limit reached' should not appear, and neither the host nor the driver may report an error when the old pool is freed.
+- Host stops or crashes while frames are streaming: the game must keep presenting (a slot's DONE semaphore that is never signalled would stall the graphics queue).
+- Exit while a host is attached: clean shutdown, no hang in the presenter's teardown.
+- Metrics-only fallback: with KYTY_STREAM_FRAMES=0, and with a host that refuses frames ('frame hello refused, falling back to frame-less'), metrics and settings.apply still work and no pool is created.
+- Session settings and metrics before the first game frame is shown: check whether AGS needs them during loading (in frames mode the hello is sent only once the pool exists).
+- Device creation with AGS_SESSION_SOCKET set: no 'Could not create device' after the two FD extensions are added (relevant together with the DLSS/NGX extension list).
+- KYTY_STREAM_WIDTH=1280 KYTY_STREAM_HEIGHT=720 and KYTY_STREAM_ASPECT=fit|fill|stretch give the expected stream size and bars.
+- HDR under an AGS session: the game reports SDR (IsHdrSupported is false while frames are offered) and no 'HDR frame cannot be exported' line appears.
+
+Open points:
+
+- docs/rewrite/pending-verification.md, design.md and engines/kyty/UPSTREAM.md are not my files: the three points are still listed as open there, and the KYTY_STREAM_* variables, Transport::Session/SetCompletion, the graphicContext field and the PadResetLightBar change are not described.
+- Retired frame pools are now freed at the next connection once their last capture has completed. This assumes the host's imported memory and semaphores stay valid after our side destroys its handles; verified by reading only, needs the reconnect test.
+- A recycled slot's capture waits on the host's DONE semaphore on the game's graphics queue. A host that sends 'release' without signalling DONE, or dies in between, would stall presentation. Inherent in the protocol; not changed.
+- The frame pool does not follow a live display.resolution or display.fps setting (marked 'shortcut:' in swapchain.cpp); its size is fixed per connection.
+- In frames mode the hello is sent only once the pool exists, which needs the first presented game frame; until then the session has no metrics and no settings.apply.
+- Presenter::IsHdrSupported is false whenever a session socket offers frames, and also before the first present when the FD extensions turn out to be missing, so a game that asks once at start may stay SDR in that case.
+- In the stream the overlay layer is drawn over the whole picture, not inside the fitted game rectangle as in the window; they differ only when the stream's aspect differs from the game's. A 16-bit float overlay frame is not flagged to the overlay shader in the stream.
+- At process teardown the transport worker could still send a hello with pool descriptors that are being closed (Reconnect is only a flag). Exit path only; not changed.
+- The low-latency fix spends a frame number for every failed GPU flip reservation. A flip packet that is written but never submitted, or a flip on a port other than the main one, can still shift the counters; not checked for this title.
+- SetDevices keeps m_state_effect (what scePadGetTriggerEffectState reports) across a device change; upstream cleared it.
+- A rumble request is re-applied with its remaining time only (about 65 s limit); existing behaviour.
+- No unit test for the pad re-apply, the counter fix or the new capture pacing: tests/ is outside my files and all three need SDL or Vulkan state.
+- The ninja calls re-ran the CMake glob check in build-rewrite/kyty and regenerated kytyGitVersion.h.

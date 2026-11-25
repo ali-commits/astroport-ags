@@ -1846,6 +1846,9 @@ int VideoOutDriver::SubmitFlipFromGpu(Graphics::CommandBuffer& buffer, int handl
 	const int result = ReserveFlipRequest(*m_impl, handle, index, flip_mode, flip_arg,
 	                                      FlipRequestSource::GpuEop, request_id);
 	if (result != OK) {
+		// The guest thread counted this flip when its packet was written; the frame number is
+		// spent without a present so that the low-latency counters stay in step.
+		(void)Graphics::LowLatency::RenderSubmitted();
 		return result;
 	}
 	m_impl->GetFlipQueue().Prepare(request_id, buffer);

@@ -43,6 +43,7 @@
 #include "kernel/memory.h"
 #include "libs/controller.h"
 #include "loader/systemContent.h"
+#include "streaming/sessionEnv.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -2651,6 +2652,20 @@ void WindowContext::CreateVulkan() {
 		Vr::OpenXrAppendExtensions(device_extensions, available_extensions, true);
 		Dlss::AppendExtensions(device_extensions, available_extensions, true);
 		LowLatency::AppendExtensions(device_extensions, available_extensions);
+		if (Streaming::SessionSocket() != nullptr) {
+			if (HasExtension(available_extensions, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
+			    HasExtension(available_extensions, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME)) {
+				for (const char* name: {VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+				                        VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME}) {
+					if (!HasExtension(device_extensions, name)) {
+						device_extensions.push_back(name);
+					}
+				}
+				graphic_ctx.streaming_external_enabled = true;
+			} else {
+				LOGF("Session socket: Vulkan memory/semaphore FD extensions unavailable\n");
+			}
+		}
 	}
 
 	graphic_ctx.device = VulkanCreateDevice(graphic_ctx, device_extensions);

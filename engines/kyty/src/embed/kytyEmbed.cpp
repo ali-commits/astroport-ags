@@ -155,14 +155,17 @@ int Run(const KytyEmbedConfig* config, const KytyEmbedHooks* hooks) {
 		// becomes an empty one, because the transport drops the connection on anything else.
 		const auto live = hooks->live_setting;
 		using Hook      = Streaming::Transport::SettingsHook;
-		new Streaming::Transport(socket, {}, Streaming::MakeEmulatorMetricsHooks(),
+		// Frames are offered by the presenter once it has a frame (swapchain.cpp); until then, and
+		// with KYTY_STREAM_FRAMES=0, the connection carries metrics and settings only.
+		Streaming::Transport::SetSession(
+		    new Streaming::Transport(socket, {}, Streaming::MakeEmulatorMetricsHooks(),
 		                         live == nullptr ? Hook {} : Hook([live](const Streaming::Json& apply) {
 			                         const char* reply = live(apply.dump().c_str());
 			                         auto json = reply != nullptr ? Streaming::Json::parse(reply, nullptr, false)
 			                                                      : Streaming::Json();
 			                         return json.is_object() ? json : Streaming::Json::object();
 		                         }),
-		                         true);
+		                         !Streaming::FramesRequested(std::getenv("KYTY_STREAM_FRAMES"))));
 	}
 
 	g_ready.store(true);

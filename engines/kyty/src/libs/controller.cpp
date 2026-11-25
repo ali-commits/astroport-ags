@@ -28,6 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -147,6 +148,7 @@ public:
 	void SetVibration(uint8_t large_motor, uint8_t small_motor);
 	int  GetActiveControllerId();
 	void SetLightBar(uint8_t r, uint8_t g, uint8_t b);
+	void ResetLightBar(); // forgets the colour; nothing is sent, as before
 	bool SetTriggerEffect(const PadTriggerEffectParam& param);
 	void GetTriggerEffectState(int32_t* state);
 	void  CycleSetting(Setting setting);
@@ -191,7 +193,8 @@ private:
 	uint32_t         m_states_num    = 0;
 	uint32_t         m_first_state   = 0;
 	uint8_t          m_next_touch_id = 1;
-	// The game's last requests, re-sent when their intensity setting changes.
+	// The game's last requests, re-sent when their intensity setting or the active device changes.
+	std::optional<std::array<uint8_t, 3>> m_light_bar;
 	std::array<uint8_t, 2> m_vibration {};
 	uint64_t               m_vibration_until = 0;
 	PadTriggerEffectParam  m_trigger_effect {};
@@ -967,6 +970,8 @@ void GameController::SetDevices(int active_id) {
 		    pad != nullptr) {
 			if (const auto& color = Config::GetControllerColor()) {
 				SetHostPadLED(pad, (*color)[0], (*color)[1], (*color)[2]);
+			} else if (m_light_bar) {
+				SetHostPadLED(pad, (*m_light_bar)[0], (*m_light_bar)[1], (*m_light_bar)[2]);
 			}
 			for (auto sensor: {SDL_SENSOR_ACCEL, SDL_SENSOR_GYRO}) {
 				if (SDL_GamepadHasSensor(pad, sensor) &&
@@ -993,10 +998,10 @@ void GameController::SetDevices(int active_id) {
 	m_states_num    = 0;
 	m_first_state   = 0;
 	m_next_touch_id = 1;
-	m_vibration          = {};
-	m_vibration_until    = 0;
-	m_trigger_effect     = {};
-	m_state_effect       = {};
+	// The game is not told about a device change and does not repeat its output requests: the
+	// new device gets the last ones (the light bar above).
+	ApplyVibration();
+	(void)SendTriggerEffect(m_trigger_effect);
 }
 
 // KYTY_PAD_STATE_COALESCE=1 (default off): an input event that changes no button and no touch
@@ -1439,6 +1444,7 @@ int GameController::GetActiveControllerId() {
 
 void GameController::SetLightBar(uint8_t r, uint8_t g, uint8_t b) {
 	Common::LockGuard lock(m_mutex);
+	m_light_bar = {r, g, b};
 	if (const auto& color = Config::GetControllerColor()) {
 		r = (*color)[0];
 		g = (*color)[1];
@@ -1448,6 +1454,11 @@ void GameController::SetLightBar(uint8_t r, uint8_t g, uint8_t b) {
 	    pad != nullptr) {
 		SetHostPadLED(pad, r, g, b);
 	}
+}
+
+void GameController::ResetLightBar() {
+	Common::LockGuard lock(m_mutex);
+	m_light_bar.reset();
 }
 
 bool GameController::SetTriggerEffect(const PadTriggerEffectParam& param) {
@@ -2147,10 +2158,12 @@ int KYTY_SYSV_ABI PadSetVibration(int handle, const PadVibrationParam* param) {
 
 int KYTY_SYSV_ABI PadResetLightBar(int handle) {
 	PRINT_NAME();
+	Common::LockGuard lock(g_router_mutex);
 
 	if (const auto error = PadCheckHandle(handle); error != OK) {
 		return error;
 	}
+	PlayerForHandle(handle)->ResetLightBar();
 
 	return OK;
 }
