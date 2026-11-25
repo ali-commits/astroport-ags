@@ -18,9 +18,12 @@ if [[ -e "$stage" || -L "$stage" ]]; then
   (( ${#entries[@]} == 0 )) || fail "$stage is not empty"
 fi
 
-engine_hint='run scripts/build-engines.sh'
+# BUILD_DIR as for scripts/build-engines.sh (default build), inside the repository.
+B=$(realpath -m --relative-to="$ROOT" -- "$ROOT/${BUILD_DIR:-build}")
+[[ $B != ../* && $B != .. ]] || fail "BUILD_DIR must be inside the repository"
+engine_hint="run scripts/build-engines.sh (BUILD_DIR=$B)"
 licence_hint='restore repository licence files'
-anyps5=build/anyps5/core
+anyps5=$B/anyps5/core
 system_libs="$anyps5/libs/libs"
 sdk=build/release/dlss-sdk
 
@@ -59,10 +62,10 @@ add_file patcher/target/release/libastro_patcher.so lib/libastro_patcher.so 0644
 # The install tree astroport-run reads (docs/rewrite/design.md 1.4, 7.4): lib/ holds the renderer, the
 # bridge and the three forwarders; anyps5/libs holds AnyPS5's libraries, its own three graphics
 # libraries included (the runner leaves those out of a run folder).
-add_file build/kyty/libkyty_renderer.so lib/libkyty_renderer.so 0644 "$engine_hint"
-add_file build/libs/libastroport_bridge.so lib/libastroport_bridge.so 0644 "$engine_hint"
+add_file $B/kyty/libkyty_renderer.so lib/libkyty_renderer.so 0644 "$engine_hint"
+add_file $B/libs/libastroport_bridge.so lib/libastroport_bridge.so 0644 "$engine_hint"
 for name in libSceAgc.prx libSceAgcDriver.prx libSceVideoOut.prx astroport-exports.txt; do
-  add_file "build/fwd/$name" "lib/$name" 0644 "$engine_hint"
+  add_file "$B/fwd/$name" "lib/$name" 0644 "$engine_hint"
 done
 add_file "$anyps5/relinker/relinker" anyps5/relinker 0755 "$engine_hint"
 add_file "$system_libs/libAstroportHost.prx" anyps5/libs/libAstroportHost.prx 0644 "$engine_hint"
