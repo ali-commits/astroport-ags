@@ -89,7 +89,7 @@ frame interpolation, optical flow and the Vulkan backend of the FidelityFX SDK 1
 (https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK, tag `v1.1.4`, commit
 `c6efa6bf7f2027b3ec94f28578bb5965eabb9e55`), compiled from source together with its GLSL shaders. The SDK is
 not in this repository: the build fetches it at configure time and applies
-`engines/kyty/3rdparty/patches/fidelityfx-context-size.patch` and `fidelityfx-scratch-align.patch`. The licence below ships with
+`engines/kyty/3rdparty/patches/fidelityfx-context-size.patch` and `fidelityfx-scratch-align.patch` and `fidelityfx-descriptor-pool.patch`. The licence below ships with
 every package inside `licenses/NOTICE.md`. The SDK is under the MIT licence:
 
 > Copyright (C) 2024 Advanced Micro Devices, Inc.

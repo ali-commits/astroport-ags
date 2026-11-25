@@ -132,6 +132,7 @@ Line numbers below are of that commit, under `sdk/`.
 | `3rdparty/CMakeLists.txt` | +56 | fetch (tag, shallow, commit checked), patch, `kyty_ffx`, licence install |
 | `3rdparty/patches/fidelityfx-context-size.patch` | new | the context size |
 | `3rdparty/patches/fidelityfx-scratch-align.patch` | new | the Vulkan backend's scratch arrays 16-byte aligned (clang's aligned stores crashed the first context) |
+| `3rdparty/patches/fidelityfx-descriptor-pool.patch` | new | the backend's descriptor pool counts all six pool sizes (it said 5 and left out the storage buffers; validation warning) |
 | `CMakeLists.txt` | +93 | the option; the shader block (between `# BEGIN/END KYTY_FSR_FRAMEGEN`), which removes `frameGen.cpp` and `ffxBlobs.cpp` from the sources when OFF; `frame_gen_tests` |
 | `W/ffxCompat.h` | new | MSVC names for the SDK sources |
 | `W/ffxReflect.h` | new | SPIR-V binding reader (pure) |

@@ -93,7 +93,8 @@ project.
   SDK's shaders and their binding lists) and `ffxCompat.h` (force-included into the SDK's sources); hooks
   in `swapchain.cpp`, `vulkanWindow.cpp`, `upscalePass.h` and `upscalePass.cpp`; `tests/FrameGenTests.cpp`;
   the fetch and the library `kyty_ffx` in `3rdparty/CMakeLists.txt`, with
-  `3rdparty/patches/fidelityfx-context-size.patch` and `fidelityfx-scratch-align.patch`; the shaders, the option and the test in
+  `3rdparty/patches/fidelityfx-context-size.patch`, `fidelityfx-scratch-align.patch` and
+  `fidelityfx-descriptor-pool.patch`; the shaders, the option and the test in
   `CMakeLists.txt`. With the option off none of it is compiled and the hooks do nothing.
 - **Build on Linux with clang.** One line or a few each in `src/common/CMakeLists.txt`, `hleWaitStats.h`,
   `descriptors.cpp`, `ProgramCodec.cpp` and `ResourceTracking.cpp`.
@@ -183,6 +184,6 @@ ZArchive `d2c71773` (with `3rdparty/patches/zarchive-reader.patch`), Noto Sans `
 Only with `-DKYTY_FSR_FRAMEGEN=ON`: AMD FidelityFX SDK, tag `v1.1.4`, checked to be commit
 `c6efa6bf7f2027b3ec94f28578bb5965eabb9e55` (https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK,
 MIT, `LICENSE.txt` at its root), with `3rdparty/patches/fidelityfx-context-size.patch` and
-`fidelityfx-scratch-align.patch`. Seven of its
+`fidelityfx-scratch-align.patch` and `fidelityfx-descriptor-pool.patch`. Seven of its
 source files and eighteen of its GLSL shaders are built; none of its build files, tools or binaries is
 used.

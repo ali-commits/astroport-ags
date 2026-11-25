@@ -55,8 +55,9 @@ Verified:
   --no-undefined, exports only kyty_embed_api, 11 frame_gen tests pass. In game after three fixes
   (A2R10G10B10 copy-through, scratch alignment patch, separateDepthStencilLayouts): 294 of 294
   frames generated at a 30 cap, 3840x2160, contexts in 449 ms, 199 MiB; under the Khronos layer no
-  validation error (one warning: a descriptor set allocated from a pool without storage-buffer
-  entries, source not identified).
+  validation error (one warning: AMD's backend created its descriptor pool with poolSizeCount 5 of
+  6, leaving out storage buffers; fixed by fidelityfx-descriptor-pool.patch; the rerun shows no frame-generation
+  validation message). A 10-minute level run (r11-long) held 29.8 fps and ended only at its time limit.
 
 Not verifiable here without the owner (hands, eyes or decisions):
 

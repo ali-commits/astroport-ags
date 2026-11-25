@@ -188,10 +188,12 @@ if(KYTY_FSR_FRAMEGEN)
 		# Fetched and patched once, as ZArchive above.
 		UPDATE_DISCONNECTED TRUE
 		# The contexts' fixed size assumes a 16-bit wchar_t; the Vulkan backend's scratch arrays are
-		# only 4-byte aligned, and clang writes them with aligned SSE stores (a crash at the first context).
+		# only 4-byte aligned, and clang writes them with aligned SSE stores (a crash at the first context);
+		# its descriptor pool left out the storage buffers (poolSizeCount 5 of 6).
 		PATCH_COMMAND "${GIT_EXECUTABLE}" apply --ignore-whitespace
 			"${CMAKE_CURRENT_SOURCE_DIR}/patches/fidelityfx-context-size.patch"
 			"${CMAKE_CURRENT_SOURCE_DIR}/patches/fidelityfx-scratch-align.patch"
+			"${CMAKE_CURRENT_SOURCE_DIR}/patches/fidelityfx-descriptor-pool.patch"
 		SOURCE_SUBDIR kyty-none
 	)
 	FetchContent_MakeAvailable(fidelityfx_sdk)
