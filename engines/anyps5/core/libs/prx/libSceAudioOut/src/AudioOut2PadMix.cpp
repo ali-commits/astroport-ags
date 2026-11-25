@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cmath>
 #include <stdexcept>
+#include <utility>
 
 AudioOut2Route AudioOut2RouteForPort(std::uint16_t type, std::uint32_t channels) {
     if (type == AUDIO_OUT2_PORT_TYPE_PAD_SPEAKER && (channels == 1 || channels == 2)) return AudioOut2Route::PadSpeaker;
@@ -70,4 +71,54 @@ void AudioOut2WritePadFrames(const float* pad, const AudioOut2PadLayout& layout,
             out[static_cast<std::size_t>(frame) * layout.channels + layout.position[channel]] = pad[static_cast<std::size_t>(frame) * AUDIO_OUT2_PAD_CHANNELS + channel];
         }
     }
+}
+
+bool AudioOut2PadDeviceWanted(const char* name, const char* sink) {
+    if (sink == nullptr || *sink == '\0') return AudioOut2IsPadAudioDevice(name);
+    return name != nullptr && std::strcmp(name, sink) == 0;
+}
+
+float AudioOut2HapticGain(float gain) {
+    return std::isfinite(gain) ? std::clamp(gain, 0.0f, 4.0f) : 1.0f;
+}
+
+std::vector<float> AudioOut2PadStereo(const float* pad, std::uint32_t frames, std::uint32_t left, float gain) {
+    std::vector<float> stereo(static_cast<std::size_t>(frames) * 2);
+    for (std::uint32_t frame = 0; frame < frames; ++frame) {
+        const float* src = pad + static_cast<std::size_t>(frame) * AUDIO_OUT2_PAD_CHANNELS + left;
+        stereo[frame * 2 + 0] = std::clamp(src[0] * gain, -1.0f, 1.0f);
+        stereo[frame * 2 + 1] = std::clamp(src[1] * gain, -1.0f, 1.0f);
+    }
+    return stereo;
+}
+
+bool AudioOut2PadAudioQueue::Push(AudioOut2PadAudioSink sink, std::uint32_t rate, bool speaker, std::uint32_t channels, std::vector<float> samples) {
+    bool taken = false;
+    {
+        std::lock_guard lock(mutex);
+        if (!worker.joinable()) worker = std::thread([this] { Run(); });
+        if (grains.size() >= MAX_GRAINS) grains.pop_front();
+        grains.push_back({sink, rate, speaker, channels, std::move(samples)});
+        taken = accepted[speaker ? 1 : 0];
+    }
+    ready.notify_one();
+    return taken;
+}
+
+void AudioOut2PadAudioQueue::Run() {
+    std::unique_lock lock(mutex);
+    for (;;) {
+        ready.wait(lock, [this] { return !grains.empty(); });
+        const auto grain = std::move(grains.front());
+        grains.pop_front();
+        lock.unlock();
+        const auto queued = grain.sink(grain.rate, grain.speaker ? 1 : 0, grain.samples.data(), static_cast<std::uint32_t>(grain.samples.size() / grain.channels), grain.channels, 1, 1.0f);
+        lock.lock();
+        accepted[grain.speaker ? 1 : 0] = queued != 0;
+    }
+}
+
+AudioOut2PadAudioQueue& AudioOut2PadAudio() {
+    static auto* queue = new AudioOut2PadAudioQueue();
+    return *queue;
 }

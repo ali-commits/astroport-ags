@@ -502,6 +502,8 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 
 | Name | Kind | Source | Default | Description |
 |------|------|--------|---------|-------------|
+| `APS5_PAD_VIBRATION_DUMP` | string | `core/libs/prx/libSceAudioOut/src/AudioOut2Context.cpp` |  | path of a file that receives the mixed controller haptic channel pair of every AudioOut2 grain as raw 32-bit floats |
+| `APS5_PAD_VIBRATION_VIA_HOST` | string | `core/libs/prx/libSceAudioOut/src/AudioOut2Context.cpp` | on | `0` keeps the haptic channels on the controller sound card when an external renderer is installed; otherwise they play through the renderer while that sound card is open |
 | `APS5_TRACE_AUDIOOUT` | presence | `core/libs/prx/libSceAudioOut/src/AudioOut.cpp` |  | logs each audio-out port opened with its type, sample count, frequency and format |
 | `APS5_TRACE_AUDIOOUT2` | presence | `core/libs/prx/libSceAudioOut/src/AudioOut2Context.cpp` |  | prints the title's AudioOut2 context and port parameters and stream activity |
 
@@ -533,6 +535,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 
 | Name | Kind | Source | Default | Description |
 |------|------|--------|---------|-------------|
+| `APS5_PAD_TRIGGER_EFFECT_STATE` | string | `core/libs/prx/libScePad/Export.cpp` | off | a value starting with `1` makes `scePadGetTriggerEffectState` derive each trigger's state from its effect and travel instead of reporting off |
 | `APS5_PAD_INPUT_FILE` | string | `core/libs/prx/libScePad/src/PadState.cpp` |  | path of the file polled for injected pad button and stick commands |
 
 ### libScePlayGo
@@ -546,6 +549,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | Name | Kind | Source | Default | Description |
 |------|------|--------|---------|-------------|
 | `APS5_SAVEDATA_TRACE` | presence | `core/libs/prx/libSceSaveData.native/Export.cpp` | 3 | logs every save-data operation instead of the first three at each logging site |
+| `APS5_SAVEDATA_TRANSFER_AS_MOUNT` | string | `core/libs/prx/libSceSaveData.native/Export.cpp` | off | any value but `0` makes `sceSaveDataTransferringMount` mount the named directory as a regular save, created when missing, instead of reporting no transfer data |
 
 ### libSceSystemService
 

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -19,6 +20,7 @@
 #include "AudioOutShutdown.hpp"
 #include "prx/libSceAudioOut/include/AudioOutSdl.hpp"
 #include "prx/libScePad/include/PadState.hpp"
+#include "prx/libkernel/include/ExternalRenderer.hpp"
 
 using Clock = std::chrono::steady_clock;
 
@@ -157,7 +159,7 @@ static void OpenPadDevice(AudioOut2Context& context) {
     const int count = SDL_GetNumAudioDevices(0);
     for (int index = 0; index < count; index++) {
         const char* listed = SDL_GetAudioDeviceName(index, 0);
-        if (!AudioOut2IsPadAudioDevice(listed)) continue;
+        if (!AudioOut2PadDeviceWanted(listed, std::getenv("AGS_CONTROLLER_AUDIO_SINK"))) continue;
         const std::string name(listed);
         SDL_AudioSpec native{};
         if (SDL_GetAudioDeviceSpec(index, 0, &native) == 0 && native.channels != 0 && native.channels != AUDIO_OUT2_PAD_CHANNELS) continue;
@@ -217,6 +219,31 @@ static void QueuePadGrain(AudioOut2Context& context) {
     SDL_QueueAudio(context.padDevice, context.padFrames.data(), grainBytes);
 }
 
+static bool VibrationViaRenderer() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("APS5_PAD_VIBRATION_VIA_HOST");
+        return value == nullptr || std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
+static void DumpVibration(const AudioOut2Context& context, const float* pad) {
+    static std::FILE* file = [] {
+        const char* path = std::getenv("APS5_PAD_VIBRATION_DUMP");
+        return path != nullptr && path[0] != '\0' ? std::fopen(path, "wb") : nullptr;
+    }();
+    if (file == nullptr) return;
+    const auto pairs = AudioOut2PadStereo(pad, context.grain, AUDIO_OUT2_PAD_VIBRATION_LEFT, 1.0f);
+    std::fwrite(pairs.data(), sizeof(float), pairs.size(), file);
+    std::fflush(file);
+}
+
+static bool QueueOnRenderer(const ExternalRenderer& renderer, const AudioOut2Context& context, const float* pad, bool speaker) {
+    const auto left = speaker ? AUDIO_OUT2_PAD_SPEAKER_LEFT : AUDIO_OUT2_PAD_VIBRATION_LEFT;
+    const float gain = speaker ? 1.0f : AudioOut2HapticGain(renderer.hapticGain());
+    return AudioOut2PadAudio().Push(renderer.padAudio, AUDIO_OUT2_SAMPLE_RATE, speaker, 2, AudioOut2PadStereo(pad, context.grain, left, gain));
+}
+
 static void Render(AudioOut2Context& context, const AudioOut2Grain& grain) {
     float* pad = nullptr;
     if (context.padDevice != 0 || AudioOut2HasPadPorts(context)) {
@@ -232,8 +259,20 @@ static void Render(AudioOut2Context& context, const AudioOut2Grain& grain) {
     }
     if (pad != nullptr) {
         AudioOut2FinishPadMix(pad, context.grain);
-        if (context.padDevice != 0) QueuePadGrain(context);
-        else {
+        DumpVibration(context, pad);
+        const auto* renderer = ExternalRendererGet_nid_no_patch();
+        const bool vibrationOnRenderer = renderer != nullptr && (context.padDevice == 0 || VibrationViaRenderer()) && QueueOnRenderer(*renderer, context, pad, false);
+        context.padSpeakerOnRenderer = renderer != nullptr && context.padDevice == 0 && QueueOnRenderer(*renderer, context, pad, true);
+        if (context.padDevice != 0) {
+            if (vibrationOnRenderer) {
+                for (std::uint32_t frame = 0; frame < context.grain; ++frame) {
+                    float* channels = pad + static_cast<std::size_t>(frame) * AUDIO_OUT2_PAD_CHANNELS;
+                    channels[AUDIO_OUT2_PAD_VIBRATION_LEFT] = 0.0f;
+                    channels[AUDIO_OUT2_PAD_VIBRATION_RIGHT] = 0.0f;
+                }
+            }
+            QueuePadGrain(context);
+        } else if (!vibrationOnRenderer) {
             const auto rumble = AudioOut2RumbleFromPadFrames(pad, context.grain);
             PadSubmitAudioHaptics_nid_postfix(rumble[0], rumble[1]);
         }

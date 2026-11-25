@@ -890,9 +890,22 @@ static int transferringMount(const SaveDataTransferringMount* mount, SaveDataMou
     return SAVE_DATA_ERROR_NOT_FOUND;
 }
 
+static int transferringMountAsMount(const SaveDataTransferringMount* mount, SaveDataMountResult* mount_result) {
+    const char* asMount = std::getenv("APS5_SAVEDATA_TRANSFER_AS_MOUNT");
+    if (asMount == nullptr || std::strcmp(asMount, "0") == 0 || mount == nullptr || mount->dir_name == nullptr || mount_result == nullptr) {
+        return transferringMount(mount, mount_result);
+    }
+    std::memset(mount_result, 0, sizeof(*mount_result));
+    SaveDataMount3 regular{};
+    regular.user_id = mount->user_id;
+    regular.dir_name = mount->dir_name;
+    regular.mount_mode = SAVE_DATA_MOUNT_MODE_CREATE2 | SAVE_DATA_MOUNT_MODE_RDWR;
+    return mount3(&regular, mount_result);
+}
+
 int APS5_VABI sceSaveDataTransferringMount(const SaveDataTransferringMount* mount, SaveDataMountResult* mount_result) {
-    const int rc = transferringMount(mount, mount_result);
-    SAVEDATA_TRACE("transferringMount -> 0x%08x", static_cast<unsigned>(rc));
+    const int rc = transferringMountAsMount(mount, mount_result);
+    SAVEDATA_TRACE("transferringMount user=%d title=%.*s dir=%.*s -> 0x%08x", mount != nullptr ? mount->user_id : -1, static_cast<int>(sizeof(SceSaveDataTitleId::data)), mount != nullptr && mount->title_id != nullptr ? mount->title_id->data : "(null)", static_cast<int>(sizeof(SceSaveDataDirName::data)), mount != nullptr && mount->dir_name != nullptr ? mount->dir_name->data : "(null)", static_cast<unsigned>(rc));
     return rc;
 }
 

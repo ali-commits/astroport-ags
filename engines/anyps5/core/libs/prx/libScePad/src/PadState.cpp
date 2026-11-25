@@ -409,6 +409,8 @@ void Pad::SetTriggerCommand(int port, int trigger, const std::uint8_t* command) 
     }
     req.valid = req.effect[0] != 0x05;
     if (!req.valid) req.fallback = 0;
+    req.set = true;
+    std::memcpy(req.command, command, sizeof(req.command));
     std::lock_guard lock(stateMutex);
     auto& output = slots[port].output;
     output.trigger[trigger] = req;
@@ -418,6 +420,22 @@ void Pad::SetTriggerCommand(int port, int trigger, const std::uint8_t* command) 
 
 void Pad::SetTriggerCommand(int trigger, const std::uint8_t* command) {
     SetTriggerCommand(0, trigger, command);
+}
+
+std::array<std::int32_t, 2> Pad::TriggerEffectStates(int port) {
+    if (port < 0 || port >= PAD_MAX_CONTROLLERS) return {};
+    std::lock_guard lock(stateMutex);
+    const auto& slot = slots[port];
+    const auto travel = [&](std::uint8_t analog, std::uint32_t bit) -> std::uint8_t {
+        return analog == 0 && (slot.state.buttons & bit) != 0 ? 255 : analog;
+    };
+    const std::uint8_t travels[2] = {travel(slot.state.analogButtonsL2, 0x100), travel(slot.state.analogButtonsR2, 0x200)};
+    std::array<std::int32_t, 2> states{};
+    for (int trigger = 0; trigger < 2; ++trigger) {
+        const auto& request = slot.output.trigger[trigger];
+        if (request.set) states[trigger] = PadTriggerEffectState(request.command, travels[trigger]);
+    }
+    return states;
 }
 
 void Pad::ResetOrientation(int port) {

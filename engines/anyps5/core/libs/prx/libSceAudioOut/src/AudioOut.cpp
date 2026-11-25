@@ -3,11 +3,13 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 #include <prx/libc/include/General.hpp>
 
@@ -20,6 +22,7 @@
 #include "AudioOutShutdown.hpp"
 #include "AudioOut2PadMix.hpp"
 #include "prx/libScePad/include/PadState.hpp"
+#include "prx/libkernel/include/ExternalRenderer.hpp"
 
 static constexpr int PORT_TYPE_MAIN = 0;
 static constexpr int PORT_TYPE_BGM = 1;
@@ -167,7 +170,7 @@ static bool openVibrationDevice(Port& port) {
     if (count < 0) throw std::runtime_error(std::string("AudioOut: could not enumerate controller sound cards: ") + SDL_GetError());
     for (int index = 0; index < count; ++index) {
         const char* name = SDL_GetAudioDeviceName(index, 0);
-        if (!AudioOut2IsPadAudioDevice(name)) continue;
+        if (!AudioOut2PadDeviceWanted(name, std::getenv("AGS_CONTROLLER_AUDIO_SINK"))) continue;
         const std::string controllerName(name);
         SDL_AudioSpec native{};
         if (SDL_GetAudioDeviceSpec(index, 0, &native) == 0 && native.channels != 0 && native.channels != AUDIO_OUT2_PAD_CHANNELS) continue;
@@ -332,6 +335,20 @@ static void paceVirtualPort(Port& port, bool hasData, std::unique_lock<std::mute
     port.virtualQueueEnd += (1000000ULL * port.samplesNum) / port.freq;
 }
 
+static bool outputOnRenderer(Port& port, const void* data, std::unique_lock<std::mutex>& lock) {
+    const auto* renderer = ExternalRendererGet_nid_no_patch();
+    if (renderer == nullptr || data == nullptr || (port.type != PORT_TYPE_PADSPK && port.type != PORT_TYPE_VIBRATION) || port.channels < 1 || port.channels > 2) return false;
+    const float gain = port.type == PORT_TYPE_VIBRATION ? AudioOut2HapticGain(renderer->hapticGain()) : 1.0f;
+    std::vector<float> samples(static_cast<std::size_t>(port.samplesNum) * port.channels);
+    for (std::size_t index = 0; index < samples.size(); ++index) {
+        const float sample = formatIsFloat(port.format) ? static_cast<const float*>(data)[index] : static_cast<const std::int16_t*>(data)[index] / 32768.0f;
+        samples[index] = std::clamp(sample * static_cast<float>(port.volume[index % port.channels]) / static_cast<float>(DEFAULT_VOLUME) * gain, -1.0f, 1.0f);
+    }
+    if (!AudioOut2PadAudio().Push(renderer->padAudio, port.freq, port.type == PORT_TYPE_PADSPK, static_cast<std::uint32_t>(port.channels), std::move(samples))) return false;
+    paceVirtualPort(port, true, lock);
+    return true;
+}
+
 static void outputVirtualPort(Port& port, const void* data, std::unique_lock<std::mutex>& lock) {
     const auto pad = port.type == PORT_TYPE_VIBRATION && data != nullptr ? prepareVibration(port, data) : std::vector<float>{};
     paceVirtualPort(port, data != nullptr, lock);
@@ -485,10 +502,12 @@ int APS5_VABI sceAudioOutOutput(int handle, const void* ptr) try {
         return -2144993277;
     }
 
-    if (port->device == 0) {
-        outputVirtualPort(*port, ptr, lock);
-    } else {
-        queueAudio(*port, ptr, lock);
+    if (!outputOnRenderer(*port, ptr, lock)) {
+        if (port->device == 0) {
+            outputVirtualPort(*port, ptr, lock);
+        } else {
+            queueAudio(*port, ptr, lock);
+        }
     }
     if (ptr != nullptr) port->lastDataOutputTime = sceKernelGetProcessTime();
     return static_cast<int>(port->samplesNum);
@@ -522,6 +541,7 @@ int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num) 
     Port& first = *getPort(param[0].handle);
     for (std::uint32_t i = 0; i < num; i++) {
         Port& port = *getPort(param[i].handle);
+        if (outputOnRenderer(port, param[i].ptr, lock)) continue;
         if (port.device == 0) {
             outputVirtualPort(port, param[i].ptr, lock);
         } else {

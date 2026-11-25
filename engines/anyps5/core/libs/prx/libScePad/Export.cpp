@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <chrono>
@@ -230,6 +231,14 @@ int APS5_VABI scePadGetTriggerEffectState(int handle, PadTriggerEffectStateInfor
  if (!KnownHandle(handle)) return PAD_ERROR_INVALID_HANDLE;
  if (info == nullptr) return PAD_ERROR_INVALID_ARG;
  std::memset(info, 0, sizeof(*info));
+ static const bool computed = [] {
+  const char* value = std::getenv("APS5_PAD_TRIGGER_EFFECT_STATE");
+  return value != nullptr && value[0] == '1';
+ }();
+ if (!computed || SpecialHandle(handle)) return PAD_OK;
+ const auto states = Pad::TriggerEffectStates(PortOf(handle));
+ info->state[0] = states[0];
+ info->state[1] = states[1];
  return PAD_OK;
 }
 

@@ -401,6 +401,14 @@ void TestPad(const AstroportHostApi& api) {
     Pad::SetLightBar(0, true, 1, 2, 3);
     Require(api.padFetchOutput(0, &sequence, &output) == 1, "changed pad output was not reported");
     Require(output.rumbleLarge == 10 && output.rumbleSmall == 20 && output.lightBarValid == 1 && output.lightBar[0] == 1 && output.lightBar[1] == 2 && output.lightBar[2] == 3, "the fetched pad output is wrong");
+    Require(output.triggerSet[0] == 0 && output.triggerSet[1] == 0, "a trigger command was reported before one was set");
+    std::uint8_t command[56];
+    for (std::size_t index = 0; index < sizeof(command); ++index) command[index] = static_cast<std::uint8_t>(index + 1);
+    command[0] = 2;
+    command[1] = command[2] = command[3] = 0;
+    Pad::SetTriggerCommand(0, 1, command);
+    Require(api.padFetchOutput(0, &sequence, &output) == 1, "a new trigger command was not reported");
+    Require(output.triggerSet[0] == 0 && output.triggerSet[1] == 1 && std::memcmp(output.trigger[1], command, sizeof(command)) == 0, "the raw trigger command was not handed over");
     Require(api.padFetchOutput(9, &sequence, &output) == 0, "an invalid port reported output");
 }
 

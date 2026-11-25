@@ -212,6 +212,10 @@ int PadFetchOutput(int port, std::uint32_t* sequence, AstroportPadOutput* out) {
         out->audioRumbleSmall = state.audioVibrationSmall;
         out->lightBarValid = state.lightBarValid ? 1 : 0;
         std::copy(std::begin(state.lightBar), std::end(state.lightBar), std::begin(out->lightBar));
+        for (int trigger = 0; trigger < 2; ++trigger) {
+            out->triggerSet[trigger] = state.trigger[trigger].set ? 1 : 0;
+            std::copy(std::begin(state.trigger[trigger].command), std::end(state.trigger[trigger].command), std::begin(out->trigger[trigger]));
+        }
         return 1;
     });
 }

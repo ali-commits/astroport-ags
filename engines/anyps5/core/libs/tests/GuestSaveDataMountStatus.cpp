@@ -3,6 +3,7 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "SceTypes.hpp"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <random>
@@ -238,6 +239,42 @@ void CheckInvalidNamesAreRejected() {
 
 }
 
+void SetTransferAsMount(const char* value) {
+#ifdef _WIN32
+    _putenv_s("APS5_SAVEDATA_TRANSFER_AS_MOUNT", value != nullptr ? value : "");
+#else
+    if (value != nullptr) setenv("APS5_SAVEDATA_TRANSFER_AS_MOUNT", value, 1);
+    else unsetenv("APS5_SAVEDATA_TRANSFER_AS_MOUNT");
+#endif
+}
+
+void CheckTransferringMountFallback() {
+    SceSaveDataDirName dirName{};
+    std::memcpy(dirName.data, "transferred", sizeof("transferred"));
+    SaveDataTransferringMount mount{};
+    mount.user_id = 1;
+    mount.dir_name = &dirName;
+    SaveDataMountResult result{};
+    for (const char* off : {static_cast<const char*>(nullptr), "0"}) {
+        SetTransferAsMount(off);
+        std::memset(&result, 0xAA, sizeof(result));
+        Check(sceSaveDataTransferringMount(&mount, &result) == SaveDataErrorNotFound, "transfer mount without the fallback is NOT_FOUND");
+        Check(result.mount_point.data[0] == '\0' && !std::filesystem::exists("_sd/transferred"), "transfer mount without the fallback mounts nothing");
+    }
+    SetTransferAsMount("1");
+    for (const std::uint32_t expectedStatus : {1u, 0u}) {
+        std::memset(&result, 0xAA, sizeof(result));
+        Check(sceSaveDataTransferringMount(&mount, &result) == 0, "transfer mount with the fallback mounts");
+        Check(result.mount_status == expectedStatus && result.mount_point.data[0] == '/', "transfer mount with the fallback reports a regular mount");
+        Check(sceSaveDataUmount2(0, &result.mount_point) == 0, "the fallback mount unmounts");
+    }
+    Check(sceSaveDataTransferringMountPs4(&mount, &result) == SaveDataErrorNotFound, "the PS4 transfer mount has no fallback");
+    mount.dir_name = nullptr;
+    Check(sceSaveDataTransferringMount(&mount, &result) == SaveDataErrorNotFound, "a transfer mount without a directory name is NOT_FOUND");
+    Check(sceSaveDataTransferringMount(&mount, nullptr) == SaveDataErrorNotFound, "a transfer mount without a result is NOT_FOUND");
+    SetTransferAsMount(nullptr);
+}
+
 int main() {
     const auto root = std::filesystem::temp_directory_path() / ("anyps5-savedata-mount-status-" + std::to_string(std::random_device{}()));
     std::filesystem::create_directories(root);
@@ -250,6 +287,7 @@ int main() {
     MountAndCheck("fresh", MountReadWrite | MountCreate2, 0u, "CREATE2 of an existing save");
     MountAndCheck("made", MountReadWrite | MountCreate, 1u, "CREATE of a missing save");
     MountAndCheck("made", MountReadWrite, 0u, "open of an existing save");
+    CheckTransferringMountFallback();
     CheckFailedMountKeepsResult();
     CheckEquivalentMounts();
     CheckInvalidNamesAreRejected();

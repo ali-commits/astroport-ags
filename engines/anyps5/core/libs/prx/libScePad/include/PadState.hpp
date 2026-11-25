@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <exception>
 #include "SceTypes.hpp"
+#include "prx/libScePad/include/PadTriggerEffect.hpp"
 
 constexpr std::uint16_t kTouchPadWidth = 1920;
 constexpr std::uint16_t kTouchPadHeight = 1080;
@@ -38,6 +39,8 @@ struct PadTriggerRequest {
     std::uint8_t effect[11]{};
     std::uint8_t fallback = 0;
     std::uint32_t mode = 0;
+    bool set = false;
+    std::uint8_t command[kPadTriggerCommandSize]{};
 };
 
 struct PadOutputState {
@@ -67,6 +70,7 @@ void SetLightBar(int port, bool valid, std::uint8_t r, std::uint8_t g, std::uint
 void SetLightBar(bool valid, std::uint8_t r, std::uint8_t g, std::uint8_t b);
 void SetTriggerCommand(int port, int trigger, const std::uint8_t* command);
 void SetTriggerCommand(int trigger, const std::uint8_t* command);
+std::array<std::int32_t, 2> TriggerEffectStates(int port);
 void ResetOrientation(int port = 0);
 void SetMotionEnabled(int port, bool enabled);
 void SetMotionEnabled(bool enabled);

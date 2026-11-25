@@ -1,12 +1,79 @@
 #include "prx/libSceAudioOut/src/AudioOut2PadMix.hpp"
 
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
+#include <mutex>
 #include <stdexcept>
+#include <thread>
+#include <vector>
 
 static void Require(bool value, const char*) {
     if (!value) std::abort();
+}
+
+static std::mutex g_sinkGate;
+static std::mutex g_sinkLock;
+static std::vector<float> g_sinkSeen;
+static std::atomic<int> g_sinkCalls{0};
+static std::atomic<bool> g_sinkAccepts{false};
+
+static std::uint64_t Sink(std::uint32_t rate, int speaker, const void* samples, std::uint32_t frames, std::uint32_t channels, int isFloat, float gain) {
+    Require(rate == 48000 && frames == 1 && channels == 2 && isFloat == 1 && gain == 1.0f, "the sink receives the grain as it was pushed");
+    {
+        std::lock_guard seen(g_sinkLock);
+        g_sinkSeen.push_back(static_cast<const float*>(samples)[0] + (speaker != 0 ? 1000.0f : 0.0f));
+    }
+    g_sinkCalls.fetch_add(1);
+    std::lock_guard gate(g_sinkGate);
+    return g_sinkAccepts.load() ? 5000 : 0;
+}
+
+static void WaitForSinkCalls(int calls) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (g_sinkCalls.load() < calls) {
+        Require(std::chrono::steady_clock::now() < deadline, "the worker delivers queued grains");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+static void CheckPadAudioQueue() {
+    auto& queue = *new AudioOut2PadAudioQueue();
+    const auto push = [&](bool speaker, float value) { return queue.Push(Sink, 48000, speaker, 2, {value, value}); };
+    {
+        std::unique_lock gate(g_sinkGate);
+        Require(!push(false, 0.0f), "nothing is accepted before the sink answered");
+        WaitForSinkCalls(1);
+        for (int grain = 1; grain <= 40; ++grain) Require(!push(false, static_cast<float>(grain)), "a push never waits for the sink");
+    }
+    WaitForSinkCalls(1 + static_cast<int>(AudioOut2PadAudioQueue::MAX_GRAINS));
+    {
+        std::lock_guard seen(g_sinkLock);
+        Require(g_sinkSeen.size() == 1 + AudioOut2PadAudioQueue::MAX_GRAINS && g_sinkSeen[0] == 0.0f, "the grain in flight is delivered");
+        for (std::size_t index = 1; index < g_sinkSeen.size(); ++index) Require(g_sinkSeen[index] == static_cast<float>(8 + index), "the oldest waiting grains are dropped, the rest keep their order");
+    }
+    const auto eventually = [&](bool speaker, bool expected) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (push(speaker, 50.0f) != expected) {
+            Require(std::chrono::steady_clock::now() < deadline, "the sink's answer reaches the next pushes");
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    g_sinkAccepts.store(true);
+    eventually(false, true);
+    Require(!push(true, 52.0f), "speaker and haptic acceptance are separate");
+    eventually(true, true);
+    g_sinkAccepts.store(false);
+    eventually(false, false);
+    eventually(true, false);
+    std::lock_guard seen(g_sinkLock);
+    bool speakerSeen = false;
+    for (const float value : g_sinkSeen) speakerSeen = speakerSeen || value == 1052.0f;
+    Require(speakerSeen, "speaker grains reach the sink as speaker grains");
 }
 
 template<typename TAction>
@@ -119,6 +186,28 @@ int main() {
         AudioOut2WritePadFrames(pad, quad, out, 2);
         for (int index = 0; index < 8; index++) Require(out[index] == pad[index], "quad frames are the pad mix");
     }
+
+    {
+        Require(AudioOut2PadDeviceWanted("AGS Controller 1", "AGS Controller 1"), "the named sink is used");
+        Require(!AudioOut2PadDeviceWanted("DualSense Wireless Controller", "AGS Controller 1"), "a named sink excludes other pads");
+        Require(!AudioOut2PadDeviceWanted(nullptr, "AGS Controller 1"), "null name with a sink");
+        Require(AudioOut2PadDeviceWanted("DualSense Wireless Controller", ""), "an empty sink is the name match");
+        Require(AudioOut2PadDeviceWanted("DualSense Wireless Controller", nullptr), "no sink is the name match");
+        Require(!AudioOut2PadDeviceWanted("HDMI Digital Stereo", nullptr), "no sink still skips other cards");
+    }
+
+    {
+        Require(AudioOut2HapticGain(2.5f) == 2.5f && AudioOut2HapticGain(0.0f) == 0.0f, "a gain in range is kept");
+        Require(AudioOut2HapticGain(9.0f) == 4.0f && AudioOut2HapticGain(-1.0f) == 0.0f, "the gain is clamped to 0..4");
+        Require(AudioOut2HapticGain(std::numeric_limits<float>::quiet_NaN()) == 1.0f && AudioOut2HapticGain(std::numeric_limits<float>::infinity()) == 1.0f, "a non-finite gain is 1");
+        const float pad[2 * AUDIO_OUT2_PAD_CHANNELS] = {0.1f, 0.2f, 0.3f, -0.4f, 0.5f, 0.6f, 0.7f, -0.8f};
+        const auto haptics = AudioOut2PadStereo(pad, 2, AUDIO_OUT2_PAD_VIBRATION_LEFT, 2.0f);
+        Require(haptics.size() == 4 && haptics[0] == 0.6f && haptics[1] == -0.8f && haptics[2] == 1.0f && haptics[3] == -1.0f, "haptic channels are scaled and clipped at full scale");
+        const auto speaker = AudioOut2PadStereo(pad, 2, AUDIO_OUT2_PAD_SPEAKER_LEFT, 1.0f);
+        Require(speaker[0] == 0.1f && speaker[1] == 0.2f && speaker[2] == 0.5f && speaker[3] == 0.6f, "speaker channels are the first pair");
+    }
+
+    CheckPadAudioQueue();
 
     return 0;
 }

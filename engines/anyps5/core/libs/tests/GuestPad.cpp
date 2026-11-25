@@ -11,6 +11,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <string>
 #include <thread>
 #include <utility>
@@ -613,6 +614,66 @@ static void CheckTriggerEffect(int user, int handle) {
     Require(scePadClose_nid_postfix(special) == PAD_OK);
 }
 
+static void CheckTriggerEffectState(int handle) {
+    const auto state = [](std::uint32_t mode, std::initializer_list<std::uint8_t> data, std::uint8_t travel) {
+        std::array<std::uint8_t, kPadTriggerCommandSize> command{};
+        std::memcpy(command.data(), &mode, sizeof(mode));
+        std::copy(data.begin(), data.end(), command.begin() + 8);
+        return PadTriggerEffectState(command.data(), travel);
+    };
+    Require(state(0, {9, 9, 9}, 255) == 0 && state(7, {1, 1, 1}, 255) == 0);
+    Require(state(1, {3, 5}, 0) == 1 && state(1, {3, 5}, 76) == 1 && state(1, {3, 5}, 77) == 2 && state(1, {3, 0}, 255) == 1);
+    Require(state(1, {0, 5}, 7) == 1 && state(1, {0, 5}, 8) == 2);
+    Require(state(2, {2, 5, 8}, 0) == 3 && state(2, {2, 5, 8}, 52) == 4 && state(2, {2, 5, 8}, 127) == 4 && state(2, {2, 5, 8}, 128) == 5 && state(2, {2, 5, 8}, 255) == 5);
+    Require(state(3, {4, 6, 30}, 102) == 6 && state(3, {4, 6, 30}, 103) == 7 && state(3, {4, 0, 30}, 255) == 6 && state(3, {4, 6, 0}, 255) == 6);
+    Require(state(4, {0, 0, 0, 0, 0, 0, 0, 0, 0, 7}, 229) == 1 && state(4, {0, 0, 0, 0, 0, 0, 0, 0, 0, 7}, 231) == 2 && state(4, {7}, 7) == 1);
+    Require(state(5, {5, 9, 1, 8}, 127) == 1 && state(5, {5, 9, 1, 8}, 128) == 2);
+    Require(state(6, {40, 0, 0, 3}, 52) == 7 && state(6, {40, 0, 0, 3}, 51) == 6 && state(6, {0, 0, 0, 3}, 52) == 6 && state(6, {40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5}, 255) == 7);
+
+#ifdef _WIN32
+    Require(_putenv_s("APS5_PAD_TRIGGER_EFFECT_STATE", "1") == 0);
+#else
+    Require(setenv("APS5_PAD_TRIGGER_EFFECT_STATE", "1", 1) == 0);
+#endif
+    std::array<std::uint8_t, 120> param{};
+    const std::uint32_t weapon = 2;
+    const std::uint32_t feedback = 1;
+    std::memcpy(param.data() + 8, &weapon, sizeof(weapon));
+    param[16] = 2;
+    param[17] = 5;
+    param[18] = 8;
+    std::memcpy(param.data() + 64, &feedback, sizeof(feedback));
+    param[72] = 3;
+    param[73] = 5;
+    param[0] = 0x2;
+    Require(scePadSetTriggerEffect(handle, param.data()) == PAD_OK);
+    PadOutputState output;
+    std::uint32_t sequence = 0;
+    Require(PadFetchOutput_nid_postfix(&sequence, &output));
+    Require(output.trigger[1].set && std::memcmp(output.trigger[1].command, param.data() + 64, kPadTriggerCommandSize) == 0);
+    PadInputState input;
+    input.buttons = static_cast<std::uint32_t>(Pad::PadButton::L2);
+    input.analogButtonsR2 = 200;
+    PadPublishInput_nid_postfix(input);
+    PadTriggerEffectStateInformation info{{9, 9}};
+    Require(scePadGetTriggerEffectState(handle, &info) == PAD_OK && info.state[1] == 2);
+    Require(info.state[0] == 0);
+    param[0] = 0x1;
+    Require(scePadSetTriggerEffect(handle, param.data()) == PAD_OK);
+    Require(scePadGetTriggerEffectState(handle, &info) == PAD_OK && info.state[0] == 5 && info.state[1] == 2);
+    input.buttons = 0;
+    input.analogButtonsR2 = 0;
+    PadPublishInput_nid_postfix(input);
+    Require(scePadGetTriggerEffectState(handle, &info) == PAD_OK && info.state[0] == 3 && info.state[1] == 1);
+    Require(scePadGetTriggerEffectState(handle, nullptr) == PAD_ERROR_INVALID_ARG);
+    std::memset(param.data() + 8, 0, 112);
+    param[0] = 0x3;
+    Require(scePadSetTriggerEffect(handle, param.data()) == PAD_OK);
+    Require(scePadGetTriggerEffectState(handle, &info) == PAD_OK && info.state[0] == 0 && info.state[1] == 0);
+    PadPublishInput_nid_postfix(PadInputState{});
+    Pad::ReadState();
+}
+
 static void CheckAccessibilityControllerState(int handle) {
     std::uint32_t state = 7;
     Require(scePadGetAccessibilityControllerState(handle + 1, nullptr) == PAD_ERROR_INVALID_ARG);
@@ -866,6 +927,7 @@ int main() {
     CheckLightBarResets(user, handle);
     CheckVibrationForce(user, handle);
     CheckTriggerEffect(user, handle);
+    CheckTriggerEffectState(handle);
     CheckControllerType(handle);
     CheckInjectedState(commandPath);
     CheckInjectedQueueTimes(commandPath);
