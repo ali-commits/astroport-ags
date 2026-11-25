@@ -42,7 +42,7 @@ pub fn job_plan(install: &Path, data: &Path, dump: &Path) -> Value {
 // sheet §2.8 (decision 0052): upscaling is perf.upscaling, perf.upscaler and perf.render_scale; declared on NVIDIA only (DLSS), omitted elsewhere.
 // 0052 addendum: render_sizes lists the fixed render patches; AGS snaps p% of Resolution to the nearest height (ties to the larger), as launch does.
 // sheet §2.5: perf.low_latency reaches launch.plan standard from M4 (honoured, applier source); its registry default is "off".
-// 0052 addendum: perf.low_latency accepts a source default; AstroPort runs it on, as play-hybrid.sh does.
+// 0052 addendum: perf.low_latency accepts a source default; AstroPort runs it on, as play.sh does.
 // sheet §2.2: perf.frame_generation absent = AGS offers lsfg for local play; not declaring it is "does not refuse it".
 pub fn standard_support(nvidia: bool) -> Value {
     let mut standard = json!({

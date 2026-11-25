@@ -226,8 +226,8 @@ pub fn plan(l: &Launch, params: &Value) -> Result<Value, String> {
         .is_some_and(|value| value == "true")
     {
         (
-            selection.env.remove("KYTY_GPU_WIDTH"),
-            selection.env.remove("KYTY_GPU_HEIGHT"),
+            selection.env.remove("ASTROPORT_WIDTH"),
+            selection.env.remove("ASTROPORT_HEIGHT"),
         )
     } else {
         (None, None)
@@ -235,11 +235,11 @@ pub fn plan(l: &Launch, params: &Value) -> Result<Value, String> {
     env.extend(selection.env);
     env.extend([
         (
-            "KYTY_GPU_WIDTH".into(),
+            "ASTROPORT_WIDTH".into(),
             wide_width.unwrap_or_else(|| width.to_string()),
         ),
         (
-            "KYTY_GPU_HEIGHT".into(),
+            "ASTROPORT_HEIGHT".into(),
             wide_height.unwrap_or_else(|| height.to_string()),
         ),
         (
@@ -268,7 +268,7 @@ pub fn plan(l: &Launch, params: &Value) -> Result<Value, String> {
         "controllers": ["dualsense"],
         "applied": {
             "display.fps": fps,
-            "display.resolution": format!("{}x{}", env["KYTY_GPU_WIDTH"], env["KYTY_GPU_HEIGHT"])
+            "display.resolution": format!("{}x{}", env["ASTROPORT_WIDTH"], env["ASTROPORT_HEIGHT"])
         }
     }))
 }

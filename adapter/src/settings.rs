@@ -281,11 +281,8 @@ mod tests {
         assert!(selection.off.contains("video.speed"));
         assert!(selection.on.is_disjoint(&selection.off));
         assert_eq!(selection.on.len() + selection.off.len(), map.patches.len());
-        assert_eq!(selection.env["ASTROHYBRID_FPS_LIMIT"], "60");
-        assert_eq!(
-            selection.env["ASTROHYBRID_LOW_LATENCY_INTERVAL_US"],
-            "16666"
-        );
+        assert_eq!(selection.env["ASTROPORT_FPS_LIMIT"], "60");
+        assert_eq!(selection.env["ASTROPORT_LOW_LATENCY"], "1");
     }
 
     #[test]

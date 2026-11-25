@@ -486,7 +486,7 @@ fn launch(a: &mut Adapter, standard: Value, values: Value) -> Value {
 }
 
 #[test]
-fn launch_env_matches_play_hybrid() {
+fn launch_env_matches_play_sh() {
     let f = Fixture::built();
     let mut a = Adapter::spawn(&f);
     set_dump(&mut a, &f);
@@ -506,14 +506,12 @@ fn launch_env_matches_play_hybrid() {
         e["GLIBC_TUNABLES"],
         "glibc.rtld.optional_static_tls=0x200000"
     );
-    assert_eq!(
-        e["KYTY_GPU_LIBRARY"],
-        json!(run.join("libs/libkyty_gpu.so"))
-    );
-    assert_eq!(
-        e["KYTY_GPU_HOST_MODULE"],
-        json!(run.join("libs/libAstroHybridHost.prx"))
-    );
+    assert_eq!(e["ASTROPORT_APP0"], json!(run.join("app0")));
+    // Every install path the settings name exists in the install tree.
+    for (key, value) in e.as_object().unwrap() {
+        let value = std::path::Path::new(value.as_str().unwrap());
+        assert!(!value.starts_with(&f.install) || value.exists(), "{key}");
+    }
     assert_eq!(
         e["LD_AUDIT"],
         json!(f.install.join("lib/libastro_patcher.so"))
@@ -524,15 +522,15 @@ fn launch_env_matches_play_hybrid() {
     );
     for (key, value) in [
         ("KYTY_HANG_WATCHDOG", "auto"),
-        ("ASTROHYBRID_FPS_LIMIT", "30"),
-        ("ASTROHYBRID_LOW_LATENCY_INTERVAL_US", "33333"),
-        ("ASTROHYBRID_LOW_LATENCY", "1"),
-        ("KYTY_GPU_WIDTH", "3840"),
-        ("KYTY_GPU_HEIGHT", "2160"),
-        ("KYTY_GPU_FULLSCREEN", "1"),
+        ("ASTROPORT_FPS_LIMIT", "30"),
+        ("ASTROPORT_DLSS_PASS", "2936e5eca99d75e7"),
+        ("ASTROPORT_LOW_LATENCY", "1"),
+        ("ASTROPORT_WIDTH", "3840"),
+        ("ASTROPORT_HEIGHT", "2160"),
+        ("ASTROPORT_FULLSCREEN", "1"),
         ("APS5_PAD_VIBRATION_GAIN", "2.5"),
         ("ANYPS5_LANGUAGE", "1"),
-        ("KYTY_WAYLAND_NATIVE", "1"),
+        ("ASTROPORT_WAYLAND_NATIVE", "1"),
         ("ASTRO_PATCH_PROCESS", "AstroBot"),
     ] {
         assert_eq!(e[key], value, "{key}");
@@ -546,8 +544,18 @@ fn launch_env_matches_play_hybrid() {
         .unwrap()
         .contains("precise frame cap 60 fps"));
     assert!(e.get("LD_PRELOAD").is_none() && e.get("LD_LIBRARY_PATH").is_none());
+    // The variables design 7.3 removed are gone (KYTY_GPU_OCCLUSION etc. are upstream preset names).
+    for key in e.as_object().unwrap().keys() {
+        let removed = ["WIDTH", "HEIGHT", "FULLSCREEN", "LIBRARY", "HOST_MODULE"]
+            .iter()
+            .any(|name| key.strip_prefix("KYTY_GPU_") == Some(name));
+        assert!(
+            !removed && !key.contains("HYBRID") && !key.contains("LOW_LATENCY_INTERVAL"),
+            "{key}"
+        );
+    }
     // No upscaling keys and no old saved values: 100% of the output size, DLSS off.
-    assert_eq!(e["ASTROHYBRID_DLSS"], "0");
+    assert_eq!(e["ASTROPORT_DLSS"], "0");
     assert!(e["ASTRO_PATCH_ENABLE"]
         .as_str()
         .unwrap()
@@ -578,7 +586,7 @@ fn fps_outside_the_offer() {
         let reply = launch(&mut a, standard, json!({}));
         let result = &reply["result"];
         assert_eq!(
-            result["env"]["ASTROHYBRID_FPS_LIMIT"],
+            result["env"]["ASTROPORT_FPS_LIMIT"],
             fps.to_string(),
             "{reply}"
         );
@@ -608,10 +616,10 @@ fn ultrawide_sets_3440x1440() {
             .contains("ultrawide:"),
         "{reply}"
     );
-    assert_eq!(env["KYTY_GPU_WIDTH"], "3440");
-    assert_eq!(env["KYTY_GPU_HEIGHT"], "1440");
-    assert_eq!(env["KYTY_GPU_FULLSCREEN"], "0");
-    assert_eq!(env["ASTROHYBRID_LOW_LATENCY"], "0");
+    assert_eq!(env["ASTROPORT_WIDTH"], "3440");
+    assert_eq!(env["ASTROPORT_HEIGHT"], "1440");
+    assert_eq!(env["ASTROPORT_FULLSCREEN"], "0");
+    assert_eq!(env["ASTROPORT_LOW_LATENCY"], "0");
     assert_eq!(env["APS5_PAD_VIBRATION_GAIN"], "1");
     assert_eq!(env["ANYPS5_LANGUAGE"], "9");
     assert_eq!(r["applied"]["display.resolution"], "3440x1440");
@@ -672,10 +680,7 @@ fn upscaling_picks_the_render_patch_and_dlss() {
             .split(',')
             .map(str::to_owned)
             .collect();
-        (
-            enabled,
-            env["ASTROHYBRID_DLSS"].as_str().unwrap().to_owned(),
-        )
+        (enabled, env["ASTROPORT_DLSS"].as_str().unwrap().to_owned())
     };
     let (enabled, dlss) = patches(json!({
         "display.resolution": "3840x2160",
