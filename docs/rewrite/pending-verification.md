@@ -4,6 +4,67 @@ Everything below was written and compiled or unit-tested, but not run in the gam
 and full builds were paused. Work through it once they may resume. Each item is a command or an
 observation and what to expect.
 
+## Results of the first verification round (2026-11-25)
+
+Machine: RTX 3090, NVIDIA 620.73, KDE Wayland, 60 Hz. Build: `BUILD_DIR=build-rewrite JOBS=6
+scripts/build-engines.sh` (frame generation off), level runs with `LEVEL=underwater_aerial_garden`
+through scripts/smoke.sh, logs in build-rewrite/verify/. From the second round on every run went
+through the shared test slot; earlier runs shared the GPU with another agent's stream tests.
+
+Verified:
+
+- Full build: libkyty_renderer.so exports only kyty_embed_api; the forwarder import check and the
+  export-table check pass; kyty_emulator links. Kyty ctest dlss, gyro_bias, image_memory_pressure,
+  frame_gen pass; bridge, adapter, patcher and runner cargo tests pass.
+- AnyPS5 ctest: 2757 tests, 6 fail, all repository tooling that reads AnyPS5's .github/ folder or
+  vendored mbedtls test scripts, which this repository does not carry (pr_overlap_tools,
+  conventions_ci_gate, test_script_registration, build_eligibility, sanitizer_report,
+  conventions_pr_template). No engine test fails.
+- Start on the bridge: renderer ready in 515-878 ms, first frame after 1.3-1.9 s, the title and the
+  level load, clean exit (exit line, write faults handled, 0 passed on) in every run.
+- Exit reason: with the new 'Window: close requested' / 'Window: quit event' lines a run ended by the
+  time limit shows only the quit event. The early exit at 106 s in run 2 (before those lines) is not
+  explained; no later run repeated it.
+- Limiter: 30 cap holds 30.0 fps (median 33.33 ms); the warning without KYTY_PRESENT_ABS_VBLANK=1
+  appears. play.sh at FPS_LIMIT=60 left the game's 30 FPS cap patch on (fixed: it now selects the
+  cap patch of the rate). At a 60 cap this level reaches about 33-36 fps on this machine.
+- Low latency: 'LowLatency: on (VK_NV_low_latency2)', 'sleep mode on (boost)', 64 of 64 reports
+  filled, sleeps grow by one per frame, 0 time-outs, at 30 and 60; FIFO present mode runs without a
+  stall. Cost: at a 60 cap it lowers this level from 36.0 to 31.4 fps and raises the 99th percentile
+  frame time from 37 to 52 ms (owner decision: play.sh defaults LOW_LATENCY=1).
+- Video override (A5): during the title intro the low-latency interval switches to 16666 us and back
+  to 33333 us at a 30 cap.
+- DLSS 8a facts: the pass line, buffer 0 = jitter 0/1, output 4/5 (2432x1368), input 6/7
+  (1920x1080), frame 11, motion flag 13, which equals ASTROPORT_DLSS_LAYOUT in patches/settings.json
+  (play.sh now sets it too); image 0 is the motion target, drawn with D32S8 depth, compare
+  LessOrEqual (depth not reversed: ASTROPORT_DLSS_REVERSE_DEPTH stays 0); target 0 has storage 1, an
+  equal view format and mapping 0xe4, so DLSS can engage. NGX starts its extensions without a device
+  error but says super resolution is unavailable (0xbad00004): the DLSS runtime
+  (libnvidia-ngx-dlss.so) is not on this machine (scripts/release/fetch-dlss.sh, not run).
+- K8b: no 'Draw dropped:' line in any run. K4: no pipeline list file in the run folder, skipped
+  silently as designed.
+- Release: scripts/release/test.sh (38) passes; BUILD_DIR=build-rewrite scripts/release/stage.sh
+  stages 369 system libraries and strips; package.sh makes an 81 MB tarball; astroport-run build
+  --install <stage> makes a run folder, and the game starts from it (stripped libraries).
+- Frame generation (rewrite/fsr-framegen): configure ON fetches and checks the SDK, links with
+  --no-undefined, exports only kyty_embed_api, 11 frame_gen tests pass. In game after three fixes
+  (A2R10G10B10 copy-through, scratch alignment patch, separateDepthStencilLayouts): 294 of 294
+  frames generated at a 30 cap, 3840x2160, contexts in 449 ms, 199 MiB; under the Khronos layer no
+  validation error (one warning: a descriptor set allocated from a pool without storage-buffer
+  entries, source not identified).
+
+Not verifiable here without the owner (hands, eyes or decisions):
+
+- Pads: two-pad takeover, DualSense over Bluetooth and USB (speaker, haptics, triggers, light bar,
+  sleep and wake, plug during play), Switch Pro gyro offset (K1), Xbox rumble scale, unknown pad type.
+- Picture: DLSS (needs the runtime), frame generation smoothness, halos and HUD smear, jitter sign.
+- AGS: session frames, reconnects, settings.apply over the socket, the installed product. The AGS on
+  this PC is the other agent's streaming test build and must not be replaced.
+- Native Wayland 4K needs fullscreen (windowed, KDE shrinks the window to 2508x1412); window icon
+  under X11 (K3); K7 prepare run from the adapter.
+- K5/K8a: a 2500 MiB KYTY_VRAM_BUDGET_MB never ran this level out of video memory; the full-memory
+  path stays unproven.
+
 ## M7 presentation features
 
 - Full build first: scripts/build-engines.sh (links libkyty_renderer.so; build check 1 must still show only kyty_embed_api exported) and ninja -C <build>/kyty kyty_emulator to confirm the stand-alone emulator still links.
