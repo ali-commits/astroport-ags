@@ -25,7 +25,7 @@ engine_hint="run scripts/build-engines.sh (BUILD_DIR=$B)"
 licence_hint='restore repository licence files'
 anyps5=$B/anyps5/core
 system_libs="$anyps5/libs/libs"
-sdk=build/release/dlss-sdk
+sdk=$B/release/dlss-sdk
 
 sources=()
 destinations=()
@@ -84,7 +84,7 @@ done
 
 # The renderer loads the driver's NGX itself (design 6.4), so DLSS ships when its runtime is here.
 dlss=no
-sdk_hint='run scripts/release/fetch-dlss.sh build/release/dlss-sdk'
+sdk_hint="run scripts/release/fetch-dlss.sh $B/release/dlss-sdk"
 runtimes=("$ROOT/$sdk"/lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.*)
 if (( ${#runtimes[@]} == 1 )) && [[ -f ${runtimes[0]} ]]; then
   dlss=yes

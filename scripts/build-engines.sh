@@ -74,9 +74,9 @@ ln -sfn "$B/kyty/libkyty_renderer.so" "$BRIDGE" "${FORWARDERS[@]}" "$B/fwd/astro
 ln -sfn "$P" "$I/anyps5/libs"
 ln -sfn "$B/anyps5/core/relinker/relinker" "$I/anyps5/relinker"
 ln -sfn "$N/patches" "$N/assets" "$N/ags-extension.toml" "$I/"
-# The DLSS runtime when scripts/release/fetch-dlss.sh has fetched it (where stage.sh reads it too).
+# The DLSS runtime when scripts/release/fetch-dlss.sh has fetched it into $B/release/dlss-sdk (stage.sh reads it there too).
 rm -f "$I"/lib/libnvidia-ngx-dlss.so.*
-for f in "$N"/build/release/dlss-sdk/lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.*; do
+for f in "$B"/release/dlss-sdk/lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.*; do
   if [ -f "$f" ]; then ln -sfn "$f" "$I/lib/"; fi
 done
 # What patches/settings.json and the adapter name through {install}. The three crates are built
