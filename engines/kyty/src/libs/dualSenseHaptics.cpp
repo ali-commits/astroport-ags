@@ -2,6 +2,7 @@
 
 #include "common/logging/log.h"
 #include "common/threads.h"
+#include "embed/embedOptions.h"
 #include "libs/audioDiag.h"
 #include "libs/dualSenseBluetooth.h"
 
@@ -73,7 +74,11 @@ void ApplyRumble(bool force = false) { // Caller holds g_mutex; no calls into Au
 	if (auto* pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(g_controller));
 	    pad != nullptr) {
 		const auto now   = SDL_GetTicks();
-		const bool muted = g_haptics_until > now || g_rumble_until <= now;
+		// Embed::Options::ds_rumble off: never send motor rumble. A rumble report switches the
+		// controller to rumble emulation, which silences its audio haptics; games made for the
+		// DualSense play everything through audio haptics.
+		const bool muted =
+		    g_haptics_until > now || g_rumble_until <= now || !Embed::GetOptions().ds_rumble;
 		if (force && !muted) {
 			// SDL caches motor strengths. Force a report after raw speaker routing changed the
 			// controller's motor mode without changing that cache.
@@ -102,8 +107,9 @@ bool RouteSpeaker(int controller, bool speaker) { // Caller holds g_mutex.
 	report[0] = 0x80; // Audio control valid
 	if (speaker) {
 		report[0] |= 0x20; // Speaker volume valid
-		report[1]  = 0x80; // Audio control 2 valid
+		report[1]  = 0x82; // Audio control 2 valid, mute bits valid
 		report[5]  = 0x64; // Speaker volume
+		report[9]  = 0x10; // Mute bits, the value tuned on a Bluetooth pad: speaker unmuted
 		report[7]  = 0x30; // Output path: right channel to the speaker, headphones muted
 		report[37] = 0x02; // Speaker preamp +6 dB
 	}
@@ -176,8 +182,9 @@ void CloseDevice(Stream* stream) {
 bool IsWireless(int controller) {
 	SDL_LockJoysticks();
 	auto*      pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(controller));
-	const bool wireless =
-	    pad != nullptr && SDL_GetGamepadConnectionState(pad) == SDL_JOYSTICK_CONNECTION_WIRELESS;
+	// Not wired counts as wireless: a DualSense of unknown connection is tried over Bluetooth.
+	const bool wireless = pad != nullptr && SDL_GetGamepadType(pad) == SDL_GAMEPAD_TYPE_PS5 &&
+	                      SDL_GetGamepadConnectionState(pad) != SDL_JOYSTICK_CONNECTION_WIRED;
 	SDL_UnlockJoysticks();
 	return wireless;
 }
@@ -417,12 +424,23 @@ uint64_t Queue(Stream* stream, int controller, const void* data, uint32_t frames
 	stream->buffer.assign(static_cast<size_t>(frames) * output_channels, 0.0f);
 	bool audible = false;
 	for (uint32_t frame = 0; frame < frames; frame++) {
+		float values[2] {};
 		for (uint32_t ch = 0; ch < 2; ch++) {
 			const auto src_ch = channels == 1 ? 0 : ch;
 			const auto index  = (static_cast<size_t>(first_frame) + frame) * channels + src_ch;
 			float      value  = is_float ? static_cast<const float*>(data)[index]
 			                             : static_cast<const int16_t*>(data)[index] / 32768.0f;
 			value *= volume[src_ch] / 32768.0f * gain * (gains != nullptr ? gains[src_ch] : 1.0f);
+			values[ch] = value;
+		}
+		if (stream->speaker && channels >= 2) {
+			// The speaker is mono: play both channels on it (one alone at its own level).
+			const float mono = values[0] != 0.0f && values[1] != 0.0f ? 0.5f * (values[0] + values[1])
+			                                                          : values[0] + values[1];
+			values[0] = values[1] = mono;
+		}
+		for (uint32_t ch = 0; ch < 2; ch++) {
+			const float value = values[ch];
 			// USB places the speaker in front and the actuators in back; Bluetooth takes stereo.
 			stream->buffer[static_cast<size_t>(frame) * output_channels + ch + channel_offset] =
 			    value;

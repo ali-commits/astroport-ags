@@ -67,21 +67,28 @@ SDL_hid_device* OpenDevice(int controller) {
 	SDL_LockJoysticks();
 	auto*      pad      = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(controller));
 	const bool wireless = pad != nullptr && SDL_GetGamepadType(pad) == SDL_GAMEPAD_TYPE_PS5 &&
-	                      SDL_GetGamepadConnectionState(pad) == SDL_JOYSTICK_CONNECTION_WIRELESS;
+	                      SDL_GetGamepadConnectionState(pad) != SDL_JOYSTICK_CONNECTION_WIRED;
 	const auto vendor  = wireless ? SDL_GetGamepadVendor(pad) : 0;
 	const auto product = wireless ? SDL_GetGamepadProduct(pad) : 0;
 	const auto address = wireless ? Address(SDL_GetGamepadSerial(pad)) : std::string {};
 	SDL_UnlockJoysticks();
-	if (vendor != 0x054c || (product != 0x0ce6 && product != 0x0df2) || address.empty()) {
+	if (vendor != 0x054c || (product != 0x0ce6 && product != 0x0df2)) {
 		return nullptr;
 	}
 	auto*       devices = SDL_hid_enumerate(vendor, product);
 	std::string path;
 	bool        ambiguous = false;
+	// When no device carries the pad's address as its serial: the only Bluetooth DualSense.
+	std::string only;
+	int         bluetooth_count = 0;
 	for (auto* device = devices; device != nullptr; device = device->next) {
-		if (device->bus_type == SDL_HID_API_BUS_BLUETOOTH && device->path != nullptr &&
-		    Address(device->serial_number) == address &&
-		    (device->usage_page == 0 || (device->usage_page == 1 && device->usage == 5))) {
+		if (device->bus_type != SDL_HID_API_BUS_BLUETOOTH || device->path == nullptr ||
+		    !(device->usage_page == 0 || (device->usage_page == 1 && device->usage == 5))) {
+			continue;
+		}
+		bluetooth_count++;
+		only = device->path;
+		if (!address.empty() && Address(device->serial_number) == address) {
 			if (!path.empty()) {
 				ambiguous = true;
 				break;
@@ -90,7 +97,13 @@ SDL_hid_device* OpenDevice(int controller) {
 		}
 	}
 	SDL_hid_free_enumeration(devices);
-	return !ambiguous && !path.empty() ? SDL_hid_open_path(path.c_str()) : nullptr;
+	if (ambiguous) {
+		return nullptr;
+	}
+	if (path.empty() && bluetooth_count == 1) {
+		path = only;
+	}
+	return !path.empty() ? SDL_hid_open_path(path.c_str()) : nullptr;
 }
 
 void FinishReport(std::array<uint8_t, REPORT_BYTES>& report) {

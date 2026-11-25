@@ -29,6 +29,7 @@
 #include "graphics/presentation/performanceOverlay.h"
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/renderDoc.h"
+#include "graphics/presentation/window/lowLatency.h"
 #include "kernel/eventQueueFilters.h"
 #include "kernel/pthread.h"
 #include "libs/controller.h"
@@ -255,6 +256,7 @@ private:
 		bool                        premultiplied_alpha;
 		// KYTY_HOLD_SKIPPED_DRAWS: the main display keeps the frame it shows (TakeFrameHold).
 		bool hold = false;
+		uint64_t latency_frame = 0; // LowLatency::RenderSubmitted
 	};
 
 	Graphics::Presenter& m_presenter;
@@ -1034,6 +1036,7 @@ bool FlipQueue::Reserve(VideoOutConfig& cfg, int index, int64_t flip_arg, FlipRe
 	r.submit_ptc = LibKernel::KernelGetProcessTimeCounter();
 	r.source     = source;
 	r.state      = RequestState::Reserved;
+	r.latency_frame = Graphics::LowLatency::RenderSubmitted();
 	if (cfg.slave_count != 0) {
 		for (auto* queue: {&m_requests, &m_cpu_requests}) {
 			for (auto& slave: *queue) {
@@ -1384,12 +1387,16 @@ bool FlipQueue::Flip() {
 	std::array<Graphics::Presenter::Layer, VideoOutDriver::Impl::VIDEO_OUT_BUSES.size()> layers {};
 	uint64_t pace_vblank = 0;
 	size_t                      layer_count = 0;
+	uint64_t                    latency_frame = 0; // the main port's frame (LowLatency)
 	Graphics::Presenter::Frame* hidden      = nullptr; // The main port behind the headset image.
 	for (size_t i = 0; i < count; i++) {
 		auto& r = requests[i];
 		if (r.id == group) {
 			due &= IsFlipDueLocked(*r.cfg);
 			pace_vblank = r.cfg->vblank_status.count;
+		}
+		if (r.cfg->bus == VIDEO_OUT_BUS_TYPE_MAIN) {
+			latency_frame = r.latency_frame;
 		}
 		if (r.cfg->bus == VIDEO_OUT_BUS_TYPE_MAIN &&
 		    g_headset_mirror.load(std::memory_order_relaxed)) {
@@ -1414,6 +1421,7 @@ bool FlipQueue::Flip() {
 			m_presenter.Discard(*hidden);
 		}
 		if (layer_count != 0) {
+			Graphics::LowLatency::PresentFrame(latency_frame);
 			m_presenter.Present(std::span(layers.data(), layer_count));
 		}
 		pace_cost = pace_tick != 0 ? PaceLog::NowNs() - present_begin : 0;
@@ -1825,6 +1833,8 @@ KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64
 		return result;
 	}
 	driver.Renderer().GetGpu().SubmitFlipPreparation(request_id);
+	Graphics::LowLatency::FlipWritten();
+	Graphics::LowLatency::GuestSubmitted();
 
 	return OK;
 }

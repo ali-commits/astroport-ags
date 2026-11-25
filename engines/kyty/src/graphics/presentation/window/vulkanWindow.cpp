@@ -34,6 +34,7 @@
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
 #include "graphics/presentation/window/f32FlushSelfTest.h"
+#include "graphics/presentation/window/lowLatency.h"
 #include "graphics/presentation/window/windowInternal.h"
 #include "graphics/shader/recompiler/CodegenOptions.h"
 #include "graphics/shader/recompiler/ir/BindlessBindings.h"
@@ -1578,6 +1579,13 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		coverage_reduction.pNext                 = const_cast<void*>(create_info.pNext);
 		create_info.pNext                        = &coverage_reduction;
 	}
+	// The low-latency mode numbers its presents (lowLatency.cpp).
+	vk::PhysicalDevicePresentIdFeaturesKHR present_id {};
+	if (HasExtension(device_extensions, VK_KHR_PRESENT_ID_EXTENSION_NAME)) {
+		present_id.presentId = VK_TRUE;
+		present_id.pNext     = const_cast<void*>(create_info.pNext);
+		create_info.pNext    = &present_id;
+	}
 	vk::PhysicalDeviceAddressBindingReportFeaturesEXT address_binding {};
 	if (HasExtension(device_extensions, VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME)) {
 		address_binding.reportAddressBinding = VK_TRUE;
@@ -2642,6 +2650,7 @@ void WindowContext::CreateVulkan() {
 		}
 		Vr::OpenXrAppendExtensions(device_extensions, available_extensions, true);
 		Dlss::AppendExtensions(device_extensions, available_extensions, true);
+		LowLatency::AppendExtensions(device_extensions, available_extensions);
 	}
 
 	graphic_ctx.device = VulkanCreateDevice(graphic_ctx, device_extensions);
@@ -2649,6 +2658,7 @@ void WindowContext::CreateVulkan() {
 		EXIT("Could not create device");
 	}
 	VULKAN_HPP_DEFAULT_DISPATCHER.init(graphic_ctx.device);
+	LowLatency::Init(graphic_ctx.device);
 	// KYTY_EMPTY_FS (pipelineFeedback.h): before any graphics pipeline.
 	EmptyFragment::Configure(graphic_ctx.device, graphic_ctx.physical_device_properties.vendorID);
 	// Diagnostic only (KYTY_GPU_OP_PROFILE / KYTY_GPU_OP_COUNTERS): wraps dispatcher entries.

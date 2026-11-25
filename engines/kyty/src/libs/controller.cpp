@@ -1,5 +1,7 @@
 #include "libs/controller.h"
 
+#include "embed/embedOptions.h"
+
 #include <SDL3/SDL.h>
 #include "common/assert.h"
 #include "common/common.h"
@@ -12,6 +14,7 @@
 #include "kernel/pthread.h"
 #include "libs/dualSenseHaptics.h"
 #include "libs/errno.h"
+#include "libs/gyroBias.h"
 #include "libs/libs.h"
 #include "libs/padData.h"
 
@@ -175,6 +178,7 @@ private:
 	int              m_connected_count = 0;
 	bool             m_motion_enabled  = true;
 	uint64_t         m_gyro_time       = 0;
+	GyroBias         m_gyro_bias; // zero-rate offset of the active pad, learned at rest
 	bool             m_gyro_emulation  = false;
 	uint64_t         m_emulated_time   = 0;
 	std::array<int, 2> m_emulated_stick {128, 128};
@@ -981,6 +985,7 @@ void GameController::SetDevices(int active_id) {
 	m_connected     = new_connected;
 	m_state         = {};
 	m_gyro_time     = 0;
+	m_gyro_bias     = {};
 	m_gyro_emulation = false;
 	m_emulated_time  = 0;
 	m_emulated_stick = {128, 128};
@@ -1179,7 +1184,19 @@ void GameController::Motion(int id, Sensor sensor, const float* data, uint64_t t
 		}
 	} else {
 		std::copy_n(data, 3, m_state.gyro.begin());
-		// Mahony tilt correction; heading is unobservable and reported gyro values stay raw.
+		// The pad's zero-rate offset (gyroBias.h) is learned from the raw samples and taken off
+		// both the reported angular velocity and the orientation.
+		const bool learned = m_gyro_bias.Valid();
+		if (m_gyro_bias.Add(m_state.gyro, m_state.accel, time_us) && !learned) {
+			constexpr float deg = 57.29578f;
+			const auto&     o   = m_gyro_bias.Offset();
+			LOGF("Controller %d: gyro offset at rest %.2f %.2f %.2f deg/s, subtracted\n", id, o[0] * deg,
+			     o[1] * deg, o[2] * deg);
+		}
+		for (int i = 0; i < 3; i++) {
+			m_state.gyro[i] -= m_gyro_bias.Offset()[i];
+		}
+		// Mahony tilt correction; heading is unobservable and reported gyro values get no tilt term.
 		auto        rate      = m_state.gyro;
 		const float magnitude = Length(m_state.accel);
 		if (m_up_reference_valid && magnitude > 0.8f && magnitude < 1.2f) {
@@ -1355,6 +1372,35 @@ void GameController::SetVibration(uint8_t large_motor, uint8_t small_motor) {
 	ApplyVibration();
 }
 
+// A motor strength for SDL rumble (pads without DualSense haptics), with the embedding host's
+// options: scale_percent above 100 boosts (up to 100 it is already in the vibration intensity
+// setting), and a Switch pad's running motor gets at least switch_floor, because many of them
+// ignore weak rumble. 0 stays 0.
+static constexpr uint16_t HostRumble(uint8_t motor, uint32_t scale_percent, uint32_t switch_floor) {
+	if (motor == 0) {
+		return 0;
+	}
+	const uint32_t scaled = motor * std::max(scale_percent, 100u) / 100u;
+	return static_cast<uint16_t>(std::min(std::max(scaled, switch_floor), 255u) * 0x101u);
+}
+static_assert(HostRumble(0, 200, 96) == 0);
+static_assert(HostRumble(128, 100, 0) == 128 * 0x101);
+static_assert(HostRumble(128, 50, 0) == 128 * 0x101);
+static_assert(HostRumble(100, 150, 0) == 150 * 0x101);
+static_assert(HostRumble(200, 200, 0) == 0xffff);
+static_assert(HostRumble(10, 100, 96) == 96 * 0x101);
+static_assert(HostRumble(200, 100, 96) == 200 * 0x101);
+
+static bool IsSwitchPad(SDL_Gamepad* pad) {
+	switch (SDL_GetGamepadType(pad)) {
+		case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO:
+		case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+		case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+		case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR: return true;
+		default: return false;
+	}
+}
+
 void GameController::ApplyVibration() {
 	const auto now = SDL_GetTicks();
 	const auto duration =
@@ -1377,8 +1423,10 @@ void GameController::ApplyVibration() {
 		return;
 	}
 
-	const auto large = static_cast<uint16_t>(large_motor * 0x101U);
-	const auto small = static_cast<uint16_t>(small_motor * 0x101U);
+	const auto& options = Embed::GetOptions();
+	const auto  floor   = IsSwitchPad(pad) ? options.rumble_switch_floor : 0;
+	const auto  large   = HostRumble(large_motor, options.rumble_scale, floor);
+	const auto  small   = HostRumble(small_motor, options.rumble_scale, floor);
 	if (!SDL_RumbleGamepad(pad, large, small, duration)) {
 		LOGF("\t rumble failed: %s\n", SDL_GetError());
 	}
@@ -1596,6 +1644,58 @@ static void RefreshPlayers() {
 	}
 }
 
+// The embedding host's pad preference (Embed::Options::pad_prefer): only player 1 reaches its
+// game, so with two pads connected the one in use must be player 1.
+// 2 PlayStation, 3 Xbox, 4 Switch, 5 anything else: the values of pad_prefer.
+static uint8_t PadFamily(int id) {
+	switch (SDL_GetGamepadTypeForID(static_cast<SDL_JoystickID>(id))) {
+		case SDL_GAMEPAD_TYPE_PS3:
+		case SDL_GAMEPAD_TYPE_PS4:
+		case SDL_GAMEPAD_TYPE_PS5: return 2;
+		case SDL_GAMEPAD_TYPE_XBOX360:
+		case SDL_GAMEPAD_TYPE_XBOXONE: return 3;
+		case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO:
+		case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+		case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+		case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR: return 4;
+		default: return 5;
+	}
+}
+
+// Called when pad `id` was connected or one of its buttons went down. 1 (auto): that pad becomes
+// player 1. A family: the same, except that a pad of another family does not while one of the
+// preferred family is connected. Never while the keyboard holds player 1. Caller holds
+// g_router_mutex.
+static void PreferPad(int id) {
+	const auto prefer = Embed::GetOptions().pad_prefer;
+	if (prefer == 0 || id == HOST_INPUT_CONTROLLER_ID || g_keyboard_player == 1) {
+		return;
+	}
+	const auto self = std::find_if(g_pad_players.begin(), g_pad_players.end(),
+	                               [id](const auto& p) { return p.first == id; });
+	if (self == g_pad_players.end() || self->second == 0) {
+		return;
+	}
+	if (prefer != 1 && PadFamily(id) != prefer &&
+	    std::any_of(g_pad_players.begin(), g_pad_players.end(),
+	                [prefer](const auto& p) { return PadFamily(p.first) == prefer; })) {
+		return;
+	}
+	const auto first = std::find_if(g_pad_players.begin(), g_pad_players.end(),
+	                                [](const auto& p) { return p.second == 0; });
+	if (first != g_pad_players.end()) {
+		first->second = self->second;
+	}
+	self->second = 0;
+	LOGF("Controller %d takes player 1\n", id);
+	RefreshPlayers();
+	// Pads without a light bar confirm with a short buzz.
+	if (auto* pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(id));
+	    pad != nullptr && PadFamily(id) != 2) {
+		(void)SDL_RumbleGamepad(pad, 0x6000, 0x6000, 150);
+	}
+}
+
 void Connect(int id) {
 	// KYTY_HOST_INPUT_ONLY=1: real pads are ignored; the host keyboard/mouse input drives player 1.
 	if (HostInputOnly() && id != HOST_INPUT_CONTROLLER_ID) {
@@ -1608,6 +1708,22 @@ void Connect(int id) {
 	}
 	g_pad_players.emplace_back(id, -1);
 	RefreshPlayers();
+	if (Embed::GetOptions().pad_prefer != 0) {
+		const auto joystick = static_cast<SDL_JoystickID>(id);
+		auto*      pad      = SDL_GetGamepadFromID(joystick);
+		const auto name     = SDL_GetGamepadNameForID(joystick);
+		// Null for a pad of unknown type; the log formatter throws on a null string.
+		const auto type     = SDL_GetGamepadStringForType(SDL_GetGamepadTypeForID(joystick));
+		LOGF("Controller %d connected: %s, family %u, type %s, %04x:%04x, rumble %s, gyro %s\n", id,
+		     name != nullptr ? name : "?", PadFamily(id), type != nullptr ? type : "unknown",
+		     SDL_GetGamepadVendorForID(joystick), SDL_GetGamepadProductForID(joystick),
+		     pad != nullptr && SDL_GetBooleanProperty(SDL_GetGamepadProperties(pad),
+		                                              SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false)
+		         ? "yes"
+		         : "no",
+		     pad != nullptr && SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO) ? "yes" : "no");
+		PreferPad(id);
+	}
 }
 
 void Disconnect(int id) {
@@ -1652,8 +1768,10 @@ static void ClaimPlayerOneIfSilent(int id) {
 
 void SetButton(int id, uint32_t button, bool down) {
 	Common::LockGuard lock(g_router_mutex);
-	if (down) {
+	if (down && Embed::GetOptions().pad_prefer == 0) {
 		ClaimPlayerOneIfSilent(id);
+	} else if (down) {
+		PreferPad(id);
 	}
 	if (auto* player = PlayerForDevice(id)) {
 		player->Button(id, button, down);

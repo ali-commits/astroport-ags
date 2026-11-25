@@ -50,6 +50,16 @@ pub fn interval_us(limit: Limit) -> u32 {
     }
 }
 
+/// Kyty asks the gate between vblanks only on its absolute-vblank timeline with the Immediate
+/// present mode (0); otherwise once per vblank, so a limit is rounded to the vblank rate.
+pub fn pacing_warning(limit: Limit, abs_vblank: Option<&str>, present_mode: u8) -> Option<&'static str> {
+    match (limit, abs_vblank == Some("1"), present_mode) {
+        (Limit::Off, ..) | (_, true, 0) => None,
+        (_, false, _) => Some("ASTROPORT_FPS_LIMIT is set without KYTY_PRESENT_ABS_VBLANK=1: the limit is only applied once per vblank"),
+        _ => Some("ASTROPORT_FPS_LIMIT is set with a present mode other than immediate: the limit is only applied once per vblank"),
+    }
+}
+
 /// Per present thread. Times are monotonic ticks, `ticks_per_s` of them per second.
 pub struct Limiter {
     selected: Option<Limit>,
@@ -189,6 +199,17 @@ mod tests {
         assert_ne!(limiter.gate(1001), 0);
         assert!(limiter.select(Limit::Fps(60)));
         assert_eq!(limiter.gate(1001), 0);
+    }
+
+    #[test]
+    fn a_limit_warns_unless_kyty_polls_between_vblanks() {
+        assert_eq!(pacing_warning(Limit::Off, None, 1), None);
+        assert_eq!(pacing_warning(Limit::Fps(30), Some("1"), 0), None);
+        assert_eq!(pacing_warning(Limit::Unlimited, Some("1"), 0), None);
+        for abs_vblank in [None, Some("0"), Some("")] {
+            assert!(pacing_warning(Limit::Fps(30), abs_vblank, 0).unwrap().contains("KYTY_PRESENT_ABS_VBLANK=1"));
+        }
+        assert!(pacing_warning(Limit::Unlimited, Some("1"), 2).unwrap().contains("present mode"));
     }
 
     #[test]

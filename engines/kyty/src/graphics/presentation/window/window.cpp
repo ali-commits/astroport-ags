@@ -840,6 +840,12 @@ void WindowContext::Run() {
 	auto               title_frames      = loop.presented_frames.load(std::memory_order_relaxed);
 
 	while (!loop.need_exit) {
+		// The embedding host's live output size (embed/embedOptions.h); ignored in fullscreen.
+		if (const auto size = Embed::GetOptions().pending_window_size.exchange(0, std::memory_order_relaxed);
+		    size != 0 && (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) == 0 &&
+		    !SDL_SetWindowSize(window, static_cast<int>(size >> 32), static_cast<int>(size & 0xffffffffu))) {
+			LOGF("Window resize failed: %s\n", SDL_GetError());
+		}
 		// Refresh the title on the main thread without making presentation wait for it.
 		const auto now     = SDL_GetTicks();
 		const auto elapsed = now - title_time;
@@ -872,6 +878,11 @@ static void WindowCreate(WindowContext& context) {
 	// RenderDoc can hide Wayland Vulkan surface support; prefer X11 for captures.
 	if (Config::RenderDocEnabled()) {
 		SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "x11,wayland");
+	} else if (Embed::GetOptions().wayland_native) {
+		// A Wayland window at the display's real resolution under desktop scaling (at 150% a 4K
+		// screen otherwise gets a stretched 2560x1440 surface).
+		SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "wayland,x11");
+		SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY, "1");
 	}
 #endif
 	if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
@@ -906,6 +917,14 @@ static void WindowCreate(WindowContext& context) {
 		window_flags |= static_cast<uint32_t>(SDL_WINDOW_BORDERLESS);
 	}
 #endif
+	// The "prepare shaders" run (KYTY_PIPELINE_LIST_PREPARE, read as pipelineCache.cpp reads it)
+	// builds pipelines and ends by itself while a launcher shows the progress: its window stays
+	// hidden, since a black (fullscreen) one looks like a hung game and takes the focus.
+	if (const auto* prepare = std::getenv("KYTY_PIPELINE_LIST_PREPARE");
+	    prepare != nullptr && std::strtoull(prepare, nullptr, 10) != 0) {
+		window_flags = (window_flags | static_cast<uint32_t>(SDL_WINDOW_HIDDEN)) &
+		               ~static_cast<uint32_t>(SDL_WINDOW_FULLSCREEN);
+	}
 	context.window = SDL_CreateWindow(KYTY_SDL_WINDOW_CAPTION, width, height, window_flags);
 
 	if (context.window == nullptr) {

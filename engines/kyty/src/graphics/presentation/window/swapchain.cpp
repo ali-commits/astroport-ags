@@ -20,6 +20,7 @@
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
+#include "graphics/presentation/window/lowLatency.h"
 #include "graphics/presentation/window/windowInternal.h"
 
 #include <algorithm>
@@ -516,9 +517,12 @@ void Swapchain::Create() {
 		create_info.pNext               = &exclusive;
 	}
 #endif
+	VkSwapchainLatencyCreateInfoNV latency;
+	LowLatency::ChainCreateInfo(create_info, latency);
 	RequireVulkanSuccess(graphics.device.createSwapchainKHR(&create_info, nullptr, &m_handle),
 	                     "vkCreateSwapchainKHR");
 	EXIT_IF(m_handle == nullptr);
+	LowLatency::SwapchainCreated(m_handle);
 	LOGF("Vulkan presentation: %s\n", m_hdr_active ? "HDR10 (PQ)" : "SDR");
 
 	m_images = EnumerateVulkan<vk::Image>(
@@ -578,6 +582,7 @@ void Swapchain::Destroy() {
 	}
 	auto& graphics = m_window.graphic_ctx;
 
+	LowLatency::SwapchainDestroying();
 	{
 		Common::LockGuard queue_lock(graphics.queue_mutex);
 		graphics.submission_queue.DrainPendingLocked();
@@ -1281,7 +1286,7 @@ Swapchain::Status Swapchain::Present() {
 		Common::LockGuard   lock(m_window.graphic_ctx.queue_mutex);
 		m_window.graphic_ctx.submission_queue.DrainReadyForPresentLocked();
 		HangWatchdog::Scope present_scope("vkQueuePresentKHR", queue, m_image_index);
-		result = m_window.graphic_ctx.queue.presentKHR(&present);
+		result = LowLatency::Present(m_window.graphic_ctx.queue, present);
 	}
 	switch (result) {
 		case vk::Result::eSuccess: break;
