@@ -25,6 +25,8 @@ pub struct Config {
     pub dlss: bool,
     /// 0 = DLSS cannot engage
     pub dlss_pass: u64,
+    /// Where the pass keeps its inputs (kytyEmbed.h); all zero = DLSS cannot engage
+    pub dlss_layout: [u8; 16],
     pub dlss_reverse_depth: bool,
     pub dlss_dir: String,
     /// 0 = model default, 1 = A ..
@@ -87,6 +89,24 @@ impl Config {
                 .filter(|hash| *hash != 0)
                 .ok_or(format!("ASTROPORT_DLSS_PASS={value:?}: expected a hexadecimal shader hash"))?,
         };
+        // Eleven indices: the constant words of jitter x, jitter y, output width, output height,
+        // input width, input height, frame counter, motion flag; the motion and the colour image;
+        // the constant buffer.
+        let mut dlss_layout = [0u8; 16];
+        if let Some(value) = env.get("ASTROPORT_DLSS_LAYOUT") {
+            let fields: Vec<_> = value.split(',').map(|field| field.parse::<u8>().ok()).collect();
+            let fits = |index: usize, field: &Option<u8>| field.is_some_and(|field| field < if index < 8 { 64 } else { 16 });
+            if fields.len() != 11 || !fields.iter().enumerate().all(|(index, field)| fits(index, field)) || fields[8] == fields[9] {
+                return Err(format!(
+                    "ASTROPORT_DLSS_LAYOUT={value:?}: expected 11 comma-separated indices: eight constant words 0..63, \
+                     two different images 0..15, one buffer 0..15"
+                ));
+            }
+            for (slot, field) in dlss_layout.iter_mut().zip(fields) {
+                *slot = field.unwrap_or(0);
+            }
+            dlss_layout[11] = 1;
+        }
         let dlss_preset = match env.get("ASTROPORT_DLSS_PRESET").as_deref().map(str::as_bytes) {
             None => 0,
             Some([letter @ b'A'..=b'O']) => (letter - b'A') as u32 + 1,
@@ -107,6 +127,7 @@ impl Config {
             low_latency: env.flag("ASTROPORT_LOW_LATENCY", false)?,
             dlss: env.flag("ASTROPORT_DLSS", false)?,
             dlss_pass,
+            dlss_layout,
             dlss_reverse_depth: env.flag("ASTROPORT_DLSS_REVERSE_DEPTH", false)?,
             dlss_dir: env.get("ASTROPORT_DLSS_DIR").unwrap_or(library_dir.into()),
             dlss_preset,
@@ -158,6 +179,7 @@ impl Config {
             dlss_dir: leak(&self.dlss_dir),
             ngx_data_dir: leak(&self.ngx_data_dir),
             fsr_dir: leak(&self.fsr_dir),
+            upscale_pass_layout: self.dlss_layout,
         }
     }
 }
@@ -180,6 +202,7 @@ mod tests {
         assert_eq!(config.app0, "/run/app0");
         assert_eq!(config.fps_limit, Limit::Off);
         assert_eq!((config.dlss, config.dlss_pass, config.dlss_preset), (false, 0, 0));
+        assert_eq!(config.dlss_layout, [0; 16]);
         assert_eq!((config.dlss_dir.as_str(), config.fsr_dir.as_str()), ("/run/libs", "/run/libs"));
         assert_eq!((config.pad_prefer, config.rumble_scale, config.rumble_switch_floor, config.ds_rumble), (0, 100, 0, true));
         assert_eq!(config.ngx_data_dir, "/home/u/.cache/astroport/ngx");
@@ -198,6 +221,7 @@ mod tests {
             ("ASTROPORT_FPS_LIMIT", "30"),
             ("ASTROPORT_DLSS_PASS", "2936e5eca99d75e7"),
             ("ASTROPORT_DLSS_PRESET", "K"),
+            ("ASTROPORT_DLSS_LAYOUT", "0,1,4,5,6,7,11,13,0,1,0"),
             ("ASTROPORT_PAD_PREFER", "xbox"),
             ("ASTROPORT_RUMBLE_SCALE", "150"),
             ("ASTROPORT_DS_RUMBLE", "0"),
@@ -217,6 +241,7 @@ mod tests {
 
         let embed = config.embed();
         assert_eq!((embed.vibration_intensity, embed.rumble_scale), (100, 150));
+        assert_eq!(embed.upscale_pass_layout, [0, 1, 4, 5, 6, 7, 11, 13, 0, 1, 0, 1, 0, 0, 0, 0]);
         assert_eq!(embed.low_latency_interval_us, 33_333);
         assert_eq!(unsafe { CStr::from_ptr(embed.window_title) }.to_str(), Ok("ASTRO BOT"));
         assert_eq!(unsafe { CStr::from_ptr(embed.app0_dir) }.to_str(), Ok("/run/app0"));
@@ -243,6 +268,11 @@ mod tests {
             ("ASTROPORT_DLSS_REVERSE_DEPTH", "-1"),
             ("ASTROPORT_DLSS_PRESET", "P"),
             ("ASTROPORT_DLSS_PRESET", "AB"),
+            ("ASTROPORT_DLSS_LAYOUT", "0,1,4,5,6,7,11,13,0,1"),
+            ("ASTROPORT_DLSS_LAYOUT", "0,1,4,5,6,7,11,64,0,1,0"),
+            ("ASTROPORT_DLSS_LAYOUT", "0,1,4,5,6,7,11,13,1,1,0"),
+            ("ASTROPORT_DLSS_LAYOUT", "0,1,4,5,6,7,11,13,0,16,0"),
+            ("ASTROPORT_DLSS_LAYOUT", "0,1,4,5,6,7,11,13,0,x,0"),
             ("ASTROPORT_PAD_PREFER", "first"),
             ("ASTROPORT_RUMBLE_SCALE", "201"),
             ("ASTROPORT_RUMBLE_SWITCH_FLOOR", "256"),

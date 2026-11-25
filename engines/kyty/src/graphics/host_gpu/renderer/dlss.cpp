@@ -2,6 +2,7 @@
 
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
+#include "embed/embedOptions.h"
 #include "graphics/guest_gpu/pssr.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/shader/shaderBindings.h"
@@ -32,11 +33,13 @@ constexpr int DLAA = 5; // the last quality mode; it renders at the output size
 // Feature creation flags.
 constexpr int IS_HDR         = 1 << 0;
 constexpr int MV_LOW_RES     = 1 << 1;
+constexpr int MV_JITTERED    = 1 << 2;
 constexpr int DEPTH_INVERTED = 1 << 3;
 constexpr int AUTO_EXPOSURE  = 1 << 6;
 
 // The request flags a feature fixes at creation.
-constexpr uint32_t FIXED_FLAGS = Pssr::kReverseDepth | Pssr::kAutoExposure;
+constexpr uint32_t FIXED_FLAGS =
+    Pssr::kReverseDepth | Pssr::kAutoExposure | Pssr::kJitteredMotion;
 
 struct FeatureCommonInfo {
 	const wchar_t* const* paths;
@@ -74,7 +77,10 @@ bool Succeeded(Result result) {
 }
 
 void Warn(std::string_view text) {
-	Log::WriteToConsoleAndLog(fmt::format("WARNING: DLSS: {}; PSSR scales linearly.\n", text));
+	Log::WriteToConsoleAndLog(
+	    fmt::format("WARNING: DLSS: {}; {}.\n", text,
+	                Embed::GetOptions().dlss ? "the title's own upscale pass runs"
+	                                         : "PSSR scales linearly"));
 }
 
 void OpenCore() {
@@ -176,6 +182,41 @@ std::optional<Creation> Choose(Parameter& capabilities, const Pssr::Request& req
 	return best;
 }
 
+std::string DescribeModes(Parameter& capabilities, uint32_t width, uint32_t height) {
+	static constexpr std::array<const char*, 6> NAMES {
+	    "OutWidth",
+	    "OutHeight",
+	    "DLSS.Get.Dynamic.Min.Render.Width",
+	    "DLSS.Get.Dynamic.Min.Render.Height",
+	    "DLSS.Get.Dynamic.Max.Render.Width",
+	    "DLSS.Get.Dynamic.Max.Render.Height"};
+	void*       callback = nullptr;
+	std::string text;
+	if (!Succeeded(capabilities.Get("DLSSOptimalSettingsCallback", &callback)) ||
+	    callback == nullptr) {
+		return text;
+	}
+	for (int mode = 0; mode <= DLAA; ++mode) {
+		capabilities.Set("Width", width);
+		capabilities.Set("Height", height);
+		capabilities.Set("PerfQualityValue", mode);
+		capabilities.Set("RTXValue", 0);
+		for (const char* name: NAMES) {
+			capabilities.Set(name, 0u);
+		}
+		if (!Succeeded(reinterpret_cast<Result (*)(Parameter*)>(callback)(&capabilities))) {
+			continue;
+		}
+		std::array<uint32_t, 6> sizes {};
+		for (size_t i = 0; i < sizes.size(); ++i) {
+			(void)capabilities.Get(NAMES[i], &sizes[i]);
+		}
+		text += fmt::format("{}mode {} {}x{} ({}x{}..{}x{})", text.empty() ? "" : ", ", mode,
+		                    sizes[0], sizes[1], sizes[2], sizes[3], sizes[4], sizes[5]);
+	}
+	return text;
+}
+
 void SetCreation(Parameter& parameters, const Creation& creation, uint32_t preset) {
 	int flags = IS_HDR | MV_LOW_RES;
 	if ((creation.flags & Pssr::kReverseDepth) != 0) {
@@ -183,6 +224,9 @@ void SetCreation(Parameter& parameters, const Creation& creation, uint32_t prese
 	}
 	if ((creation.flags & Pssr::kAutoExposure) != 0) {
 		flags |= AUTO_EXPOSURE;
+	}
+	if ((creation.flags & Pssr::kJitteredMotion) != 0) {
+		flags |= MV_JITTERED;
 	}
 	parameters.Set("CreationNodeMask", 1u);
 	parameters.Set("VisibilityNodeMask", 1u);
@@ -224,7 +268,8 @@ void SetEvaluation(Parameter& parameters, const Pssr::Request& request, Inputs& 
 }
 
 void Load() {
-	if (!Config::Ps5ProEnabled() || Config::GetDlssFolder().empty()) {
+	// The embedded renderer (embed/embedOptions.h) asks for DLSS without Pro mode.
+	if ((!Config::Ps5ProEnabled() && !Embed::GetOptions().dlss) || Config::GetDlssFolder().empty()) {
 		return;
 	}
 	OpenCore();
@@ -254,16 +299,25 @@ void AppendExtensions(std::vector<const char*>&                   out,
 	    !Succeeded(g_api.required_extensions(&counts[0], &names[0], &counts[1], &names[1]))) {
 		return;
 	}
+	std::string added;
 	for (const char* name: std::span(names[device], counts[device])) {
 		const auto same = [&](std::string_view other) { return other == name; };
+		// The device has buffer addresses as the core feature, which excludes the EXT extension.
+		if (same(VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)) {
+			continue;
+		}
 		if (std::ranges::any_of(available, same,
 		                        [](const auto& properties) {
 			                        return std::string_view(properties.extensionName.data());
 		                        }) &&
 		    std::ranges::none_of(out, same)) {
 			out.push_back(name);
+			added += std::string(" ") + name;
 		}
 	}
+	Log::WriteToConsoleAndLog(fmt::format("DLSS: NGX asks for {} {} extensions, added:{}\n",
+	                                      counts[device], device ? "device" : "instance",
+	                                      added.empty() ? " none" : added));
 }
 
 void Init(const GraphicContext& graphics, PFN_vkGetInstanceProcAddr get_instance_proc_addr,
@@ -276,8 +330,12 @@ void Init(const GraphicContext& graphics, PFN_vkGetInstanceProcAddr get_instance
 	static const wchar_t* const    paths[] {path.c_str()};
 	static const FeatureCommonInfo info {.paths = paths, .path_count = 1};
 	const auto                     folder = Common::PathToString(Config::GetDlssFolder());
+	// NGX writes its logs and caches there; the model folder may be read-only.
+	static const std::wstring data = Embed::GetOptions().ngx_data_dir.empty()
+	                                     ? path
+	                                     : std::filesystem::path(Embed::GetOptions().ngx_data_dir).wstring();
 	if (const auto result = g_api.init(
-	        PROJECT_ID, ENGINE_CUSTOM, "1.0", paths[0], static_cast<VkInstance>(graphics.instance),
+	        PROJECT_ID, ENGINE_CUSTOM, "1.0", data.c_str(), static_cast<VkInstance>(graphics.instance),
 	        static_cast<VkPhysicalDevice>(graphics.physical_device),
 	        static_cast<VkDevice>(graphics.device), get_instance_proc_addr, get_device_proc_addr,
 	        SDK_VERSION, &info);
@@ -305,6 +363,12 @@ void Init(const GraphicContext& graphics, PFN_vkGetInstanceProcAddr get_instance
 		return;
 	}
 	Log::WriteToConsoleAndLog(fmt::format("DLSS: upscaling PSSR with the model in {}\n", folder));
+	if (Embed::GetOptions().dlss) {
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "DLSS: NGX started for the upscale pass {:016x}; data folder {}\n",
+		    Embed::GetOptions().upscale_pass_hash,
+		    Common::PathToString(std::filesystem::path(data))));
+	}
 }
 
 void Shutdown() {

@@ -37,6 +37,8 @@ pub struct KytyEmbedConfig {
     pub dlss_dir: *const c_char,
     pub ngx_data_dir: *const c_char,
     pub fsr_dir: *const c_char,
+    /// The upscale pass (kytyEmbed.h): eleven indices, then 1 when given
+    pub upscale_pass_layout: [u8; 16],
 }
 
 #[repr(C)]
@@ -225,7 +227,8 @@ const _: () = {
     assert!(offset_of!(PadData, connected) == 76);
     assert!(offset_of!(PadData, timestamp) == 80);
     assert!(size_of::<KernelEvent>() == 32);
-    assert!(size_of::<KytyEmbedConfig>() == 104);
+    assert!(size_of::<KytyEmbedConfig>() == 120);
+    assert!(offset_of!(KytyEmbedConfig, upscale_pass_layout) == 104);
     assert!(offset_of!(KytyEmbedConfig, upscale_pass_hash) == 40);
     assert!(offset_of!(KytyEmbedConfig, app0_dir) == 64);
     assert!(size_of::<KytyEmbedHooks>() == 48);
@@ -234,7 +237,9 @@ const _: () = {
     assert!(offset_of!(KytyEmbedApi, fns) == 16);
     assert!(size_of::<AstroportTouch>() == 6);
     assert!(size_of::<AstroportPadInput>() == 48);
+    assert!(offset_of!(AstroportPadInput, touch) == 12 && offset_of!(AstroportPadInput, accel) == 24);
     assert!(size_of::<AstroportPadOutput>() == 122);
+    assert!(offset_of!(AstroportPadOutput, trigger_set) == 8 && offset_of!(AstroportPadOutput, trigger) == 10);
     assert!(size_of::<AstroportHostApi>() == 80);
     assert!(size_of::<ExternalRenderer>() == 176);
     assert!(offset_of!(ExternalRenderer, owns) == 144);

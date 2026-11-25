@@ -12,6 +12,8 @@ enum Flags : uint32_t {
 	kAutoExposure = 1u << 1,
 	kReset        = 1u << 2, // the history is discarded
 	kSpatialOnly  = 1u << 3, // the inputs fit no temporal upscaler
+	// Not a guest bit (renderer/upscalePass.h): the motion vectors include the jitter.
+	kJitteredMotion = 1u << 31,
 };
 
 // Zeroed depth, motion and exposure descriptors are absent inputs. Motion vectors times

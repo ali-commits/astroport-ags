@@ -169,6 +169,49 @@ struct RenderExecutor::PssrState {
 	}
 };
 
+bool RenderExecutor::UpscaleResolved(CommandBuffer& buffer, const Pssr::Request& request,
+                                     const UpscaleImage& color, const UpscaleImage& depth,
+                                     const UpscaleImage& motion, const UpscaleImage& output,
+                                     vk::Extent2D output_size) {
+	if (m_pssr == nullptr) {
+		m_pssr = std::make_shared<PssrState>(m_context.GetGraphics());
+	}
+	auto& cache = m_context.GetTextureCache();
+	buffer.EndRendering();
+	// Transitions are batched and recorded by Handle() below, as in ProcessPssr.
+	const auto identity = buffer.Identity();
+	const auto resource = [&](const UpscaleImage& use, bool write) {
+		auto& image = cache.GetImage(use.id);
+		image.Transit(vk::ImageLayout::eGeneral,
+		              write ? vk::AccessFlagBits2::eShaderWrite : vk::AccessFlagBits2::eShaderRead,
+		              ImageSubresourceRange {use.level, 1, use.layer, 1}, identity, true);
+		// DLSS takes a depth image in its backing format and depth aspect.
+		const auto aspect = image.info.IsDepth() ? vk::ImageAspectFlagBits::eDepth
+		                                         : vk::ImageAspectFlagBits::eColor;
+		return Dlss::Resource {
+		    .view       = static_cast<VkImageView>(use.view),
+		    .image      = static_cast<VkImage>(image.backing.image),
+		    .range      = {static_cast<VkImageAspectFlags>(aspect), use.level, 1, use.layer, 1},
+		    .format     = static_cast<VkFormat>(use.format),
+		    .width      = std::max(image.backing.extent.width >> use.level, 1u),
+		    .height     = std::max(image.backing.extent.height >> use.level, 1u),
+		    .type       = 0,
+		    .read_write = static_cast<uint8_t>(write ? 1 : 0)};
+	};
+	Dlss::Inputs inputs {resource(color, false), resource(depth, false), resource(motion, false),
+	                     nullptr, resource(output, true)};
+	// The feature is made for this size (PssrState::Upscale), as the caller's Dlss::Choose was.
+	inputs.output.width  = output_size.width;
+	inputs.output.height = output_size.height;
+	const bool upscaled =
+	    m_pssr->Upscale(m_context.GetCommandScheduler(), buffer.Handle(), request, inputs);
+	// NGX bound pipelines and descriptors of its own.
+	buffer.ForgetBoundState();
+	m_dynamic_state.valid = false;
+	m_context.GetCommandScheduler().GetDynamicState().Invalidate();
+	return upscaled;
+}
+
 void RenderExecutor::ProcessPssr(CommandBuffer& buffer, const Pssr::Request& request) {
 	EXIT_IF(buffer.IsInvalid());
 	m_context.GetCommandScheduler().PopReadyOperations();

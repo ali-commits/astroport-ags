@@ -15,6 +15,7 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineList.h"
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
+#include "graphics/presentation/window/lowLatency.h"
 #include "kernel/eventQueue.h"
 #include "kernel/fileSystem.h"
 #include "kernel/memory.h"
@@ -31,6 +32,7 @@
 #include "streaming/transport.h"
 
 #include <SDL3/SDL.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -38,6 +40,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 
 // No header declares these (as in libs/libs.cpp).
 namespace Libs {
@@ -63,6 +66,8 @@ PadAudioTarget g_pad_audio[2]; // vibration, speaker
 bool           g_flushed = false;
 std::atomic<bool> g_ready {false};     // set just before hooks->ready()
 int64_t           g_amm_wait_ms = 5000; // KYTY_FAULT_AMM_WAIT_MS, read in Run (not in the fault path)
+
+static_assert(sizeof(KytyEmbedConfig) == 120); // bridge/src/abi.rs asserts the same
 
 const char* Text(const char* text) {
 	return text != nullptr ? text : "";
@@ -106,6 +111,7 @@ int Run(const KytyEmbedConfig* config, const KytyEmbedHooks* hooks) {
 	options.ngx_data_dir        = Text(config->ngx_data_dir);
 	options.fsr_dir             = Text(config->fsr_dir);
 	options.upscale_pass_hash   = config->upscale_pass_hash;
+	std::copy_n(config->upscale_pass_layout, options.upscale_pass_layout.size(), options.upscale_pass_layout.begin());
 	options.rumble_scale        = config->rumble_scale;
 	options.rumble_switch_floor = config->rumble_switch_floor;
 	options.pad_prefer          = config->pad_prefer;
@@ -165,9 +171,52 @@ int Run(const KytyEmbedConfig* config, const KytyEmbedHooks* hooks) {
 	return 0;
 }
 
+// The low-latency mode counts frames on the guest thread: a flip packet written, then the
+// submission that carries it. The host calls these in place of the exports they wrap, so no
+// upstream export is edited.
+uint32_t* KYTY_SYSV_ABI SetFlip(Libs::Graphics::Gen5::CommandBuffer* buf, uint32_t handle, int32_t index,
+                                uint32_t mode, int64_t arg) {
+	Libs::Graphics::LowLatency::FlipWritten();
+	return Libs::Graphics::Gen5::AgcDcbSetFlip(buf, handle, index, mode, arg);
+}
+
+template <auto Function>
+struct Submit;
+template <typename... Args, int (*Function)(Args...)>
+struct Submit<Function> {
+	static int KYTY_SYSV_ABI Call(Args... args) {
+		const int result = Function(args...);
+		Libs::Graphics::LowLatency::GuestSubmitted();
+		return result;
+	}
+};
+
+template <typename Function>
+void* Address(Function function) {
+	return reinterpret_cast<void*>(function);
+}
+
 void* Find(const char* nid) {
-	const auto* record = nid != nullptr ? g_symbols.FindByNid(nid, Loader::SymbolType::Func) : nullptr;
-	return record != nullptr ? reinterpret_cast<void*>(record->vaddr) : nullptr;
+	namespace Driver    = Libs::Graphics::Gen5Driver;
+	const auto* record  = nid != nullptr ? g_symbols.FindByNid(nid, Loader::SymbolType::Func) : nullptr;
+	auto*       address = record != nullptr ? reinterpret_cast<void*>(record->vaddr) : nullptr;
+	if (Libs::Graphics::LowLatency::Active()) {
+		const std::pair<void*, void*> wrapped[] = {
+		    {Address(Libs::Graphics::Gen5::AgcDcbSetFlip), Address(SetFlip)},
+		    {Address(Driver::AgcDriverSubmitDcb), Address(Submit<Driver::AgcDriverSubmitDcb>::Call)},
+		    {Address(Driver::AgcDriverSubmitMultiDcbs), Address(Submit<Driver::AgcDriverSubmitMultiDcbs>::Call)},
+		    {Address(Driver::AgcDriverSubmitCommandBuffer),
+		     Address(Submit<Driver::AgcDriverSubmitCommandBuffer>::Call)},
+		    {Address(Driver::AgcDriverSubmitMultiCommandBuffers),
+		     Address(Submit<Driver::AgcDriverSubmitMultiCommandBuffers>::Call)},
+		};
+		for (const auto& [upstream, ours]: wrapped) {
+			if (address == upstream) {
+				return ours;
+			}
+		}
+	}
+	return address;
 }
 
 // The live part of TryHandleGuestAccessFault (loader/runtimeLinker.cpp).
@@ -252,11 +301,10 @@ void SetLowLatencyInterval(uint32_t us) {
 void SetWindowSize(uint32_t width, uint32_t height) {
 	Embed::GetOptions().pending_window_size.store((static_cast<uint64_t>(width) << 32) | height,
 	                                              std::memory_order_relaxed);
-}
-
-template <typename Function>
-void* Address(Function function) {
-	return reinterpret_cast<void*>(function);
+	// Wake the window loop, which applies the size (WindowContext::Run).
+	SDL_Event event {};
+	event.type = SDL_EVENT_USER;
+	SDL_PushEvent(&event);
 }
 
 } // namespace

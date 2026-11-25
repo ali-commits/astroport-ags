@@ -1550,6 +1550,14 @@ add_executable(dlss_tests EXCLUDE_FROM_ALL
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/dlss.cpp")
 target_link_libraries(dlss_tests common Vulkan::Headers SDL3::SDL3-static kyty_test_gtest)
 target_include_directories(dlss_tests PRIVATE ${inc_headers})
+# Header-only: the pad's gyro offset at rest (libs/gyroBias.h) and what an image allocation does
+# when video memory is full (graphics/host_gpu/imageMemoryPressure.h).
+add_executable(gyro_bias_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GyroBiasTests.cpp")
+target_link_libraries(gyro_bias_tests kyty_test_gtest)
+target_include_directories(gyro_bias_tests PRIVATE "${KYTY_SOURCE_DIR}")
+add_executable(image_memory_pressure_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ImageMemoryPressureTests.cpp")
+target_link_libraries(image_memory_pressure_tests kyty_test_gtest)
+target_include_directories(image_memory_pressure_tests PRIVATE "${KYTY_SOURCE_DIR}")
 
 add_executable(psml_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PsmlTests.cpp"
@@ -1817,6 +1825,8 @@ if(BUILD_TESTING)
 	add_test(NAME common COMMAND $<TARGET_FILE:common_tests>)
 	# Upstream's gtest targets (not registered upstream; built by name here).
 	add_test(NAME dlss COMMAND $<TARGET_FILE:dlss_tests>)
+	add_test(NAME gyro_bias COMMAND $<TARGET_FILE:gyro_bias_tests>)
+	add_test(NAME image_memory_pressure COMMAND $<TARGET_FILE:image_memory_pressure_tests>)
 	add_test(NAME net_resolver COMMAND $<TARGET_FILE:net_resolver_tests>)
 	add_test(NAME gpu_blit_shader COMMAND $<TARGET_FILE:gpu_blit_shader_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)

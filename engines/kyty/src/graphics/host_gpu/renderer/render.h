@@ -525,6 +525,14 @@ public:
 		m_shadow.InvalidatePushConstants();
 	}
 
+	// After a recorder outside this renderer (DLSS) bound pipelines and descriptors of its own
+	// through Handle(): nothing recorded before is taken as still bound.
+	void ForgetBoundState() const {
+		SettleEncode();
+		m_shadow.Begin();
+		m_record_reset = true;
+	}
+
 	// The encode's view (drawEncode.h): the shadow the state commands above update, the switches
 	// its comparisons depend on, and the ring the encoder writes (null while recording natively).
 	[[nodiscard]] DrawEncode::Shadow& EncodeShadow() const {
@@ -1255,6 +1263,26 @@ public:
 	// Experimental Pro mode (renderPssr.cpp, upstream 651ef73a0): libPsml's PSSR request as a
 	// bilinear upscale of the input T#'s active rectangle into the output T# (graphics queue).
 	void ProcessPssr(CommandBuffer& buffer, const Pssr::Request& request);
+	// An image of the texture cache as DLSS takes it: one level and layer through `view`.
+	struct UpscaleImage {
+		ImageId       id;
+		vk::ImageView view;
+		vk::Format    format;
+		uint32_t      level;
+		uint32_t      layer;
+	};
+	// DLSS for a request whose images are resolved already (upscalePass.h); the caller holds the
+	// render lock. output_size: what DLSS writes, from the output level's origin (the cache image
+	// may be larger). False when DLSS did not take it: nothing was written, but rendering ended.
+	[[nodiscard]] bool UpscaleResolved(CommandBuffer& buffer, const Pssr::Request& request,
+	                                   const UpscaleImage& color, const UpscaleImage& depth,
+	                                   const UpscaleImage& motion, const UpscaleImage& output,
+	                                   vk::Extent2D output_size);
+	// The draw of the title's upscale pass (upscalePass.h), after its bindings are prepared. True
+	// when DLSS wrote the pass's output: the draw then records nothing.
+	[[nodiscard]] bool UpscalePassDraw(CommandBuffer& buffer, const ShaderStageRuntime& pixel,
+	                                   const PreparedBindings&          bindings,
+	                                   std::span<const RenderColorInfo> colors, bool continued);
 
 	void DispatchDirect(uint64_t submit_id, CommandBuffer& buffer, uint32_t thread_group_x,
 	                    uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode,

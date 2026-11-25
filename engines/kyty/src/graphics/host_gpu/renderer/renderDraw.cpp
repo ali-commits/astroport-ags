@@ -40,6 +40,7 @@
 #include "graphics/host_gpu/renderer/pipeline/pixelRateVariant.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
+#include "graphics/host_gpu/renderer/upscalePass.h"
 #include "graphics/host_gpu/renderer/commandStreamLog.h"
 #include "graphics/host_gpu/renderer/encodeOffload.h"
 #include "graphics/guest_gpu/command_processor/passCensus.h"
@@ -7554,6 +7555,34 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	CommitStats::StepMark(CommitStats::Step::LateCheck);
 
+	// The embedded renderer's DLSS (upscalePass.h): the title's upscale pass, known by its pixel
+	// program, is replaced. Like a draw skipped for its pipeline it then records nothing, and no
+	// draw-run record may be continued or recalled across it. Either way the pass ends rendering,
+	// so its own draw acquires its targets in full.
+	if (UpscalePass::Enabled()) [[unlikely]] {
+		const std::span<const RenderColorInfo> pass_colors {state.color_info, state.color_count};
+		UpscalePass::NoteTargets(pass_colors, state.depth_info);
+		if (state.ps_active && bindings.pixel.has_value() &&
+		    state.ps_input_info.stage.program->shader_hash == Embed::GetOptions().upscale_pass_hash) {
+			const bool continued = m_kernel || m_run_active;
+			if (!continued) {
+				m_run_prev_valid = false;
+				m_acq_seed_prev  = false;
+				m_acqfb_prev     = false;
+			}
+			if (UpscalePassDraw(buffer, state.ps_input_info.stage, *bindings.pixel, pass_colors,
+			                    continued)) {
+				m_run.valid        = false;
+				m_run_active       = false;
+				m_run_targets_kept = false;
+				for (auto& record: m_run_kept) {
+					record.valid = false;
+				}
+				return;
+			}
+		}
+	}
+
 	// KYTY_LOD_STATS_PLAIN_VARIANT: without a mip-statistics counter on any image the pixel
 	// program's feedback records nothing; its feedback-free variant then gives the same results
 	// without forcing the depth/stencil tests after a shader that can discard.
@@ -9092,6 +9121,30 @@ bool RenderExecutor::ContinuationKernel(uint64_t submit_id, CommandBuffer& buffe
 	return true;
 }
 
+// A draw of 2^30 or more vertex invocations is a corrupted or misread command, not a frame's
+// geometry: the host GPU would run for seconds and end in a lost device. It is dropped like a
+// draw with a zero count (indirect draws are not seen here: their counts are on the GPU).
+static constexpr bool AbsurdDraw(uint32_t count, uint32_t instances) {
+	return uint64_t {count} * instances >= (uint64_t {1} << 30u);
+}
+static_assert(!AbsurdDraw(0, 0xffffffffu) && !AbsurdDraw(0xffffffffu, 0));
+static_assert(!AbsurdDraw((1u << 30u) - 1, 1) && AbsurdDraw(1u << 30u, 1));
+static_assert(!AbsurdDraw(1u << 15u, (1u << 15u) - 1) && AbsurdDraw(1u << 15u, 1u << 15u));
+static_assert(AbsurdDraw(1u << 16u, 1u << 16u)); // the 32-bit product is 0
+
+static bool DropAbsurdDraw(const char* kind, uint32_t count, uint32_t instances) {
+	if (!AbsurdDraw(count, instances)) [[likely]] {
+		return false;
+	}
+	static std::atomic<uint32_t> reported {0};
+	if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
+		std::fprintf(stderr, "Draw dropped: %s draw of %u x %u instances = %" PRIu64 " vertex invocations\n", kind,
+		             count, instances, uint64_t {count} * instances);
+	}
+	PassCensus::Drop('d', 0, "skipped: absurd vertex count");
+	return true;
+}
+
 void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
                                const DrawIndexArgs& args) {
 	KYTY_GPU_OP_SITE("draw.index");
@@ -9133,6 +9186,9 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	CommitStats::StepMark(CommitStats::Step::BeginRun);
 	if (args.index_count == 0 || args.instance_count == 0) {
 		PassCensus::Drop('d', 0, "skipped: zero indices or instances");
+		return;
+	}
+	if (DropAbsurdDraw("indexed", args.index_count, args.instance_count)) {
 		return;
 	}
 	// KYTY_CONT_KERNEL (above ExecutePreparedDraw).
@@ -9354,6 +9410,9 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	CommitStats::StepMark(CommitStats::Step::BeginRun);
 	if (args.vertex_count == 0 || args.instance_count == 0) {
 		PassCensus::Drop('d', 0, "skipped: zero vertices or instances");
+		return;
+	}
+	if (DropAbsurdDraw("auto", args.vertex_count, args.instance_count)) {
 		return;
 	}
 

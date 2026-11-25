@@ -1,9 +1,12 @@
 #include "common/emulatorConfig.h"
+#include "embed/embedOptions.h"
 #include "graphics/guest_gpu/pssr.h"
 #include "graphics/host_gpu/renderer/dlss.h"
+#include "graphics/host_gpu/renderer/upscalePass.h"
 
 #include <SDL3/SDL_loadso.h>
 #include <array>
+#include <bit>
 #include <gtest/gtest.h>
 #include <map>
 #include <optional>
@@ -254,6 +257,31 @@ TEST(DlssTest, CreationSetsTheModeAndFlags) {
 
 	Dlss::SetCreation(recorder, {3840, 2160, 0, 2, 1707, 960, 2560, 1440}, 0);
 	EXPECT_EQ(values["DLSS.Feature.Create.Flags"], Value((1 << 0) | (1 << 1)));
+
+	// Motion vectors that include the jitter are a creation flag, so a feature made without it
+	// does not take such a request.
+	const Dlss::Creation jittered {3840, 2160, Pssr::kJitteredMotion, 2, 1707, 960, 2560, 1440};
+	Dlss::SetCreation(recorder, jittered, 0);
+	EXPECT_EQ(values["DLSS.Feature.Create.Flags"], Value((1 << 0) | (1 << 1) | (1 << 2)));
+	Dlss::Inputs inputs {};
+	inputs.output  = {.width = 3840, .height = 2160};
+	auto request   = TemporalRequest();
+	request.width  = 1920;
+	request.height = 1080;
+	EXPECT_FALSE(Dlss::Takes(jittered, request, inputs));
+	request.flags = Pssr::kJitteredMotion | Pssr::kReset;
+	EXPECT_TRUE(Dlss::Takes(jittered, request, inputs));
+}
+
+TEST(DlssTest, ModesAreDescribed) {
+	Recorder capabilities;
+	EXPECT_EQ(Dlss::DescribeModes(capabilities, 3840, 2160), "");
+	capabilities.values["DLSSOptimalSettingsCallback"] = reinterpret_cast<void*>(&OptimalSettings);
+	const auto text = Dlss::DescribeModes(capabilities, 3840, 2160);
+	EXPECT_NE(text.find("mode 0 1920x1080 (1280x720..2560x1440)"), std::string::npos) << text;
+	EXPECT_NE(text.find("mode 4 0x0 (1280x720..3840x2160)"), std::string::npos) << text;
+	EXPECT_NE(text.find("mode 5 3840x2160"), std::string::npos) << text;
+	EXPECT_EQ(Dlss::DescribeModes(capabilities, 1280, 720), ""); // the model refuses the output
 }
 
 TEST(DlssTest, EvaluationPassesTheRequest) {
@@ -298,8 +326,8 @@ TEST(DlssTest, EvaluationPassesTheRequest) {
 	EXPECT_EQ(values["Reset"], Value(0));
 }
 
-// DLSS loads the driver's NGX library, which needs one instance extension, only in Pro mode with
-// a model folder.
+// DLSS loads the driver's NGX library, which needs one instance extension, only with a model
+// folder, in Pro mode or when the embedding host asks for it.
 TEST(DlssTest, LoadsOnlyInProModeWithAFolder) {
 	auto* ngx = SDL_LoadObject("libnvidia-ngx.so.1");
 	if (ngx == nullptr) {
@@ -309,18 +337,138 @@ TEST(DlssTest, LoadsOnlyInProModeWithAFolder) {
 	vk::ExtensionProperties properties2;
 	properties2.extensionName = std::string(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 	Config::Initialize();
-	for (const auto& [pro, folder]: {std::pair {false, "dlss"}, {true, ""}, {true, "dlss"}}) {
+	struct Case {
+		bool        pro;
+		bool        embedded;
+		const char* folder;
+	};
+	for (const auto& [pro, embedded, folder]:
+	     {Case {false, false, "dlss"}, {true, false, ""}, {true, false, "dlss"}, {false, true, ""},
+	      {false, true, "dlss"}}) {
 		Config::ConfigOptions options;
 		options.pro_enabled = pro;
 		options.dlss_folder = folder;
 		Config::Load(options);
+		Embed::GetOptions().dlss = embedded;
 		Dlss::Load();
 		std::vector<const char*> extensions;
 		Dlss::AppendExtensions(extensions, {properties2}, false);
-		EXPECT_EQ(extensions.size(), pro && *folder != '\0' ? 1u : 0u) << pro << folder;
+		EXPECT_EQ(extensions.size(), (pro || embedded) && *folder != '\0' ? 1u : 0u)
+		    << pro << embedded << folder;
 		Dlss::Shutdown();
 	}
+	Embed::GetOptions().dlss = false;
 	Config::Shutdown();
+}
+
+// The upscale pass (upscalePass.h). The layout of these tests: jitter in words 0 and 1, output size
+// in 4 and 5, input size in 6 and 7, frame counter in 11, motion flag in 13.
+constexpr UpscalePass::Layout LAYOUT {{0, 1}, {4, 5}, {6, 7}, 11, 13, 0, 1, 0, 1, {}};
+
+std::array<uint32_t, 14> PassWords(uint32_t frame) {
+	std::array<uint32_t, 14> words {};
+	words[0]  = std::bit_cast<uint32_t>(0.25f / 1920.0f);
+	words[1]  = std::bit_cast<uint32_t>(-0.5f / 1080.0f);
+	words[4]  = 3840;
+	words[5]  = 2160;
+	words[6]  = std::bit_cast<uint32_t>(1920.0f); // sizes may be floats
+	words[7]  = std::bit_cast<uint32_t>(1080.0f);
+	words[11] = frame;
+	words[13] = 1;
+	return words;
+}
+
+TEST(UpscalePassTest, ConstantsFollowTheLayout) {
+	EXPECT_EQ(UpscalePass::WordCount(LAYOUT), 14u);
+	EXPECT_EQ(UpscalePass::Whole(2160), 2160u);
+	EXPECT_EQ(UpscalePass::Whole(std::bit_cast<uint32_t>(2160.0f)), 2160u);
+	EXPECT_EQ(UpscalePass::Whole(0), 0u);
+	EXPECT_EQ(UpscalePass::Whole(std::bit_cast<uint32_t>(1.0e30f)), UINT32_MAX);
+
+	auto       words     = PassWords(7);
+	const auto constants = UpscalePass::Read(LAYOUT, words);
+	ASSERT_TRUE(constants);
+	EXPECT_FLOAT_EQ(constants->jitter[0], 0.25f / 1920.0f);
+	EXPECT_EQ(constants->output[0], 3840u);
+	EXPECT_EQ(constants->output[1], 2160u);
+	EXPECT_EQ(constants->input[0], 1920u);
+	EXPECT_EQ(constants->input[1], 1080u);
+	EXPECT_EQ(constants->frame, 7u);
+	EXPECT_TRUE(constants->motion_used);
+	EXPECT_TRUE(constants->Valid());
+
+	// Too few words, or no layout from the host, reads nothing.
+	EXPECT_FALSE(UpscalePass::Read(LAYOUT, std::span(words).first(13)));
+	auto absent  = LAYOUT;
+	absent.given = 0;
+	EXPECT_FALSE(UpscalePass::Read(absent, words));
+
+	words[13] = 0;
+	EXPECT_FALSE(UpscalePass::Read(LAYOUT, words)->motion_used);
+	words[6] = 4000; // an input larger than the output is no upscale
+	EXPECT_FALSE(UpscalePass::Read(LAYOUT, words)->Valid());
+	words[6] = 0;
+	EXPECT_FALSE(UpscalePass::Read(LAYOUT, words)->Valid());
+	// A jitter of more than a pixel, or none at all, is not this layout's jitter.
+	words    = PassWords(7);
+	words[0] = std::bit_cast<uint32_t>(2.0f / 1920.0f);
+	EXPECT_FALSE(UpscalePass::Read(LAYOUT, words)->Valid());
+	words[0] = 0x7fc00000u;
+	EXPECT_FALSE(UpscalePass::Read(LAYOUT, words)->Valid());
+}
+
+TEST(UpscalePassTest, RequestsCarryJitterMotionAndReset) {
+	const auto constants = *UpscalePass::Read(LAYOUT, PassWords(7));
+	const auto request   = UpscalePass::MakeRequest(constants, true, 6, 0x1234);
+	EXPECT_EQ(request.width, 1920u);
+	EXPECT_EQ(request.height, 1080u);
+	EXPECT_EQ(request.context, 0x1234u);
+	EXPECT_FLOAT_EQ(request.jitter[0], 0.25f);
+	EXPECT_FLOAT_EQ(request.jitter[1], -0.5f);
+	EXPECT_FLOAT_EQ(request.motion_scale[0], -1920.0f);
+	EXPECT_FLOAT_EQ(request.motion_scale[1], -1080.0f);
+	EXPECT_FLOAT_EQ(request.pre_exposure, 1.0f);
+	EXPECT_EQ(request.flags, Pssr::kAutoExposure | Pssr::kJitteredMotion | Pssr::kReverseDepth);
+
+	// The history is discarded unless the frame follows the last one DLSS upscaled.
+	const uint32_t plain = Pssr::kAutoExposure | Pssr::kJitteredMotion;
+	EXPECT_EQ(UpscalePass::MakeRequest(constants, false, 6, 0).flags, plain);
+	EXPECT_EQ(UpscalePass::MakeRequest(constants, false, 5, 0).flags, plain | Pssr::kReset);
+	EXPECT_EQ(UpscalePass::MakeRequest(constants, false, 7, 0).flags, plain | Pssr::kReset);
+	EXPECT_EQ(UpscalePass::MakeRequest(constants, false, std::nullopt, 0).flags, plain | Pssr::kReset);
+	const auto wrapped = *UpscalePass::Read(LAYOUT, PassWords(0));
+	EXPECT_EQ(UpscalePass::MakeRequest(wrapped, false, UINT32_MAX, 0).flags, plain);
+}
+
+TEST(UpscalePassTest, DepthRingKeepsTheLastDepthOfRecentTargets) {
+	UpscalePass::DepthRing<int, 4> ring;
+	EXPECT_EQ(ring.Find(0x1000), nullptr);
+	ring.Note(0x1000, 1);
+	ring.Note(0x2000, 2);
+	ring.Note(0x1000, 3); // the same target again takes no new place
+	ASSERT_NE(ring.Find(0x1000), nullptr);
+	EXPECT_EQ(*ring.Find(0x1000), 3);
+	EXPECT_EQ(*ring.Find(0x2000), 2);
+	ring.Note(0x3000, 4);
+	ring.Note(0x4000, 5);
+	ring.Note(0x5000, 6); // the oldest place is taken
+	EXPECT_EQ(ring.Find(0x1000), nullptr);
+	EXPECT_EQ(*ring.Find(0x2000), 2);
+	EXPECT_EQ(*ring.Find(0x5000), 6);
+	EXPECT_EQ(ring.Find(0), nullptr); // never a target
+}
+
+TEST(UpscalePassTest, SummaryCountsByReason) {
+	UpscalePass::Stats stats;
+	EXPECT_EQ(stats.Take(), "");
+	stats.Add(UpscalePass::Outcome::Evaluated);
+	stats.Add(UpscalePass::Outcome::Evaluated);
+	EXPECT_EQ(stats.Take(), "DLSS pass: 2 evaluated, no fallbacks");
+	EXPECT_EQ(stats.Take(), "");
+	stats.Add(UpscalePass::Outcome::NoDepth);
+	stats.Add(UpscalePass::Outcome::NoDepth);
+	stats.Add(UpscalePass::Outcome::Refused);
+	EXPECT_EQ(stats.Take(), "DLSS pass: 0 evaluated, fallbacks: no depth 2, refused 1");
 }
 
 } // namespace

@@ -34,6 +34,11 @@ typedef struct KytyEmbedConfig {
 	const char* dlss_dir;     /* folder of the DLSS runtime (read-only is fine) */
 	const char* ngx_data_dir; /* writable folder for NGX */
 	const char* fsr_dir;
+	/* The upscale pass, as indices: the constant words of jitter x, jitter y, output width, output
+	 * height, input width, input height, frame counter and "motion vectors in use"; the motion
+	 * image and the colour image among the pixel shader's images; the constant buffer among its
+	 * buffers; then 1 when this layout is given (0 = DLSS cannot engage). */
+	uint8_t upscale_pass_layout[16];
 } KytyEmbedConfig;
 
 typedef struct KytyEmbedHooks {

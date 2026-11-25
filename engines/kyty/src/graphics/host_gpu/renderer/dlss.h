@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -88,10 +89,13 @@ struct Creation {
 // nearest to it; nullopt when no mode takes the size.
 [[nodiscard]] std::optional<Creation> Choose(Parameter& capabilities, const Pssr::Request& request,
                                              const Inputs& inputs);
+// Diagnostic: each quality mode's optimal render size and render range at an output size.
+[[nodiscard]] std::string DescribeModes(Parameter& capabilities, uint32_t width, uint32_t height);
 void SetCreation(Parameter& parameters, const Creation& creation, uint32_t preset);
 void SetEvaluation(Parameter& parameters, const Pssr::Request& request, Inputs& inputs, bool reset);
 
-// Loads the driver's NGX library in Pro mode with a DLSS folder. Call before the instance.
+// Loads the driver's NGX library in Pro mode, or when the embedding host asks for DLSS, with a
+// DLSS folder. Call before the instance.
 void Load();
 // Adds the instance or device extensions DLSS needs that `available` has.
 void AppendExtensions(std::vector<const char*>&                   out,

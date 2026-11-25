@@ -19,6 +19,7 @@
 #include "graphics/host_gpu/renderer/image/nanScrubber.h"
 #include "graphics/host_gpu/cleanVerdictCache.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/imageMemoryPressure.h"
 #include "graphics/host_gpu/memoryStats.h"
 #include "graphics/host_gpu/watchRange.h"
 
@@ -11801,6 +11802,19 @@ void TextureCache::RunGarbageCollector() {
 	}
 	// Always (one entry per frame): KYTY_VRAM_GC_BUDGET is a live switch and needs recent frames.
 	NoteFrameTick(frame, tick);
+	// An image allocation found video memory full (imageMemoryPressure.h): clean images unused
+	// for a few frames go now, whatever the collectors below decide, so that the next images do
+	// not go to system memory. Freed like every collection: destroyed once the GPU is done with
+	// them, then released by the allocation's own retry.
+	if (const auto wanted = ImageMemoryPressure::g_state.wanted.exchange(0, std::memory_order_relaxed); wanted != 0)
+	    [[unlikely]] {
+		const auto freed = RetireUnusedImages(frame, ImageMemoryPressure::EVICT_FRAMES, 256, wanted);
+		static std::atomic<uint32_t> reports {0};
+		if (reports.fetch_add(1, std::memory_order_relaxed) < 8) {
+			LOGF("TextureCache: video memory full, %" PRIu64 " MiB wanted, %" PRIu64 " MiB of unused images freed\n",
+			     wanted >> 20u, freed >> 20u);
+		}
+	}
 	if (m_idle_frames != 0 && frame >= m_idle_next_frame) {
 		m_idle_next_frame = frame + 32;
 		(void)RetireUnusedImages(frame, m_idle_frames, 512, UINT64_MAX, true);

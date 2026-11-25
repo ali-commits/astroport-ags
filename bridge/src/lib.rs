@@ -197,6 +197,10 @@ pub unsafe fn start(kyty: *const KytyEmbedApi, host: *const AstroportHostApi) {
     let working_dir = std::env::current_dir().map_or(".".into(), |dir| dir.to_string_lossy().into_owned());
     let config = config::Config::from_env(|name| std::env::var(name).ok(), &working_dir, &library_dir()).unwrap_or_else(|e| die(e));
     limiter::set_limit(config.fps_limit);
+    let abs_vblank = std::env::var("KYTY_PRESENT_ABS_VBLANK").ok();
+    if let Some(warning) = limiter::pacing_warning(config.fps_limit, abs_vblank.as_deref(), config.present_mode) {
+        eprintln!("astroport: warning: {warning}");
+    }
     audio::set_haptic_gain(config.haptic_gain);
     live::FULLSCREEN.store(config.fullscreen, Ordering::Relaxed);
     if config.dlss {

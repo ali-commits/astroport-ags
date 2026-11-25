@@ -5,6 +5,7 @@
 // subsystem starts). Header-only and all-default in the stand-alone emulator, so the hooks in
 // upstream files that read them are no-ops there.
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <string>
@@ -16,6 +17,8 @@ struct Options {
 	std::string ngx_data_dir;
 	std::string fsr_dir;
 	uint64_t    upscale_pass_hash   = 0;
+	// Where the upscale pass keeps its inputs (graphics/host_gpu/renderer/upscalePass.h).
+	std::array<uint8_t, 16> upscale_pass_layout {};
 	uint32_t    rumble_scale        = 100;
 	uint32_t    rumble_switch_floor = 0;
 	uint8_t     pad_prefer          = 0;

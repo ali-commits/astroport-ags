@@ -20,6 +20,7 @@
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/imageMemoryPressure.h"
 #include "graphics/host_gpu/vramBudget.h"
 #include "graphics/host_gpu/vramStats.h"
 
@@ -572,6 +573,24 @@ void GraphicContext::WaitSparseBinds() {
 	RequireVulkanSuccess(device.waitSemaphores(&wait, UINT64_MAX), "wait for sparse image binds");
 }
 
+// The steps of imageMemoryPressure.h, for both kinds of image memory.
+static uint64_t PressureClockMs() {
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+	                                 std::chrono::steady_clock::now().time_since_epoch())
+	                                 .count());
+}
+
+// Retained objects are optional: released before one allocation retry. False: nothing is retained.
+static bool ReleaseRetainedImages(GraphicContext& graphics) {
+	if (NativeImagePoolEnabled()) {
+		(void)graphics.ReleaseRetainedMemory();
+	} else if (!ImageDestroyWorkerEnabled()) {
+		return false;
+	}
+	FlushImageGraveyard(); // KYTY_IMAGE_DESTROY_WORKER
+	return true;
+}
+
 void GraphicContext::BindSparseImageLevels(VulkanImage& image, uint32_t first_level,
                                            vk::Semaphore wait_semaphore, uint64_t wait_value) {
 	EXIT_IF(!image.sparse || image.image == nullptr);
@@ -610,12 +629,27 @@ void GraphicContext::BindSparseImageLevels(VulkanImage& image, uint32_t first_le
 	requirements.alignment      = state.block_size;
 	requirements.memoryTypeBits = state.memory_type_bits;
 	VmaAllocationCreateInfo create {};
-	create.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-	VmaAllocation     allocation = nullptr;
-	VmaAllocationInfo info {};
-	RequireVulkanSuccess(static_cast<vk::Result>(
-	                         vmaAllocateMemory(allocator, &requirements, &create, &allocation, &info)),
-	                     "allocate sparse image memory");
+	VmaAllocation           allocation = nullptr;
+	VmaAllocationInfo       info {};
+	const auto allocate = [&](bool strict) {
+		create.requiredFlags  = strict ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT : 0;
+		create.preferredFlags = strict ? 0 : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+		return static_cast<vk::Result>(vmaAllocateMemory(allocator, &requirements, &create, &allocation, &info));
+	};
+	bool       spilled = false;
+	const auto result  = ImageMemoryPressure::Run(
+	    ImageMemoryPressure::g_state, PressureClockMs(), bytes, ImageSystemMemoryFallbackEnabled(),
+	    vk::Result::eErrorOutOfDeviceMemory, allocate, [this] { return ReleaseRetainedImages(*this); }, &spilled);
+	if (spilled) {
+		static std::atomic<uint32_t> reported {0};
+		if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
+			std::fprintf(stderr, "Vulkan: video memory full, %" PRIu64 " KiB of sparse image levels %s "
+			             "(KYTY_IMAGE_SYSMEM_FALLBACK)\n",
+			             bytes >> 10u, result == vk::Result::eSuccess ? "are in system memory" : "could not be allocated");
+			LogMemoryBudget();
+		}
+	}
+	RequireVulkanSuccess(result, "allocate sparse image memory");
 	EXIT_IF(info.offset % state.block_size != 0);
 	uint64_t offset = info.offset;
 	for (uint32_t level = first; level < std::min(end, tail_first); ++level) {
@@ -968,8 +1002,9 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 	const bool pool_hit = image.image != nullptr;
 	if (image.image == nullptr) {
 		VmaAllocationCreateInfo alloc_info {};
-		alloc_info.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-		auto allocate = [&] {
+		auto allocate = [&](bool strict) {
+			alloc_info.requiredFlags  = strict ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT : 0;
+			alloc_info.preferredFlags = strict ? 0 : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 			Profiler::ScopedFrameWait timing(Profiler::FrameWait::NativeImageCreate);
 			vk::Image::CType native_image = VK_NULL_HANDLE;
 			VmaAllocation allocation = nullptr;
@@ -982,23 +1017,18 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 			}
 			return result;
 		};
-		auto result = allocate();
-		if (result == vk::Result::eErrorOutOfDeviceMemory && NativeImagePoolEnabled()) {
-			// Retained objects are optional. Release them before one allocation retry.
-			ClearRetiredImages();
-			FlushImageGraveyard(); // KYTY_IMAGE_DESTROY_WORKER
-			result = allocate();
-		} else if (result == vk::Result::eErrorOutOfDeviceMemory && ImageDestroyWorkerEnabled()) {
-			FlushImageGraveyard();
-			result = allocate();
-		}
-		if (result == vk::Result::eErrorOutOfDeviceMemory && ImageSystemMemoryFallbackEnabled()) {
-			// From chenxiao07/KytyPS5 86910c0d2: out of video memory, the image goes to any memory
-			// type the driver allows for it (NVIDIA: system memory for optimal images). Slower to
-			// sample, but the game goes on instead of ending at "failed to create image".
-			alloc_info.requiredFlags  = 0;
-			alloc_info.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-			result                    = allocate();
+		// From chenxiao07/KytyPS5 86910c0d2: out of video memory, the image goes to any memory
+		// type the driver allows for it (NVIDIA: system memory for optimal images). Slower to
+		// sample, but the game goes on instead of ending at "failed to create image". The steps
+		// before that, and the cooldown after it: imageMemoryPressure.h. The size is an estimate
+		// (4 bytes a texel, no mip levels).
+		const auto estimate = uint64_t {image_info.extent.width} * image_info.extent.height *
+		                      std::max(image_info.extent.depth, 1u) * std::max(image_info.arrayLayers, 1u) * 4;
+		bool       spilled  = false;
+		const auto result   = ImageMemoryPressure::Run(
+		    ImageMemoryPressure::g_state, PressureClockMs(), estimate, ImageSystemMemoryFallbackEnabled(),
+		    vk::Result::eErrorOutOfDeviceMemory, allocate, [this] { return ReleaseRetainedImages(*this); }, &spilled);
+		if (spilled) {
 			static std::atomic<uint32_t> reported {0};
 			if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
 				std::fprintf(stderr, "Vulkan: video memory full, %s: %ux%ux%u format=%d layers=%u levels=%u "
