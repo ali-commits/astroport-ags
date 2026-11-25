@@ -6,6 +6,10 @@ the plan as built, the facts it rests on, and the status. Kyty paths are under `
 
 ## 1. Status (2026-11-25)
 
+**Update:** verified in game (294 of 294 frames generated, no validation errors). The product build now turns
+the option on and AGS offers it as a setting (section 7, items 3 and 4). The paragraph below is the first run.
+
+
 **Built and run once; no frame generated yet.** The CMake option `KYTY_FSR_FRAMEGEN` is OFF by default, and
 `scripts/build-engines.sh` does not turn it on. With it OFF nothing new is fetched or compiled and no new
 symbol is referenced; the hooks are inline no-ops. The ON build (`build-rewrite/kyty-fg`) links and its 11
@@ -23,7 +27,7 @@ that change is built with the option ON and OFF but not run.
 | `frameGen.h`, `frameGen.cpp` | Finished code, compiled per file with the renderer's flags. Not run: every AMD call is unverified at run time. |
 | Hooks: `swapchain.cpp`, `upscalePass.h/.cpp`, `vulkanWindow.cpp` | Finished, compiled per file with the option OFF and ON. |
 | VRAM reserve (`vma.cpp`), display-change hook (`window.cpp`) | **Not done** (files outside this task's ownership): section 7. |
-| Product setting, adapter key, `build-engines.sh` | **Not done**, on purpose: section 7. |
+| Product setting, adapter key, `build-engines.sh` | Finished: section 7, items 3 and 4. Adapter tests pass; the release build with the option is not yet run. |
 
 Stubs, all intended: without the build option `FrameGen::Requested()` logs "FSR frame generation: not built
 in" once and everything else in `frameGen.h` is an empty inline; `ffxSetFrameGenerationConfigToSwapchainVK`
@@ -200,10 +204,15 @@ symbols of section 3. **The clone is 972 MiB on disk** (542 MiB of it `.git`): s
 2. **Refresh rate after a display change.** `W/window.cpp`, the handler of
    `SDL_EVENT_WINDOW_DISPLAY_CHANGED`: call `FrameGen::NoteDisplay(window)`. Until then a window moved to a
    display with another refresh rate keeps the first value (only matters under FIFO).
-3. **Product setting.** `patches/settings.json` needs `"graphics.frame_gen"` -> `ASTROPORT_FSR_FG` 1/0, and
-   in the same change the adapter needs a page entry or a default for the key (`adapter/src/page.rs`,
-   `launch.rs`, tests), otherwise every launch fails as a damaged installation. Do it after the game test.
-4. **Build switch.** `scripts/build-engines.sh`: `-DKYTY_FSR_FRAMEGEN=ON`, after the game test.
+3. **Product setting: done.** AGS's standard key `perf.frame_generation` (AGS `docs/extensions/STANDARD.md`
+   6.1: `off`, `2x`, `3x`, `4x`, optional `method`). `adapter/src/sheet.rs` declares it honoured, applier
+   source, next launch, values `off` and `2x`, method `fsr`, local play only; the key takes no source default,
+   so AGS's registry default `off` holds. `adapter/src/launch.rs` reads it (`3x`/`4x` -> `2x`, anything else
+   -> `off`) and `patches/settings.json` maps `2x` -> `ASTROPORT_FSR_FG=1`, `off` -> `0`. A source row
+   replaces AGS's own lsfg row for the key, so AGS no longer injects lsfg-vk for Astro Bot; the player's own
+   lsfg-vk profiles still apply while the setting is Off. The game keeps its frame cap and Kyty presents one generated frame per real one: 60 fps shows 120, 30 fps shows 60. With vertical sync the display must refresh at least twice the cap, or generation stays off (a 60 Hz display at 60 fps). Low latency is off while it is on. Because the game declares the key, AGS does not inject its own lsfg-vk for it; lsfg-vk profiles the player set up outside AGS still apply when the setting is Off.
+4. **Build switch: done.** `scripts/build-engines.sh` configures Kyty with `-DKYTY_FSR_FRAMEGEN=ON`; the
+   release container fetches the SDK at configure time, like Kyty's other dependencies (it has git and network).
 5. **design.md** (6.3 K2, 7.1 `ASTROPORT_FSR_DIR` is unused by this design, 10 decision 1) and section 4 of
    `engines/kyty/UPSTREAM.md` (the file list is made with `git diff` at commit time).
 6. **Size of the fetch.** The shallow clone of the tag is 972 MiB on disk (the SDK's samples, media and

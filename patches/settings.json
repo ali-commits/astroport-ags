@@ -71,6 +71,8 @@
       "true": {"env": {"ASTROPORT_DS_RUMBLE": "1"}}, "false": {"env": {"ASTROPORT_DS_RUMBLE": "0"}}}},
     "perf.low_latency": {"values": {
       "on": {"env": {"ASTROPORT_LOW_LATENCY": "1"}}, "off": {"env": {"ASTROPORT_LOW_LATENCY": "0"}}}},
+    "perf.frame_generation": {"values": {
+      "2x": {"env": {"ASTROPORT_FSR_FG": "1"}}, "off": {"env": {"ASTROPORT_FSR_FG": "0"}}}},
     "fullscreen": {"values": {
       "true": {"env": {"ASTROPORT_FULLSCREEN": "1"}}, "false": {"env": {"ASTROPORT_FULLSCREEN": "0"}}}},
     "graphics.dlss": {"values": {

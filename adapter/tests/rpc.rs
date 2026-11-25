@@ -287,7 +287,8 @@ fn game_page_supported_not_built() {
     let mut expected = json!({
         "display.resolution": {"level": "honoured", "live": "live", "applier": "source"},
         "display.fps": {"level": "honoured", "live": "next_launch", "applier": "source", "values": [30, 60]},
-        "perf.low_latency": {"level": "honoured", "live": "next_launch", "applier": "source", "values": ["off", "on"], "default": "on"}
+        "perf.low_latency": {"level": "honoured", "live": "next_launch", "applier": "source", "values": ["off", "on"], "default": "on"},
+        "perf.frame_generation": {"level": "honoured", "live": "next_launch", "applier": "source", "values": ["off", "2x"], "method": "fsr", "requires": {"play": "local"}}
     });
     // sheet §2.8: the three upscaling keys only on an NVIDIA GPU (this machine's GPU decides).
     if page["standard"].get("perf.upscaler").is_some() {
@@ -525,6 +526,7 @@ fn launch_env_matches_play_sh() {
         ("ASTROPORT_FPS_LIMIT", "30"),
         ("ASTROPORT_DLSS_PASS", "2936e5eca99d75e7"),
         ("ASTROPORT_LOW_LATENCY", "1"),
+        ("ASTROPORT_FSR_FG", "0"),
         ("ASTROPORT_WIDTH", "3840"),
         ("ASTROPORT_HEIGHT", "2160"),
         ("ASTROPORT_FULLSCREEN", "1"),
@@ -571,6 +573,30 @@ fn launch_env_matches_play_sh() {
 }
 
 #[test]
+fn frame_generation_keeps_the_game_rate() {
+    let f = Fixture::built();
+    let mut a = Adapter::spawn(&f);
+    set_dump(&mut a, &f);
+    for (fps, fg, flag) in [
+        (60, "2x", "1"),
+        (30, "2x", "1"),
+        (60, "4x", "1"),
+        (60, "off", "0"),
+        (30, "fast", "0"),
+    ] {
+        let reply = launch(
+            &mut a,
+            json!({"display.fps": fps, "perf.frame_generation": fg}),
+            json!({}),
+        );
+        let env = &reply["result"]["env"];
+        assert_eq!(env["ASTROPORT_FSR_FG"], flag, "{reply}");
+        // The cap stays the game's rate; Kyty presents twice as many frames.
+        assert_eq!(env["ASTROPORT_FPS_LIMIT"], fps.to_string());
+    }
+}
+
+#[test]
 fn fps_outside_the_offer() {
     let f = Fixture::built();
     let mut a = Adapter::spawn(&f);
@@ -603,7 +629,8 @@ fn ultrawide_sets_3440x1440() {
         &mut a,
         json!({
             "display.resolution": "1920x1080", "fullscreen": false,
-            "perf.low_latency": "off", "language": "Koreana"
+            "perf.low_latency": "off", "language": "Koreana",
+            "perf.frame_generation": "2x"
         }),
         json!({"graphics.ultrawide": true, "controller.haptics": 100}),
     );
@@ -620,6 +647,7 @@ fn ultrawide_sets_3440x1440() {
     assert_eq!(env["ASTROPORT_HEIGHT"], "1440");
     assert_eq!(env["ASTROPORT_FULLSCREEN"], "0");
     assert_eq!(env["ASTROPORT_LOW_LATENCY"], "0");
+    assert_eq!(env["ASTROPORT_FSR_FG"], "1");
     assert_eq!(env["APS5_PAD_VIBRATION_GAIN"], "1");
     assert_eq!(env["ANYPS5_LANGUAGE"], "9");
     assert_eq!(r["applied"]["display.resolution"], "3440x1440");

@@ -208,6 +208,7 @@ mod tests {
             ("game.skip_intro", "true"),
             ("controller.rumble", "true"),
             ("perf.low_latency", "on"),
+            ("perf.frame_generation", "off"),
             ("fullscreen", "true"),
             ("graphics.dlss", "false"),
         ]
@@ -283,6 +284,7 @@ mod tests {
         assert_eq!(selection.on.len() + selection.off.len(), map.patches.len());
         assert_eq!(selection.env["ASTROPORT_FPS_LIMIT"], "60");
         assert_eq!(selection.env["ASTROPORT_LOW_LATENCY"], "1");
+        assert_eq!(selection.env["ASTROPORT_FSR_FG"], "0");
     }
 
     #[test]

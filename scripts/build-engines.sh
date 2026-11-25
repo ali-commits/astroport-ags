@@ -22,7 +22,8 @@ fail() { echo "FAIL: $*"; exit 1; }
 
 : > "$B/kyty.log"
 # -fPIC through the flags, not CMAKE_POSITION_INDEPENDENT_CODE: it also reaches Kyty's 3rdparty builds.
-run "$B/kyty.log" cmake -S engines/kyty -B "$B/kyty" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS=-fPIC -DKYTY_BUILD_LAUNCHER=OFF
+# KYTY_FSR_FRAMEGEN: FSR 3 frame generation, run only with ASTROPORT_FSR_FG=1 (docs/rewrite/fsr-framegen.md).
+run "$B/kyty.log" cmake -S engines/kyty -B "$B/kyty" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS=-fPIC -DKYTY_BUILD_LAUNCHER=OFF -DKYTY_FSR_FRAMEGEN=ON
 run "$B/kyty.log" ninja $J -C "$B/kyty" kyty_renderer
 
 : > "$B/anyps5.log"

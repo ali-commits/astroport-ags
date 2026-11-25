@@ -146,6 +146,12 @@ pub fn plan(l: &Launch, params: &Value) -> Result<Value, String> {
         Some("off") => "off",
         _ => "on",
     };
+    // FSR 3 frame generation doubles the presented rate (60 -> 120, 30 -> 60); Kyty skips it under vsync
+    // when the display refreshes slower than that, and turns low latency off while it is requested.
+    let frame_generation = match standard["perf.frame_generation"].as_str() {
+        Some("2x" | "3x" | "4x") => "2x",
+        _ => "off",
+    };
     let (width, height) = standard["display.resolution"]
         .as_str()
         .and_then(resolution)
@@ -156,6 +162,10 @@ pub fn plan(l: &Launch, params: &Value) -> Result<Value, String> {
     let mut chosen = BTreeMap::from([
         ("display.fps".to_owned(), fps.to_string()),
         ("perf.low_latency".to_owned(), low_latency.to_owned()),
+        (
+            "perf.frame_generation".to_owned(),
+            frame_generation.to_owned(),
+        ),
         ("fullscreen".to_owned(), fullscreen.to_string()),
         ("graphics.render".to_owned(), render),
         ("graphics.dlss".to_owned(), dlss.to_string()),

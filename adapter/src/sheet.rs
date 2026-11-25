@@ -43,12 +43,15 @@ pub fn job_plan(install: &Path, data: &Path, dump: &Path) -> Value {
 // 0052 addendum: render_sizes lists the fixed render patches; AGS snaps p% of Resolution to the nearest height (ties to the larger), as launch does.
 // sheet §2.5: perf.low_latency reaches launch.plan standard from M4 (honoured, applier source); its registry default is "off".
 // 0052 addendum: perf.low_latency accepts a source default; AstroPort runs it on, as play.sh does.
-// sheet §2.2: perf.frame_generation absent = AGS offers lsfg for local play; not declaring it is "does not refuse it".
+// sheet §6.1 (AGS docs/extensions/STANDARD.md): perf.frame_generation is off|2x|3x|4x with an optional method; a source
+// row replaces AGS's own lsfg row for the key (one row per key), so declaring Kyty's FSR 3 frame generation means AGS
+// no longer injects lsfg for this game. Local play only, as verified; no `default` (not allowed for this key), so "off".
 pub fn standard_support(nvidia: bool) -> Value {
     let mut standard = json!({
         "display.resolution": {"level": "honoured", "live": "live", "applier": "source"},
         "display.fps": {"level": "honoured", "live": "next_launch", "applier": "source", "values": [30, 60]},
-        "perf.low_latency": {"level": "honoured", "live": "next_launch", "applier": "source", "values": ["off", "on"], "default": "on"}
+        "perf.low_latency": {"level": "honoured", "live": "next_launch", "applier": "source", "values": ["off", "on"], "default": "on"},
+        "perf.frame_generation": {"level": "honoured", "live": "next_launch", "applier": "source", "values": ["off", "2x"], "method": "fsr", "requires": {"play": "local"}}
     });
     if nvidia {
         standard["perf.upscaling"] = json!({"level": "honoured", "default": false});

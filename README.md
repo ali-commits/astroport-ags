@@ -23,7 +23,8 @@ upstream engines, and much of the new code has not yet met real hardware.
   save-data fallback. They compile and their unit tests pass; nobody has played with them yet.
 - **DLSS:** the setting, the bridge options and the release packaging exist. The renderer change that
   replaces the game's upscale pass is not in the tree yet, so the setting has no effect.
-- **Frame generation:** not built in. lsfg-vk works with the game and is not bundled.
+- **Frame generation:** AMD FSR 3 frame generation, built into the renderer (any Vulkan GPU with the needed
+  features). AGS's Frame generation setting (`perf.frame_generation`, local play, method `fsr`, values Off and 2x, default Off) sets `ASTROPORT_FSR_FG`. The game keeps its frame cap and Kyty presents one generated frame per real one: 60 fps shows 120, 30 fps shows 60. With vertical sync the display must refresh at least twice the cap, or generation stays off (a 60 Hz display at 60 fps). Low latency is off while it is on. Because the game declares the key, AGS does not inject its own lsfg-vk for it; lsfg-vk profiles the player set up outside AGS still apply when the setting is Off.
 - **AGS install:** the extension (`adapter/`, `runner/`) and the release scripts exist; a release built
   from this tree has not been installed through AGS yet.
 
