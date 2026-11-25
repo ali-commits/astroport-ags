@@ -69,9 +69,22 @@ n=$(find "$P" -maxdepth 1 -name '*.prx' | wc -l)
 [ "$n" -gt 0 ] || fail "missing $P/*.prx"
 
 I="$B/install"
-mkdir -p "$I/lib" "$I/anyps5"
+mkdir -p "$I/lib" "$I/anyps5" "$I/bin" "$I/presets"
 ln -sfn "$B/kyty/libkyty_renderer.so" "$BRIDGE" "${FORWARDERS[@]}" "$B/fwd/astroport-exports.txt" "$I/lib/"
 ln -sfn "$P" "$I/anyps5/libs"
 ln -sfn "$B/anyps5/core/relinker/relinker" "$I/anyps5/relinker"
-ln -sfn "$N/patches" "$N/ags-extension.toml" "$I/"
+ln -sfn "$N/patches" "$N/assets" "$N/ags-extension.toml" "$I/"
+# The DLSS runtime when scripts/release/fetch-dlss.sh has fetched it (where stage.sh reads it too).
+rm -f "$I"/lib/libnvidia-ngx-dlss.so.*
+for f in "$N"/build/release/dlss-sdk/lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.*; do
+  if [ -f "$f" ]; then ln -sfn "$f" "$I/lib/"; fi
+done
+# What patches/settings.json and the adapter name through {install}. The three crates are built
+# after this script (ags-extension.toml), so these links dangle until then.
+# shortcut: the adapter finds its install folder from its real path, so run through the link
+# bin/astroport-adapter it looks in adapter/target; an install AGS can launch is made by
+# scripts/release/stage.sh, which copies.
+ln -sfn "$N/patcher/target/release/libastro_patcher.so" "$I/lib/"
+ln -sfn "$N/adapter/target/release/astroport-adapter" "$N/runner/target/release/astroport-run" "$I/bin/"
+ln -sfn "$N/engines/kyty/tools/u59-preset.json" "$N/engines/kyty/tools/u59-preset.PPSA21567.json" "$I/presets/"
 echo "engines built: libkyty_renderer.so, $n system libraries, relinker, bridge ($entry), 3 forwarders; install tree $I"

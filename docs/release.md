@@ -60,14 +60,25 @@ cargo build --release --locked --manifest-path runner/Cargo.toml
 scripts/release/stage.sh "{stage}"
 ```
 
-For a manual source build with DLSS, fetch the SDK and seed Kyty's CMake cache from the repository root, then run the build and stage commands above.
+The renderer contains no NVIDIA code and needs no SDK at build time: it loads the driver's NGX library when it runs. `stage.sh` adds the DLSS runtime and its licence when `build/release/dlss-sdk` holds them, and with `ASTROPORT_REQUIRE_DLSS=1` (set by the release build) fails when it does not. For a manual source build with DLSS, fetch the SDK before staging:
 
 ```sh
 scripts/release/fetch-dlss.sh build/release/dlss-sdk
-cmake -S engines/kyty -B build/kyty -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS=-fPIC \
-  -DKYTY_NGX_SDK_DIR="$PWD/build/release/dlss-sdk"
 ```
+
+## Package layout
+
+`stage.sh` copies files (no links) into the layout that `astroport-run --install` and `patches/settings.json` (`{install}`) read:
+
+| Path | Contents |
+|---|---|
+| `bin/` | `astroport-adapter`, `astroport-run` |
+| `lib/` | `libkyty_renderer.so`, `libastroport_bridge.so`, the forwarders `libSceAgc.prx`, `libSceAgcDriver.prx`, `libSceVideoOut.prx`, `astroport-exports.txt`, `libastro_patcher.so`, and `libnvidia-ngx-dlss.so.*` with DLSS |
+| `anyps5/` | `relinker`, and `libs/` with AnyPS5's system libraries and `libAstroportHost.prx` |
+| `presets/`, `patches/`, `assets/` | Kyty presets, patch and settings files, extension images |
+| `licenses/` | Licences of the port, both engines and their third-party code |
+
+`scripts/build-engines.sh` writes the same layout, without `licenses/`, as links under `build/install` for development; `bin/astroport-adapter` there is not launchable by AGS, because the adapter finds its install folder from its real path. `scripts/release/test.sh` checks the scripts against fixtures and builds nothing.
 
 ## Release notes template
 
@@ -81,7 +92,7 @@ Needs AGS with extension protocol 2 and extension jobs (AGS milestone 3 or later
 - **Changes:** ...
 - **Known issues:** ...
 - **After installing, updating or rolling back:** build the game files again from the game page; AGS refuses to launch game files built before the install.
-- **DLSS:** this package contains NVIDIA's DLSS runtime (SDK 310.9.16) under NVIDIA's DLSS SDK licence, which is not compatible with the GPL. DLSS works on NVIDIA GPUs only. A source build has no DLSS unless you fetch the SDK yourself.
+- **DLSS:** this package contains NVIDIA's DLSS runtime (SDK 310.9.16) under NVIDIA's DLSS SDK licence, which is not compatible with the GPL. DLSS works on NVIDIA GPUs only. A source build has no DLSS unless you fetch the runtime yourself.
 - **Source:** <repository URL>/tree/v<version> (GPL-2.0-only). Licences are in `licenses/` inside the package.
 - **Checksum:** astroport-<version>-linux-x86_64.tar.zst.sha256
 ```

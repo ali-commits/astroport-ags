@@ -20,7 +20,6 @@ fi
 
 engine_hint='run scripts/build-engines.sh'
 licence_hint='restore repository licence files'
-renderer=build/kyty-gpu/libkyty_gpu.so
 anyps5=build/anyps5/core
 system_libs="$anyps5/libs/libs"
 sdk=build/release/dlss-sdk
@@ -57,41 +56,40 @@ done
 
 add_file patcher/target/release/libastro_patcher.so lib/libastro_patcher.so 0644 \
   'cargo build --release --manifest-path patcher/Cargo.toml'
-add_file "$renderer" lib/libkyty_gpu.so 0644 "$engine_hint"
+# The install tree astroport-run reads (docs/rewrite/design.md 1.4, 7.4): lib/ holds the renderer, the
+# bridge and the three forwarders; anyps5/libs holds AnyPS5's libraries, its own three graphics
+# libraries included (the runner leaves those out of a run folder).
+add_file build/kyty/libkyty_renderer.so lib/libkyty_renderer.so 0644 "$engine_hint"
+add_file build/libs/libastroport_bridge.so lib/libastroport_bridge.so 0644 "$engine_hint"
+for name in libSceAgc.prx libSceAgcDriver.prx libSceVideoOut.prx astroport-exports.txt; do
+  add_file "build/fwd/$name" "lib/$name" 0644 "$engine_hint"
+done
 add_file "$anyps5/relinker/relinker" anyps5/relinker 0755 "$engine_hint"
-add_file "$system_libs/libAstroHybridHost.prx" anyps5/libAstroHybridHost.prx 0644 "$engine_hint"
+add_file "$system_libs/libAstroportHost.prx" anyps5/libs/libAstroportHost.prx 0644 "$engine_hint"
 system_count=0
 for file in "$ROOT/$system_libs"/*.prx; do
   name=${file##*/}
-  [[ $name == libAstroHybridHost.prx ]] && continue
+  [[ $name == libAstroportHost.prx ]] && continue
   add_file "$system_libs/$name" "anyps5/libs/$name" 0644 "$engine_hint"
   system_count=$((system_count + 1))
 done
 (( system_count > 0 )) || fail "missing $system_libs/*.prx ($engine_hint)"
 
-for name in libSceAgc.prx libSceAgcDriver.prx libSceVideoOut.prx; do
-  add_file "build/shims/$name" "shims/$name" 0644 "$engine_hint"
-done
 for name in u59-preset.json u59-preset.PPSA21567.json; do
   add_file "engines/kyty/tools/$name" "presets/$name" 0644 'restore repository presets'
 done
 
-symbols=$(LC_ALL=C nm --format=posix -- "$ROOT/$renderer" 2>/dev/null) \
-  || fail "could not inspect symbols in $renderer"
-[[ -n $symbols ]] || fail "$renderer has no symbol table; stage needs the unstripped build"
+# The renderer loads the driver's NGX itself (design 6.4), so DLSS ships when its runtime is here.
 dlss=no
-if grep -q '^NVSDK_NGX_VULKAN_Init_with_ProjectID ' <<<"$symbols"; then
+sdk_hint='run scripts/release/fetch-dlss.sh build/release/dlss-sdk'
+runtimes=("$ROOT/$sdk"/lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.*)
+if (( ${#runtimes[@]} == 1 )) && [[ -f ${runtimes[0]} ]]; then
   dlss=yes
-  sdk_hint='run scripts/release/fetch-dlss.sh build/release/dlss-sdk'
-  runtimes=("$ROOT/$sdk"/lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.*)
-  if (( ${#runtimes[@]} != 1 )) || [[ ! -f ${runtimes[0]} ]]; then
-    fail "DLSS renderer but no single DLSS runtime in $sdk ($sdk_hint)"
-  fi
   runtime=${runtimes[0]}
   add_file "${runtime#"$ROOT/"}" "lib/${runtime##*/}" 0644 "$sdk_hint"
   add_file "$sdk/LICENSE.txt" licenses/NVIDIA-DLSS-SDK-LICENSE.txt 0644 "$sdk_hint"
-elif [[ ${ASTROPORT_REQUIRE_DLSS:-} == 1 ]]; then
-  fail 'the renderer was built without DLSS (KYTY_NGX_SDK_DIR did not reach engines/kyty)'
+elif (( ${#runtimes[@]} > 0 )) || [[ ${ASTROPORT_REQUIRE_DLSS:-} == 1 ]]; then
+  fail "no single DLSS runtime in $sdk ($sdk_hint)"
 fi
 
 for file in LICENSE NOTICE.md; do
@@ -120,7 +118,7 @@ for i in "${!sources[@]}"; do
   install -D -m "${modes[i]}" -- "$ROOT/${sources[i]}" "$stage/${destinations[i]}" 2>/dev/null \
     || fail "could not stage ${sources[i]} in $stage"
 done
-for file in "$stage"/bin/* "$stage"/lib/{libastro_patcher,libkyty_gpu}.so; do
+for file in "$stage"/bin/* "$stage"/lib/{libastro_patcher,libkyty_renderer,libastroport_bridge}.so; do
   strip --strip-unneeded -- "$file" 2>/dev/null || fail "could not strip $file"
 done
 

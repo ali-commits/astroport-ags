@@ -41,16 +41,31 @@ for f in .gitignore LICENSE README.md NOTICE.md engines/kyty/LICENSE engines/kyt
   scripts/release/package.sh scripts/release/inside.sh scripts/release/Containerfile scripts/release/test.sh docs/release.md \
   ags-extension.toml adapter/Cargo.toml adapter/Cargo.lock adapter/src/main.rs patches/settings.json patches/versions.json \
   assets/icon.svg assets/logo.svg assets/icon.png assets/logo.png assets/badge.png assets/badge.svg runner/Cargo.toml runner/Cargo.lock \
-  engines/kyty/src/streaming/transport.cpp patcher/src/lib.rs; do
+  engines/kyty/src/streaming/transport.cpp patcher/src/lib.rs \
+  bridge/Cargo.toml bridge/Cargo.lock bridge/src/lib.rs engines/kyty/src/embed/kytyEmbed.cpp \
+  engines/anyps5/core/libs/prx/libAstroportHost/Export.cpp scripts/build-engines.sh scripts/smoke.sh \
+  docs/rewrite/design.md; do
   grep -qxF "$f" <<<"$tracked" || bad "missing tracked file: $f"
 done
 
-for p in build/x run-hybrid-1019/x src-1019/x ngx-sdk/x last-hybrid.log patcher/target/x tools/hidtap/target/x tools/__pycache__/x.pyc adapter/target/x runner/target/x build/release/dlss-sdk/x; do
+for p in build/x run-hybrid-1019/x src-1019/x ngx-sdk/x last-hybrid.log patcher/target/x tools/hidtap/target/x tools/__pycache__/x.pyc adapter/target/x runner/target/x bridge/target/x build-rewrite/x build/release/dlss-sdk/x; do
   "${G[@]}" check-ignore -q --no-index "$p" || bad "should be ignored: $p"
 done
 for p in engines/anyps5/3rdparty/zstd/build/cmake/CMakeLists.txt engines/kyty/src/graphics/host_gpu/renderer/cache/textureCache.cpp patcher/src/lib.rs scripts/check-repo.sh adapter/src/main.rs runner/src/main.rs ags-extension.toml assets/icon.svg; do
   "${G[@]}" check-ignore -q --no-index "$p" && bad "should not be ignored: $p"
 done
+
+# The removed third-party bridge is named only where its removal is described (design 7.4). The
+# names are split here so that this file passes; kyty_gpu_op_* is upstream Kyty's GPU profiler.
+removed='Astro''Hybrid|ASTRO''HYBRID_|kyty''_gpu|Kyty''Gpu|pcport''astrobot'
+hits=$("${G[@]}" grep -I -n -E "$removed" -- . ':!docs/rewrite' ':!docs/superpowers' ':!README.md' ':!NOTICE.md' | grep -v 'kyty_gpu_op_' | cut -d: -f1 | uniq -c | awk '{print $2 " (" $1 ")"}')
+[ -n "$hits" ] && bad "files name the removed bridge: $(echo $hits)"
+hits=$("${G[@]}" ls-files -- . ':!docs/rewrite' | grep -E "$removed")
+[ -n "$hits" ] && bad "paths name the removed bridge: $(echo $hits)"
+
+# Every SPIR-V validator run passes its options (design 6.3, K6).
+hits=$("${G[@]}" grep -n -E 'tools\.Validate\(' -- engines/kyty/src | grep -v 'options)')
+[ -n "$hits" ] && bad "spirv-val call without options: $(echo $hits)"
 
 (( fail )) && exit 1
 echo "repo OK: $((total/1048576)) MiB in $n files, largest $maxf ($((max/1048576)) MiB)"

@@ -12,6 +12,7 @@
     "APS5_SAVEDATA_TRANSFER_AS_MOUNT": "1",
     "ASTROPORT_WAYLAND_NATIVE": "1",
     "ASTROPORT_APP0": "{run}/app0", "ASTROPORT_DLSS_PASS": "2936e5eca99d75e7",
+    "ASTROPORT_DLSS_LAYOUT": "0,1,4,5,6,7,11,13,0,1,0",
     "LD_AUDIT": "{install}/lib/libastro_patcher.so",
     "ASTRO_PATCH_PROCESS": "AstroBot"
   },

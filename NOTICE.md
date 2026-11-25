@@ -2,25 +2,24 @@
 
 ## 1. AstroPort
 
-The port's own code (`patcher/`, `tools/`, `scripts/`, `patches/`) and both engines are licensed under the GNU
-General Public License, version 2 only (`GPL-2.0-only`). See [LICENSE](LICENSE).
-
-## 2. Engines
-
-| Engine | Upstream | Licence files | Base and snapshot | Details |
-|---|---|---|---|---|
-| `engines/kyty` | [Jetsku/KytyPS5](https://github.com/Jetsku/KytyPS5), based on Kyty by InoriRus | `engines/kyty/LICENSE` (GPL-2.0-only), `engines/kyty/LICENSES/Kyty-MIT.txt` (Kyty's original MIT notice) | Jetsku int22 `dd9f9901`; snapshot `457b1fa8` | [UPSTREAM.md](engines/kyty/UPSTREAM.md) |
-| `engines/anyps5` | [boykopovar/AnyPS5](https://github.com/boykopovar/AnyPS5) | `engines/anyps5/LICENSE` (GPL-2.0-only) | base `319621ba2e`; snapshot `2429864775` | [UPSTREAM.md](engines/anyps5/UPSTREAM.md) |
-
-## 3. AstroHybrid
-
-AstroHybrid is by faycal (https://github.com/imnotsharingmyname/pcportastrobot). It wrote the bridge that runs
-Kyty's renderer inside AnyPS5, and most of the engine changes in both. Its changes are modifications of the GPL-2.0-only engines above and are distributed here under the same licence.
+The port's own code (`bridge/`, `patcher/`, `adapter/`, `runner/`, `tools/`, `scripts/`, `patches/`) and both
+engines, including our changes to them, are licensed under the GNU General Public License, version 2 only
+(`GPL-2.0-only`). See [LICENSE](LICENSE).
 
 `runner/src/unwrap.rs` is a Rust port of AnyPS5's `tools/unwrap_self.py` (GPL-2.0-only, boykopovar/AnyPS5
 contributors).
 
-## 4. Third-party libraries
+## 2. Engines
+
+Each engine is the unmodified upstream tree at the base below, plus this project's own changes, which its
+`UPSTREAM.md` lists.
+
+| Engine | Upstream and authors | Licence files | Base | Details |
+|---|---|---|---|---|
+| `engines/kyty` | [Jetsku/KytyPS5](https://github.com/Jetsku/KytyPS5) by Jetsku and contributors, based on Kyty by InoriRus | `engines/kyty/LICENSE` (GPL-2.0-only), `engines/kyty/LICENSES/Kyty-MIT.txt` (Kyty's original MIT notice) | `dd9f9901`, tag `u59-windows-20261118-int22` | [UPSTREAM.md](engines/kyty/UPSTREAM.md) |
+| `engines/anyps5` | [boykopovar/AnyPS5](https://github.com/boykopovar/AnyPS5) by boykopovar and contributors | `engines/anyps5/LICENSE` (GPL-2.0-only) | `319621ba2e` | [UPSTREAM.md](engines/anyps5/UPSTREAM.md) |
+
+## 3. Third-party libraries
 
 Each library keeps its own licence, at the path given. The folder `engines/kyty/3rdparty/patches` holds build patches, not a library.
 `engines/anyps5/3rdparty/Vulkan-Headers` and `engines/anyps5/3rdparty/ffmpeg-core` are symlinks to Kyty's copies below.
@@ -73,19 +72,19 @@ Each library keeps its own licence, at the path given. The folder `engines/kyty/
 Fetched at configure time (Kyty's `3rdparty/CMakeLists.txt`; not in this repository, each keeps its own licence):
 opus, OpenXR-SDK, xbyak, zydis, zstd, ZArchive (with `engines/kyty/3rdparty/patches/zarchive-reader.patch`) and Noto Sans.
 
-## 5. NVIDIA DLSS
+## 4. NVIDIA DLSS
 
-Release packages also contain a DLSS-enabled renderer built with NVIDIA's DLSS SDK, and NVIDIA's DLSS runtime
-where the SDK licence allows it to be redistributed. Those parts are under NVIDIA's DLSS SDK licence, which is
-not compatible with the GPL. Distributing them together with GPL-2.0 code is a known licence risk that this
-project accepts. The SDK is not in this repository: the release build fetches it from
-https://github.com/NVIDIA/DLSS (SDK 310.9.16), and a source build without it has no DLSS. Release packages carry
-the licence as `licenses/NVIDIA-DLSS-SDK-LICENSE.txt`. DLSS is offered on NVIDIA GPUs only.
+The renderer contains no NVIDIA code and is not built against NVIDIA's SDK; it loads the graphics driver's
+NGX library when it runs. Release packages may also carry NVIDIA's DLSS runtime
+(`libnvidia-ngx-dlss.so.310.9.16`), a separate file under NVIDIA's DLSS SDK licence, which is not a GPL
+licence. Packages that carry it also carry that licence as `licenses/NVIDIA-DLSS-SDK-LICENSE.txt`. The
+runtime is not in this repository: the release build fetches it from https://github.com/NVIDIA/DLSS, and a
+source build without it has no DLSS. DLSS is offered on NVIDIA GPUs only.
 
-## 6. Also used
+## 5. Also used
 
 lsfg-vk provides frame generation on Linux. It is not bundled.
 
-## 7. Trademarks
+## 6. Trademarks
 
 "Astro Bot" and "PlayStation" are trademarks of their owners. This is a fan project. It is not affiliated with, endorsed by, or supported by Sony Interactive Entertainment or Team Asobi.

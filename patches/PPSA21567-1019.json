@@ -526,7 +526,7 @@
       "name": "Skip the PlayStation Studios intro video (its 4K video plays at a fraction of real speed in the emulator; the game sees it as already finished)"
     },
     {
-      "name": "Ultrawide: 21:9-class render aspect (2.389, as AstroHybrid's Ultrawide build; set a 21:9 resolution)",
+      "name": "Ultrawide: 21:9-class render aspect (2.389; set a 21:9 resolution)",
       "enabled": false,
       "memory": [
         {

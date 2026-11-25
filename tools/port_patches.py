@@ -3,7 +3,7 @@
 usage: port_patches.py <cheats.json> <old eboot.elf> <new eboot.elf> <out.json> [new version
                        [old AstroBot.registry.json new AstroBot.registry.json]]
 
-Both ELF files are unwrapped eboots (tools/unwrap_self.py). Each write is moved to the address of the
+Both ELF files are unwrapped eboots (engines/anyps5/tools/unwrap_self.py). Each write is moved to the address of the
 same code in the new build, and every jump, call and rip-relative operand in its "on" bytes is pointed
 at the new address of its target:
 - code targets: located by matching byte windows around them (unique matches only);

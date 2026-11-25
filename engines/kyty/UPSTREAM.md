@@ -67,195 +67,68 @@ $ git shortlog -sn --no-merges 744705ee..dd9f9901
 
 ## 3. Carried changes
 
-AstroHybrid's bridge by faycal (https://github.com/imnotsharingmyname/pcportastrobot) and the
-AstroPort changes, merged in `66b0b870` ("Merge Jetsku int22 into the Linux hybrid renderer"):
+The tree is the base, unmodified, plus the changes below. All of them were written by the AstroPort
+project.
 
-```
-$ git log --no-merges --reverse --format='- %h %an: %s' dd9f9901..457b1fa8
-- 00157dbd faycal: perf(texture memo): ASTROHYBRID_OPT_1 raises the binding memo default to 32768 entries
-- c7716fb7 faycal: perf(page manager): ASTROHYBRID_OPT_1 skips host_lock for settled deferred spans
-- 234c5298 faycal: feat(hybrid): kyty_gpu.dll bridge for AnyPS5's native AstroBot.exe (milestone 1)
-- 14cbbbcd faycal: feat(hybrid): start Kyty's renderer inside the host process (milestone 2a)
-- a6e784b8 faycal: feat(hybrid): lazy start, direct-memory exports and GPU event proxy (milestone 2b)
-- 8221d49a faycal: feat(hybrid): Kyty's renderer runs Astro Bot inside AstroBot.exe (milestone 2)
-- c5443342 faycal: feat(hybrid): relay Kyty's window input to the host pad library (milestone 3)
-- 9275450f faycal: test(hybrid): refresh GPU loader expectations
-- e4f3e5f5 faycal: chore(hybrid): snapshot Claude milestone 4 build work
-- 4d41d0a4 faycal: hybrid: ABI 1.3, a closed window asks the host to exit instead of tearing the renderer down
-- 6ed4997b faycal: perf: add opt-in draw preparation worker priority
-- f10725be faycal: perf(watchdog): lock-free updates of known events (ASTROHYBRID_WATCHDOG_FAST_EVENTS)
-- 6eba4178 faycal: feat(hybrid): ABI 1.4, the relay applies the host's pad output (rumble, light bar, trigger effects)
-- 0aa28fed faycal: perf(diagnostics): log descriptor offset reuse by bind point
-- df58c118 faycal: perf(diagnostics): attribute CP draw commit to render targets
-- d42e4348 faycal: fix(hybrid): enable persistent graphics caches with a title ID
-- 520675ae faycal: feat: add opt-in AstroHybrid frame-rate settings
-- 6fdc82ff faycal: feat(hybrid): 40/45 FPS limits, fixed-cadence pacing for every limit, fullscreen start
-- 1cbf2e8d faycal: feat(hybrid): opt-in real-time game step (ASTROHYBRID_GAME_SPEED)
-- 34dda51d faycal: feat(hybrid): 35/50/55/90 FPS limits, game speed percent, smoother real-time step
-- 614acdba faycal: feat(hybrid): ASTROHYBRID_WINDOW_TITLE and ASTROHYBRID_OVERLAY start modes (fps/compact/full)
-- 4cb7fc66 faycal: feat(hybrid): opt-in guest-load fault context for read faults in the game image (ASTROHYBRID_GUEST_LOAD_FAULTS)
-- cae890db faycal: feat(hybrid): opt-in relay of pad motion sensors to the host (ABI 1.5)
-- 9dbd6770 faycal: feat(hybrid): opt-in generation fast path for writable buffer bindings
-- dbced347 faycal: feat(hybrid): carry the read memo's cross-epoch proof by its signature
-- e31d441a faycal: feat(hybrid): opt-in NVIDIA low-latency mode through VK_NV_low_latency2
-- 9b4e9cda faycal: feat(hybrid): pass trace and targeted shader dump diagnostics
-- 94cbc59a faycal: feat(hybrid): opt-in DLSS Super Resolution for the game's temporal upscale (blocked)
-- a06d0635 faycal: docs(hybrid): DLSS needs the host's CUDA address window
-- 377ff170 faycal: feat(hybrid): opt-in DLSS Frame Generation through Streamline
-- 6312ad97 faycal: feat(hybrid): overlay shows frames on screen with frame generation
-- 6a9bdfd6 faycal: feat(hybrid): ASTROHYBRID_FPS_LIMIT accepts any value from 10 to 240
-- dc6509ce faycal: feat(hybrid): adaptive frame generation multiplier for an on-screen target
-- a1ccda55 faycal: Controller: pick the playing pad, rumble strength for non-DualSense pads
-- 37198216 faycal: Relay: angular velocity from orientation for pads without a gyroscope
-- feb4bf5f Ali: feat(hybrid): Bluetooth DualSense speaker/haptics bridge, rumble scale, SaveDataTransferringMount
-- ab9de9fc Jetsku: bufferCache: include the rdtsc/prefetch intrinsics header per compiler (Linux build)
-- 2423aeee Claude: AstroHybrid on Linux: libkyty_gpu.so bridge, .prx forwarders, Linux fault and memory paths
-- f14f408a Claude: LowLatency: ASTROHYBRID_LOW_LATENCY_INTERVAL_US paces frames in vkLatencySleepNV
-- f7c280a7 Ali: DualSense: ASTROHYBRID_DUALSENSE_RUMBLE=0 keeps rumble reports off
-- 07606667 Ali: AstroHybrid: ordinary mappings search the whole user range when the host donated memory
-- 457b1fa8 Ali: Remove the Qt launcher
-```
+- **Renderer as a library.** The CMake target `kyty_renderer` builds the emulator's sources without
+  `main.cpp` into `libkyty_renderer.so`, which exports one symbol. `src/embed/` holds its C function table
+  (`kytyEmbed.h`, `kytyEmbed.cpp`), the version script, and `embedOptions.h`, the header-only options that
+  the hooks in upstream files read. In the stand-alone emulator every option has its default and the hooks
+  do nothing.
+- **Present gate.** `videoOut.cpp`: the present thread asks the embedding host before each flip and reports
+  each present, so that the host can limit the frame rate.
+- **Window.** `window.cpp`: a fixed window title, the host's frame limit in the session socket's live
+  output, a live change of the window size, and a Wayland surface at the display's real resolution.
+- **NVIDIA low-latency mode.** `lowLatency.h`, `lowLatency.cpp` (VK_NV_low_latency2 with
+  VK_KHR_present_id), with hooks in `vulkanWindow.cpp`, `swapchain.cpp` and `videoOut.cpp`; the seam wraps
+  the AGC flip and submit exports instead of editing them.
+- **Controllers.** `controller.cpp`: the pad in use becomes player 1, by preferred pad family when one is
+  set; rumble strength scale, and a minimum strength for Switch pads.
+- **DualSense.** `dualSenseBluetooth.cpp`, `dualSenseHaptics.cpp`: a pad of unknown connection counts as
+  wireless, the only Bluetooth DualSense is used when its address is unknown, the speaker is unmuted and
+  plays both channels as mono, and a switch keeps motor rumble reports off.
+- **Build on Linux with clang.** One line or a few each in `src/common/CMakeLists.txt`, `hleWaitStats.h`,
+  `descriptors.cpp`, `ProgramCodec.cpp` and `ResourceTracking.cpp`.
+- **AGS session socket client.** `src/streaming/`, `tests/SessionSocketTests.cpp`, with its CMake wiring and
+  a frame counter in `window.cpp`.
+- **Qt launcher removed.** `src/launcher`, its six `tests/Launcher*Tests.cpp` and its CMake wiring are not
+  in the tree.
 
 ## 4. Files changed against the base
 
-For GPL-2.0 section 2a, as of 2026-11-21. None of these files carries a licence header, so no
+For GPL-2.0 section 2a, as of 2026-11-25. None of these files carries a licence header, so no
 "Modified by" line was added to any file.
 
+The list is taken against repository commit `0c140c49`, at which this tree was the base plus the last
+three items of section 3 (session socket client, launcher removal, and the `ResourceTracking.cpp` line),
+which it therefore does not show.
+
 ```
-$ git diff --stat=200 dd9f9901 457b1fa8
- CMakeLists.txt                                                 |   27 +--
- src/common/CMakeLists.txt                                      |    3 +
- src/common/astroHybrid.h                                       |   34 +++
- src/common/hangWatchdog.cpp                                    |   60 +++++-
- src/common/hleWaitStats.h                                      |    4 +-
- src/common/hostException.cpp                                   |   56 +++++
- src/common/threads.cpp                                         |    7 +
- src/common/threads.h                                           |    2 +
- src/graphics/host_gpu/pageManager.cpp                          |   31 +++
- src/graphics/host_gpu/renderer/cache/bufferCache.cpp           |  242 +++++++++++++++++++++
- src/graphics/host_gpu/renderer/cache/bufferCache.h             |   68 ++++++
- src/graphics/host_gpu/renderer/drawPrep/cpGaps.cpp             |   66 ++++++
- src/graphics/host_gpu/renderer/drawPrep/cpGaps.h               |   58 +++++
- src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp           |    6 +-
- src/graphics/host_gpu/renderer/frameGen.cpp                    |  604 +++++++++++++++++++++++++++++++++++++++++++++++++++
- src/graphics/host_gpu/renderer/frameGen.h                      |   76 +++++++
- src/graphics/host_gpu/renderer/hybridDlss.cpp                  |  631 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
- src/graphics/host_gpu/renderer/hybridDlss.h                    |   44 ++++
- src/graphics/host_gpu/renderer/passTrace.h                     |   83 ++++++++
- src/graphics/host_gpu/renderer/pipeline/descriptors.cpp        |  201 ++++++++++++++++-
- src/graphics/host_gpu/renderer/pipeline/descriptors.h          |    5 +
- src/graphics/host_gpu/renderer/pipeline/pipelineCache.cpp      |   62 +++++-
- src/graphics/host_gpu/renderer/pipeline/textureBindingMemo.cpp |    8 +-
- src/graphics/host_gpu/renderer/render.h                        |   16 +-
- src/graphics/host_gpu/renderer/renderCompute.cpp               |    9 +
- src/graphics/host_gpu/renderer/renderDraw.cpp                  |   27 ++-
- src/graphics/presentation/performanceOverlay.cpp               |   58 ++++-
- src/graphics/presentation/videoOut.cpp                         |  234 +++++++++++++++++++-
- src/graphics/presentation/videoOut.h                           |    3 +
- src/graphics/presentation/window/lowLatency.cpp                |  429 +++++++++++++++++++++++++++++++++++++
- src/graphics/presentation/window/lowLatency.h                  |   63 ++++++
- src/graphics/presentation/window/swapchain.cpp                 |   13 ++
- src/graphics/presentation/window/vulkanWindow.cpp              |  101 ++++++++-
- src/graphics/presentation/window/window.cpp                    |   24 ++-
- src/graphics/shader/recompiler/ir/ProgramCodec.cpp             |    2 +-
- src/hybrid/kytyGpuApi.h                                        |  228 ++++++++++++++++++++
- src/hybrid/kytyGpuBridge.cpp                                   | 1007 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
- src/hybrid/kytyGpuNids.inc                                     |  102 +++++++++
- src/hybrid/kyty_gpu.def                                        |  105 +++++++++
- src/kernel/memory.cpp                                          |   14 +-
- src/kernel/memory.h                                            |    5 +
- src/kernel/memoryAddressSpace.inc                              |   47 +++-
- src/launcher/CMakeLists.txt                                    |  327 ----------------------------
- src/launcher/Info.plist.in                                     |   17 --
- src/launcher/forms/configuration_edit_dialog.ui                |  814 ---------------------------------------------------------------------
- src/launcher/forms/configuration_list_widget.ui                |  417 ------------------------------------
- src/launcher/forms/main_dialog.ui                              |  185 ----------------
- src/launcher/icons/edit-configuration.svg                      |    7 -
- src/launcher/icons/global-settings.svg                         |    8 -
- src/launcher/icons/grid-view.svg                               |    8 -
- src/launcher/icons/input-mapping.svg                           |    9 -
- src/launcher/icons/kyty-small.svg                              |   18 --
- src/launcher/icons/kyty.svg                                    |   18 --
- src/launcher/icons/racing-wheel.svg                            |    7 -
- src/launcher/icons/refresh.svg                                 |    6 -
- src/launcher/icons/remove-configuration.svg                    |    6 -
- src/launcher/icons/trophy.svg                                  |    7 -
- src/launcher/include/additionalContentDialog.h                 |   42 ----
- src/launcher/include/cheatFile.h                               |   28 ---
- src/launcher/include/cheatRepository.h                         |   65 ------
- src/launcher/include/compatibilityDatabase.h                   |   38 ----
- src/launcher/include/configuration.h                           |  322 ----------------------------
- src/launcher/include/configurationEditDialog.h                 |   73 -------
- src/launcher/include/configurationItem.h                       |   65 ------
- src/launcher/include/configurationListWidget.h                 |  120 -----------
- src/launcher/include/controllerPreview.h                       |   55 -----
- src/launcher/include/dualsenseWidget.h                         |   40 ----
- src/launcher/include/gameContent.h                             |   27 ---
- src/launcher/include/gameViews.h                               |  193 -----------------
- src/launcher/include/inputMappingDialog.h                      |   54 -----
- src/launcher/include/launcherTheme.h                           |   12 --
- src/launcher/include/mainDialog.h                              |   40 ----
- src/launcher/include/mandatoryLineEdit.h                       |   28 ---
- src/launcher/include/patchesDialog.h                           |   51 -----
- src/launcher/include/precompile.h                              |   84 --------
- src/launcher/include/precompileDialog.h                        |   80 -------
- src/launcher/include/shaderListExport.h                        |   91 --------
- src/launcher/include/titleSound.h                              |   36 ----
- src/launcher/include/trophyViewerDialog.h                      |   28 ---
- src/launcher/include/updateChecker.h                           |   65 ------
- src/launcher/include/updateRelease.h                           |   38 ----
- src/launcher/include/wheelMappingDialog.h                      |  106 ---------
- src/launcher/resources.qrc                                     |   18 --
- src/launcher/src/additionalContentDialog.cpp                   |  159 --------------
- src/launcher/src/cheatFile.cpp                                 |  254 ----------------------
- src/launcher/src/cheatRepository.cpp                           |  195 -----------------
- src/launcher/src/compatibilityDatabase.cpp                     |  199 -----------------
- src/launcher/src/configuration.cpp                             |  304 --------------------------
- src/launcher/src/configurationEditDialog.cpp                   |  818 ----------------------------------------------------------------------
- src/launcher/src/configurationItem.cpp                         |  387 ---------------------------------
- src/launcher/src/configurationListWidget.cpp                   | 1505 --------------------------------------------------------------------------------------------------------------------------------
- src/launcher/src/controllerPreview.cpp                         |  245 ---------------------
- src/launcher/src/dualsenseWidget.cpp                           |  300 --------------------------
- src/launcher/src/gameContent.cpp                               |   80 -------
- src/launcher/src/inputMappingDialog.cpp                        |  761 -----------------------------------------------------------------
- src/launcher/src/launcherTheme.cpp                             |   45 ----
- src/launcher/src/main.cpp                                      |   72 -------
- src/launcher/src/mainDialog.cpp                                | 1077 -------------------------------------------------------------------------------------------
- src/launcher/src/mandatoryLineEdit.cpp                         |   44 ----
- src/launcher/src/patchesDialog.cpp                             |  314 ---------------------------
- src/launcher/src/precompile.cpp                                |  288 -------------------------
- src/launcher/src/precompileDialog.cpp                          |  357 -------------------------------
- src/launcher/src/shaderListExport.cpp                          |  206 ------------------
- src/launcher/src/titleSound.cpp                                |  106 ---------
- src/launcher/src/trophyViewerDialog.cpp                        |  573 -------------------------------------------------
- src/launcher/src/updateChecker.cpp                             |  440 --------------------------------------
- src/launcher/src/updateRelease.cpp                             |   89 --------
- src/launcher/src/wheelMappingDialog.cpp                        |  820 ----------------------------------------------------------------------
- src/launcher/styles/launcher.qss                               |  120 -----------
- src/libs/agc.cpp                                               |    4 +
- src/libs/controller.cpp                                        |  160 +++++++++++++-
- src/libs/controller.h                                          |    2 +
- src/libs/dualSenseBluetooth.cpp                                |   43 ++--
- src/libs/dualSenseHaptics.cpp                                  |   49 ++++-
- src/libs/libSaveData.cpp                                       |   30 ++-
- tests/LauncherConfigurationTests.cpp                           |  280 ------------------------
- tests/LauncherEditDialogTests.cpp                              |  124 -----------
- tests/LauncherGameViewsTests.cpp                               |  122 -----------
- tests/LauncherPrecompileItemTests.cpp                          |  166 ---------------
- tests/LauncherPrecompileTests.cpp                              |  268 -----------------------
- tests/LauncherShaderListExportTests.cpp                        |  194 -----------------
- tests/hybrid/kytyGpuLoadTest.c                                 |  248 +++++++++++++++++++++
- tests/hybrid/kytyGpuTestHost.c                                 |   55 +++++
- tools/hybrid/build_kyty_gpu.py                                 |  122 +++++++++++
- tools/hybrid/build_kyty_gpu_linux.py                           |  122 +++++++++++
- tools/hybrid/build_linux_shims.py                              |   63 ++++++
- tools/hybrid/gen_kyty_gpu_exports.py                           |   95 +++++++++
- 127 files changed, 5779 insertions(+), 14644 deletions(-)
+$ cd engines/kyty && git diff --relative --stat=200 0c140c49 -- . ':!UPSTREAM.md'
+ CMakeLists.txt                                          |  12 +++++
+ src/common/CMakeLists.txt                               |   2 +-
+ src/common/hleWaitStats.h                               |   4 +-
+ src/embed/embedOptions.h                                |  69 ++++++++++++++++++++++++++++
+ src/embed/kytyEmbed.cpp                                 | 335 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/embed/kytyEmbed.h                                   |  80 +++++++++++++++++++++++++++++++++
+ src/embed/kytyEmbed.map                                 |   1 +
+ src/graphics/host_gpu/renderer/pipeline/descriptors.cpp |   2 +-
+ src/graphics/presentation/videoOut.cpp                  |  52 +++++++++++++++++++--
+ src/graphics/presentation/window/lowLatency.cpp         | 275 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/graphics/presentation/window/lowLatency.h           |  43 ++++++++++++++++++
+ src/graphics/presentation/window/swapchain.cpp          |   7 ++-
+ src/graphics/presentation/window/vulkanWindow.cpp       |  10 +++++
+ src/graphics/presentation/window/window.cpp             |  26 +++++++----
+ src/graphics/shader/recompiler/ir/ProgramCodec.cpp      |   2 +-
+ src/libs/controller.cpp                                 | 108 ++++++++++++++++++++++++++++++++++++++++++--
+ src/libs/dualSenseBluetooth.cpp                         |  25 ++++++++---
+ src/libs/dualSenseHaptics.cpp                           |  26 +++++++++--
+ 18 files changed, 1049 insertions(+), 30 deletions(-)
 ```
 
 ## 5. Snapshot
 
-`kyty-hybrid-src`, branch `main`, commit `457b1fa8`, plus these submodules at their pinned commits:
+The upstream tree at the base `dd9f9901`, plus these submodules at their pinned commits:
 
 | Path | URL | Commit |
 |------|-----|--------|

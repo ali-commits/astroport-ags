@@ -33,7 +33,7 @@ trap 'exit 1' HUP INT TERM
 
 git clone --quiet --depth 1 --branch "$DLSS_SDK_TAG" --filter=blob:none --no-checkout \
   -- "$DLSS_SDK_URL" "$partial" 2>/dev/null || fail "could not clone DLSS SDK tag $DLSS_SDK_TAG"
-git -C "$partial" sparse-checkout set --no-cone /include/ /lib/Linux_x86_64/ /LICENSE.txt 2>/dev/null \
+git -C "$partial" sparse-checkout set --no-cone /lib/Linux_x86_64/rel/ /LICENSE.txt 2>/dev/null \
   || fail 'could not set the DLSS SDK sparse checkout'
 git -C "$partial" checkout --quiet 2>/dev/null || fail "could not check out DLSS SDK tag $DLSS_SDK_TAG"
 
@@ -41,9 +41,8 @@ commit=$(git -C "$partial" rev-parse HEAD 2>/dev/null) || fail 'could not read t
 [[ $commit == "$DLSS_SDK_COMMIT" ]] \
   || fail "tag $DLSS_SDK_TAG is at $commit, which does not match the pinned commit $DLSS_SDK_COMMIT"
 
-for file in include/nvsdk_ngx_vk.h lib/Linux_x86_64/libnvsdk_ngx.a LICENSE.txt; do
-  [[ -f "$partial/$file" ]] || fail "DLSS SDK is missing $file"
-done
+# Only the runtime and its licence: the renderer loads the driver's NGX and needs no SDK file.
+[[ -f "$partial/LICENSE.txt" ]] || fail 'DLSS SDK is missing LICENSE.txt'
 
 shopt -s nullglob
 runtimes=("$partial"/lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.*)

@@ -18,7 +18,7 @@ Conventions used below:
   the Kyty engine, or unused).
 
 Evidence for run-time statements comes from the built run folder
-`/home/ali/Games/astrobot-pc/native/run-hybrid-1019` (inspected with `readelf -d` and `nm -D`) and
+`~/Games/astrobot-pc/native/run-hybrid-1019` (inspected with `readelf -d` and `nm -D`) and
 from the product launch configuration (`patches/settings.json`, `adapter/src/launch.rs`,
 `scripts/play-hybrid.sh`, `runner/src/{build,layout}.rs`).
 

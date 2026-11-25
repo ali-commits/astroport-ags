@@ -17,8 +17,9 @@ arch=$(uname -m)
 
 required=(
   ags-extension.toml bin/astroport-adapter bin/astroport-run
-  lib/libastro_patcher.so lib/libkyty_gpu.so anyps5/relinker anyps5/libAstroHybridHost.prx
-  shims/libSceAgc.prx shims/libSceAgcDriver.prx shims/libSceVideoOut.prx
+  lib/libastro_patcher.so lib/libkyty_renderer.so lib/libastroport_bridge.so lib/astroport-exports.txt
+  lib/libSceAgc.prx lib/libSceAgcDriver.prx lib/libSceVideoOut.prx
+  anyps5/relinker anyps5/libs/libAstroportHost.prx
   presets/u59-preset.json presets/u59-preset.PPSA21567.json
   patches/PPSA21567-1018.json patches/PPSA21567-1019.json patches/settings.json patches/versions.json
   licenses/LICENSE licenses/NOTICE.md
@@ -26,16 +27,6 @@ required=(
 for path in "${required[@]}"; do
   [[ -f "$root/$path" ]] || fail "missing $path"
 done
-
-shopt -s nullglob
-has_system_library=false
-for path in "$root"/anyps5/libs/*.prx; do
-  if [[ -f $path ]]; then
-    has_system_library=true
-    break
-  fi
-done
-"$has_system_library" || fail 'anyps5/libs holds no .prx'
 
 special=$(find "$root" ! -type f ! -type d ! -type l -printf '%P/' -quit 2>/dev/null) \
   || fail 'could not scan the stage for special files'
