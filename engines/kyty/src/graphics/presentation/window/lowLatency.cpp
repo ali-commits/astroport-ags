@@ -205,6 +205,10 @@ vk::Result Present(vk::Queue queue, vk::PresentInfoKHR& present) {
 	return result;
 }
 
+std::unique_lock<std::mutex> SwapchainLock() {
+	return g_active ? std::unique_lock(g_mutex) : std::unique_lock<std::mutex>();
+}
+
 void FlipWritten() {
 	if (g_active) {
 		g_flips_written.fetch_add(1, std::memory_order_relaxed);

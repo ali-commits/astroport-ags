@@ -913,9 +913,19 @@ Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
 		HangWatchdog::Scope acquire("vkAcquireNextImageKHR",
 		                            reinterpret_cast<uint64_t>(static_cast<VkSwapchainKHR>(m_handle)),
 		                            m_frame_index);
-		result = m_window.graphic_ctx.device.acquireNextImageKHR(
-		    m_handle, std::numeric_limits<uint64_t>::max(), m_image_acquired[m_frame_index], nullptr,
-		    &m_image_index);
+		if (!LowLatency::Active()) {
+			result = m_window.graphic_ctx.device.acquireNextImageKHR(
+			    m_handle, std::numeric_limits<uint64_t>::max(), m_image_acquired[m_frame_index], nullptr,
+			    &m_image_index);
+		} else {
+			// The guest thread's latency markers need the swapchain too: wait in 1 ms steps and let
+			// them in between, so the guest never waits behind a whole acquire.
+			do {
+				const auto latency = LowLatency::SwapchainLock();
+				result             = m_window.graphic_ctx.device.acquireNextImageKHR(
+				    m_handle, 1'000'000, m_image_acquired[m_frame_index], nullptr, &m_image_index);
+			} while (result == vk::Result::eTimeout || result == vk::Result::eNotReady);
+		}
 	}
 	switch (result) {
 		case vk::Result::eSuccess: break;

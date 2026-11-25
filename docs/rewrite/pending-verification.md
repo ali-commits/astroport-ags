@@ -38,9 +38,14 @@ Verified:
   (1920x1080), frame 11, motion flag 13, which equals ASTROPORT_DLSS_LAYOUT in patches/settings.json
   (play.sh now sets it too); image 0 is the motion target, drawn with D32S8 depth, compare
   LessOrEqual (depth not reversed: ASTROPORT_DLSS_REVERSE_DEPTH stays 0); target 0 has storage 1, an
-  equal view format and mapping 0xe4, so DLSS can engage. NGX starts its extensions without a device
-  error but says super resolution is unavailable (0xbad00004): the DLSS runtime
-  (libnvidia-ngx-dlss.so) is not on this machine (scripts/release/fetch-dlss.sh, not run).
+  equal view format and mapping 0xe4, so DLSS can engage. With the runtime fetched
+  (scripts/release/fetch-dlss.sh, v310.9.16) NGX starts ('NGX started for the upscale pass'),
+  quality mode 2 at 1920x1080 -> 2432x1368, and every 10 s 'DLSS pass: 300 evaluated, no fallbacks'.
+- Low latency and the swapchain: the Khronos layer reported vkSetLatencyMarkerNV (guest thread) and
+  vkAcquireNextImageKHR (render thread) using the swapchain at once. Acquire now waits in 1 ms steps
+  under the low-latency lock; no threading message afterwards, and two 60-cap runs gave 34.0 and
+  33.7 fps with a 99th percentile of 40 and 46 ms (an acquire holding the lock for its whole wait had
+  made it 70 ms).
 - K8b: no 'Draw dropped:' line in any run. K4: no pipeline list file in the run folder, skipped
   silently as designed.
 - Release: scripts/release/test.sh (38) passes; BUILD_DIR=build-rewrite scripts/release/stage.sh
@@ -57,7 +62,7 @@ Not verifiable here without the owner (hands, eyes or decisions):
 
 - Pads: two-pad takeover, DualSense over Bluetooth and USB (speaker, haptics, triggers, light bar,
   sleep and wake, plug during play), Switch Pro gyro offset (K1), Xbox rumble scale, unknown pad type.
-- Picture: DLSS (needs the runtime), frame generation smoothness, halos and HUD smear, jitter sign.
+- Picture: DLSS sharpness and ghosting, frame generation smoothness, halos and HUD smear, jitter sign.
 - AGS: session frames, reconnects, settings.apply over the socket, the installed product. The AGS on
   this PC is the other agent's streaming test build and must not be replaced.
 - Native Wayland 4K needs fullscreen (windowed, KDE shrinks the window to 2508x1412); window icon

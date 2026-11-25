@@ -4,6 +4,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 // NVIDIA low-latency mode (VK_NV_low_latency2): on when the embedding host asks for it
@@ -27,6 +28,9 @@ void SwapchainCreated(vk::SwapchainKHR swapchain);
 void SwapchainDestroying();
 // vkQueuePresentKHR; a frame not presented before carries its number as the present id.
 [[nodiscard]] vk::Result Present(vk::Queue queue, vk::PresentInfoKHR& present);
+// Held around each short vkAcquireNextImageKHR wait: the guest thread's latency markers name the swapchain, which
+// acquire uses externally synchronised (validation: Threading-MultipleThreads). Empty while off.
+[[nodiscard]] std::unique_lock<std::mutex> SwapchainLock();
 
 // Guest thread: a flip was written (a flip packet in a command buffer, or a CPU flip).
 void FlipWritten();
