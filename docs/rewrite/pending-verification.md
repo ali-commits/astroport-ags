@@ -63,8 +63,13 @@ Not verifiable here without the owner (hands, eyes or decisions):
 - Pads: two-pad takeover, DualSense over Bluetooth and USB (speaker, haptics, triggers, light bar,
   sleep and wake, plug during play), Switch Pro gyro offset (K1), Xbox rumble scale, unknown pad type.
 - Picture: DLSS sharpness and ghosting, frame generation smoothness, halos and HUD smear, jitter sign.
-- AGS: session frames, reconnects, settings.apply over the socket, the installed product. The AGS on
-  this PC is the other agent's streaming test build and must not be replaced.
+- AGS: the installed product. The AGS on this PC is the other agent's streaming test build and must not
+  be replaced. The session protocol itself is verified with bridge/examples/session_host.rs (a stand-in
+  host on a private socket): frames offered with 9 descriptors, the game keeps presenting with all
+  slots held, settings.apply for display.fps, display.resolution and controller.haptics, five
+  reconnects with a new pool each, the refused-frames fallback and metrics-only mode all PASS. Found
+  and fixed: the output message after a live display.fps change reported the old fps (the bridge now
+  hands the new interval to Kyty at once).
 - Native Wayland 4K needs fullscreen (windowed, KDE shrinks the window to 2508x1412); window icon
   under X11 (K3); K7 prepare run from the adapter.
 - K5/K8a: a 2500 MiB KYTY_VRAM_BUDGET_MB never ran this level out of video memory; the full-memory

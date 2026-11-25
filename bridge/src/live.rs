@@ -155,6 +155,7 @@ fn apply(request: &str) -> String {
     }
     if let Some(fps) = decision.actions.fps {
         limiter::set_limit(Limit::Fps(fps));
+        unsafe { limiter::follow_now() };
     }
     if let Some((width, height)) = decision.actions.size {
         unsafe { (kyty().set_window_size.unwrap())(width, height) };

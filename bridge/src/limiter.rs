@@ -116,6 +116,12 @@ unsafe fn follow_limit(state: &mut Limiter) {
     }
 }
 
+/// A live setting changed the limit: Kyty's low-latency interval (and the session socket's output
+/// fps, read right after the reply) follow now instead of at the next present.
+pub unsafe fn follow_now() {
+    follow_limit(&mut STATE.lock().unwrap());
+}
+
 /// `KytyEmbedHooks.present_gate`. A due tick is returned whether or not a flip is ready, so
 /// the present thread can sleep until then.
 pub unsafe extern "C" fn present_gate(now: i64, _ticks_per_s: i64, _flip_ready: c_int) -> i64 {
