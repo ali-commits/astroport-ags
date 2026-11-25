@@ -1,3 +1,4 @@
+#include "prx/libSceAudioOut/include/AudioOut.hpp"
 #include "prx/libSceAudioOut/include/AudioOut2.hpp"
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libkernel/include/ExternalRenderer.hpp"
@@ -139,6 +140,37 @@ int main() {
     Require(output.audioVibrationLarge == 0 && output.audioVibrationSmall == 0, "accepted haptics leave no derived rumble");
 
     Require(sceAudioOut2PortDestroy(vibrationPort) == 0 && sceAudioOut2PortDestroy(speakerPort) == 0 && sceAudioOut2ContextDestroy(context) == 0, "the context is destroyed");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    ResetSeen();
+    g_gain.store(2.0f);
+    const int classic = sceAudioOutOpen(0x10000000, 10, 0, grain, frequency, 1);
+    Require(classic > 0, "a classic vibration port is opened");
+    int volume[2] = {16384, 16384};
+    Require(sceAudioOutSetVolume(classic, 3, volume) == 0, "the classic port volume is set");
+    const std::vector<std::int16_t> pcm(static_cast<std::size_t>(grain) * 2, 2048);
+    Require(sceAudioOutOutput(classic, pcm.data()) == static_cast<int>(grain), "a classic grain is output");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    for (;;) {
+        {
+            std::lock_guard lock(g_lock);
+            if (g_grains[0] > 0) break;
+        }
+        Require(std::chrono::steady_clock::now() < deadline, "the classic grain reaches the renderer");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    {
+        std::lock_guard lock(g_lock);
+        Require(g_wellFormed && g_peak[0] == 0.0625f && g_grains[1] == 0, "a classic vibration grain is converted, scaled by volume and gain and sent as haptics");
+    }
+    Require(!PadFetchOutput_nid_postfix(&sequence, &output) || (output.audioVibrationLarge == 0 && output.audioVibrationSmall == 0), "an accepted classic grain leaves no derived rumble");
+    g_accepts.store(false);
+    while (!PadFetchOutput_nid_postfix(&sequence, &output) || output.audioVibrationLarge == 0) {
+        Require(std::chrono::steady_clock::now() < deadline, "a refused classic grain falls back to derived rumble");
+        Require(sceAudioOutOutput(classic, pcm.data()) == static_cast<int>(grain), "a classic grain is output");
+    }
+    Require(sceAudioOutClose(classic) == 0, "the classic port is closed");
+
     std::error_code error;
     std::filesystem::remove(path, error);
     std::puts("audio out2 renderer checks passed");

@@ -7,124 +7,110 @@ AnyPS5 by boykopovar: https://github.com/boykopovar/AnyPS5 (GPL-2.0-only).
 ## 2. Base
 
 The base is `319621ba2e` (full hash `319621ba2e578bd053b0baba2877fe70520e0737`, committed 2026-10-29),
-a commit on upstream `main`. The snapshot is the branch `linux-native`, 35 commits on top of it.
+a commit on upstream `main`.
 
 ## 3. Carried changes
 
-faycal's AstroHybrid Linux changes (https://github.com/imnotsharingmyname/pcportastrobot) and the
-AstroPort changes:
+The tree is the base, unmodified, plus the changes below. All of them were written by the AstroPort
+project. With no external renderer installed, the upstream paths run.
 
-```
-$ git log --no-merges --reverse --format='- %h %an: %s' 319621ba2e..2429864775
-- 4fcfa6a278 faycal: perf(agc): keep draw snapshots in resizable BAR memory (PR #9712 applied locally)
-- 624f0a8f77 faycal: feat(agc): APS5_TRACE_MARKERS prints PUSH_MARKER paths with draw and dispatch counts per frame
-- da1d520d23 faycal: perf(agc): resident staging switch, program-filtered dispatch trace, block-collect switch
-- 1d381cb088 faycal: perf(agc): record DMA_DATA stores into GDS on the GPU instead of draining
-- 67d70b0b59 faycal: perf(agc): plain GPU stores for GDS, sampled queue choice, CPU write-back sync counter
-- bf05858826 faycal: perf(agc): bind GPU-produced draw buffers in place; CPU access trap for staged results
-- 0b4fd12522 faycal: perf(agc): draws read GPU-produced buffers from the dispatch's device-local shadow
-- 06d1f8941f faycal: perf(agc): GPU copy-ins read the producing dispatch's video-memory shadow
-- 9f66f80d4f faycal: perf(libc): write alarms on resident guest pages instead of polling GetWriteWatch
-- 3e571e1555 faycal: perf(agc): address-based builds skip publishing unit shadows over their heaps
-- f189943d10 faycal: feat(agc): lane-separated recorder batches for async compute (APS5_COMPUTE_LANE)
-- 0e5d40167f faycal: feat(agc): compute-lane batches on a second Vulkan queue (APS5_COMPUTE_QUEUE)
-- 3792f9c5af faycal: feat(agc): profile storage traffic by resource behind an optional switch
-- fb5785aaae faycal: feat(agc): support opt-in block shadows for thin linear storage images
-- f4c78be33e faycal: test(agc): cover sized deallocation beyond cache limits
-- 72c090368c faycal: perf(agc): wait only for completion-stored labels before resource reads (APS5_SYNC_COMPLETION_LABELS_ONLY)
-- 8e64644062 faycal: feat(agc): configurable floor for the sampled texture cache budget (APS5_SAMPLED_BUDGET_FLOOR_MIB)
-- 4ab160e3b3 faycal: perf(recompiler): skip call_once once a memo entry is ready
-- 0a05659009 faycal: perf(agc): shed the device pool tier while video memory is over budget (APS5_POOL_SHED_OVER_BUDGET)
-- ce5b4170ed faycal: perf(agc): reuse a data-only draw stage rebased to moved user-data pointers (APS5_REBASED_STAGE_REUSE)
-- 803c689a71 faycal: feat(libkernel): hand guest memory to Kyty's GPU stack behind APS5_GPU_ENGINE=kyty
-- fe8ecec02a faycal: feat(libAstroHybridHost): publish Kyty's window input to libScePad
-- 2f05504cd1 faycal: feat(libAstroHybridHost): end the process through libc when Kyty's window closes
-- a8413f36b2 faycal: feat(libScePad): trigger effect state from the game's effect and the trigger travel; pad output to Kyty (ABI 1.4)
-- fcb81313ab faycal: feat(libAstroHybridHost): take pad motion sensors from Kyty (ABI 1.5)
-- 87d9eb9668 faycal: feat(libc): keep a CUDA address window free in the guest arena when requested
-- 9123102d58 faycal: feat(audioout,savedata): forward wireless DualSense audio to kyty_gpu and export sceSaveDataTransferringMount
-- 8be0cd4d0e Claude: AstroHybrid host on Linux: libkyty_gpu.so engine, pad audio, APR staging, driver area
-- e6b134da2a Ali: audioout2: on Linux, play USB DualSense haptic channels through the Kyty backend
-- 7cade313aa Ali: audioout2: APS5_PAD_VIBRATION_GAIN for the host haptic channels
-- 4e4b939318 Ali: fix(audioout2): hand host haptic grains to a worker thread
-- 9503760288 Ali: feat(audioout2): APS5_PAD_VIBRATION_DUMP writes the mixed haptic channels to a file
-- eb188dd62a Ali: feat(audiopropagation): render a source's input straight into the bed's first channel
-- 5122ed27b7 Ali: fix(libkernel): wake every thread waiting on an equeue when an event fires
-- 2429864775 Ali: fix(libSceAudioPropagation): accept path calculation without rays and audio path entries
-```
+- **External renderer switch.** `libkernel`: `ExternalRenderer.hpp`, `ExternalRenderer.cpp`, a table of
+  function pointers that another library in the process may install. While one is installed, the direct
+  memory exports (`DirectMemory/Export.cpp`) forward to it, and APR file reads (`Apr.cpp`) take the staged
+  copy.
+- **Host module.** `core/libs/prx/libAstroportHost/`: one C table through which the renderer's side hands
+  over address space, GPU events and controller input, fetches controller output, asks for process exit
+  and registers a shutdown callback; and the two HDR helpers `libSceSystemService` imports.
+- **libScePad.** Keeps the raw trigger effect commands for the host module; behind
+  `APS5_PAD_TRIGGER_EFFECT_STATE`, `scePadGetTriggerEffectState` derives each trigger's state from its
+  effect and travel (`PadTriggerEffect.hpp`).
+- **libSceAudioOut.** Controller audio and haptic channels play through the installed renderer
+  (`APS5_PAD_VIBRATION_VIA_HOST`), at the gain the renderer's side reports, handed over by a worker queue;
+  `AGS_CONTROLLER_AUDIO_SINK` names the controller sound card; `APS5_PAD_VIBRATION_DUMP` writes the mixed
+  haptic channels to a file.
+- **libSceSaveData.native.** Behind `APS5_SAVEDATA_TRANSFER_AS_MOUNT`, `sceSaveDataTransferringMount`
+  mounts a regular save.
+- **libSceAudioPropagation.** A source's input is rendered into the bed's first channel; path calculation
+  without rays succeeds; non-empty audio paths are accepted and ignored.
+- **libSceAvPlayer.** Tells the installed renderer when a player starts and stops showing video.
+- **libc.** Lookup of files in an archived `app0`, and read-only stdio streams on archived files
+  (`ArchiveStream.hpp`, `ArchiveStream.cpp`).
+- **libkernel event queues.** Every thread waiting on an event queue is woken when an event fires.
+- **Tests and notes.** Cases under `core/libs/tests/` and `libSceAudioOut/tests/` for the above, rows in
+  `docs/dev/ENVIRONMENT.md` and notes in `docs/dev/debt/`.
 
 ## 4. Files changed against the base
 
-For GPL-2.0 section 2a, as of 2026-11-21. No changed file carries a licence header, so no
+For GPL-2.0 section 2a, as of 2026-11-25. No changed file carries a licence header, so no
 "Modified by" line was added to any file.
 
+The list is taken against repository commit `0c140c49`, at which this tree was the base plus three of the
+fixes in section 3, which it therefore shows only where they were changed again: the first two audio
+propagation items (`libSceAudioPropagation/AudioPropagation.hpp`, `Export.cpp`,
+`core/libs/tests/GuestAudioPropagation.cpp`) and the event queue wake-up (`libkernel/Equeue/Equeue.cpp`,
+`core/libs/tests/GuestEqueueEvents.cpp`).
+
 ```
-$ git diff --stat=200 319621ba2e 2429864775
- core/libs/prx/libAstroHybridHost/CMakeLists.txt                                   |   6 +++
- core/libs/prx/libAstroHybridHost/Export.cpp                                       | 261 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
- core/libs/prx/libSceAgcDriver/CMakeLists.txt                                      |  10 ++++-
- core/libs/prx/libSceAgcDriver/Execution/include/Driver/Dispatch/DispatchCache.hpp |   2 +
- core/libs/prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawCache.hpp         |   4 ++
- core/libs/prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp                 |   4 +-
- core/libs/prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp                  |   1 +
- core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/Dispatch.cpp          |  29 ++++++++++++-
- core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/Draw.cpp                  |  14 +++++-
- core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCacheStatistics.cpp   |   5 +++
- core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCapture.cpp           |   9 +++-
- core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawLookup.cpp            |  44 ++++++++++++++++++-
- core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawRelocate.cpp          |  86 ++++++++++++++++++++++++++++++++++--
- core/libs/prx/libSceAgcDriver/Execution/src/Driver/Lifecycle.cpp                  |  14 +++++-
- core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketExecution.cpp    |  94 ++++++++++++++++++++++++++++++++++++++++
- core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketMemory.cpp       |  72 +++++++++++++++++++++++++++++--
- core/libs/prx/libSceAgcDriver/Execution/src/Driver/Queues/QueueWorker.cpp         |   8 +++-
- core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp                       |  23 ++++++++--
- core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp                      |  65 +++++++++++++++++++++++++---
- core/libs/prx/libSceAgcDriver/Graphics/include/BufferPool.hpp                     |   4 +-
- core/libs/prx/libSceAgcDriver/Graphics/include/Context.hpp                        |  64 ++++++++++++++++++++++++++-
- core/libs/prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp              |  13 ++++++
- core/libs/prx/libSceAgcDriver/Graphics/include/Recorder.hpp                       |   7 +++
- core/libs/prx/libSceAgcDriver/Graphics/include/Resources.hpp                      |   1 +
- core/libs/prx/libSceAgcDriver/Graphics/src/BufferPool.cpp                         |  25 ++++++++---
- core/libs/prx/libSceAgcDriver/Graphics/src/DeferredDestruction.cpp                |   4 ++
- core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp                               |   3 +-
- core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp                  | 210 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--
- core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp                           |  79 ++++++++++++++++++++++++++++-----
- core/libs/prx/libSceAgcDriver/Graphics/src/Resources.cpp                          |  12 ++++--
- core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp                    |  52 ++++++++++++++++++++--
- core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp                            |  83 ++++++++++++++++++++++++++++-------
- core/libs/prx/libSceAgcDriver/tests/BufferPool.cpp                                |  80 +++++++++++++++++++++++++++++++++-
- core/libs/prx/libSceAgcDriver/tests/Graphics.cpp                                  |  22 ++++++++++
- core/libs/prx/libSceAgcDriver/tests/HostAllocator.cpp                             |   2 +-
- core/libs/prx/libSceAgcDriver/tests/Recorder.cpp                                  |  22 +++++++++-
- core/libs/prx/libSceAgcDriver/tests/execution/DrawDataHitUserWords.cpp            |  52 ++++++++++++++++++++++
- core/libs/prx/libSceAudioOut/src/AudioOut.cpp                                     |  41 +++++++++++++++++-
- core/libs/prx/libSceAudioOut/src/AudioOut2Context.cpp                             | 121 ++++++++++++++++++++++++++++++++++++++++++++++++++-
- core/libs/prx/libSceAudioOut/src/AudioOut2PadMix.cpp                              |  39 +++++++++++++++++
- core/libs/prx/libSceAudioOut/src/AudioOut2PadMix.hpp                              |   2 +
- core/libs/prx/libSceAudioOut/src/AudioOut2Port.cpp                                |   4 +-
- core/libs/prx/libSceAudioPropagation/AudioPropagation.hpp                         |  11 +++++
- core/libs/prx/libSceAudioPropagation/Export.cpp                                   |  33 +++++++++++---
- core/libs/prx/libScePad/Export.cpp                                                |   7 +++
- core/libs/prx/libScePad/include/PadState.hpp                                      |   3 ++
- core/libs/prx/libScePad/src/PadState.cpp                                          |  43 ++++++++++++++++++
- core/libs/prx/libSceSaveData.native/Export.cpp                                    |  17 +++++++-
- core/libs/prx/libc/include/GuestArena.hpp                                         |   9 ++++
- core/libs/prx/libc/include/WindowsMappings.hpp                                    |  88 +++++++++++++++++++++++++++++++++++++
- core/libs/prx/libc/src/GuestArena.cpp                                             | 201 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-
- core/libs/prx/libc/src/specifics/windows/CrashReport.cpp                          |  22 ++++++++++
- core/libs/prx/libkernel/Apr/src/Apr.cpp                                           |  27 ++++++++++--
- core/libs/prx/libkernel/DirectMemory/Export.cpp                                   | 142 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-
- core/libs/prx/libkernel/Equeue/Equeue.cpp                                         |   6 +--
- core/libs/tests/GuestAudioPropagation.cpp                                         |   7 ++-
- core/libs/tests/GuestEqueueEvents.cpp                                             |  31 +++++++++++++
- core/shader/recompiler/Recompiler.cpp                                             |  21 +++++++--
- docs/dev/ENVIRONMENT.md                                                           |  19 ++++++++
- 59 files changed, 2279 insertions(+), 101 deletions(-)
+$ cd engines/anyps5 && git diff --relative --stat=200 0c140c49 -- . ':!UPSTREAM.md'
+ core/libs/prx/libAstroportHost/CMakeLists.txt            |  17 ++++++
+ core/libs/prx/libAstroportHost/Export.cpp                | 254 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ core/libs/prx/libAstroportHost/libAstroportHost.hpp      |  58 ++++++++++++++++++
+ core/libs/prx/libSceAudioOut/CMakeLists.txt              |   6 ++
+ core/libs/prx/libSceAudioOut/src/AudioOut.cpp            |  30 ++++++++--
+ core/libs/prx/libSceAudioOut/src/AudioOut2Context.cpp    |  45 +++++++++++++-
+ core/libs/prx/libSceAudioOut/src/AudioOut2Internal.hpp   |   1 +
+ core/libs/prx/libSceAudioOut/src/AudioOut2PadMix.cpp     |  51 ++++++++++++++++
+ core/libs/prx/libSceAudioOut/src/AudioOut2PadMix.hpp     |  37 ++++++++++++
+ core/libs/prx/libSceAudioOut/src/AudioOut2Port.cpp       |   2 +-
+ core/libs/prx/libSceAudioOut/tests/AudioOut2PadMix.cpp   |  89 ++++++++++++++++++++++++++++
+ core/libs/prx/libSceAudioOut/tests/AudioOut2Renderer.cpp | 178 +++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ core/libs/prx/libSceAudioPropagation/Export.cpp          |  41 ++++++++-----
+ core/libs/prx/libSceAvPlayer/CMakeLists.txt              |   9 ++-
+ core/libs/prx/libSceAvPlayer/include/AvPlayer.hpp        |   2 +
+ core/libs/prx/libSceAvPlayer/src/Player.cpp              |  30 +++++++++-
+ core/libs/prx/libScePad/Export.cpp                       |   9 +++
+ core/libs/prx/libScePad/include/PadState.hpp             |   4 ++
+ core/libs/prx/libScePad/include/PadTriggerEffect.hpp     |  27 +++++++++
+ core/libs/prx/libScePad/src/PadState.cpp                 |  18 ++++++
+ core/libs/prx/libSceSaveData.native/Export.cpp           |  17 +++++-
+ core/libs/prx/libc/CMakeLists.txt                        |   3 +-
+ core/libs/prx/libc/include/ArchiveStream.hpp             |  60 +++++++++++++++++++
+ core/libs/prx/libc/include/FileStream.hpp                |  34 +++++++++++
+ core/libs/prx/libc/src/AppArchive.cpp                    |  32 ++++++++--
+ core/libs/prx/libc/src/ArchiveStream.cpp                 | 394 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ core/libs/prx/libc/src/FileAndHeap.cpp                   |  66 +++++++++++++++++++--
+ core/libs/prx/libc/src/Formatting.cpp                    |  59 +++++++++++++------
+ core/libs/prx/libc/src/ScanningWide.cpp                  |   3 +
+ core/libs/prx/libc/src/StandardStreams.cpp               |  16 ++++-
+ core/libs/prx/libc/src/StreamPurge.cpp                   |   2 +
+ core/libs/prx/libkernel/Apr/src/Apr.cpp                  |  18 +++---
+ core/libs/prx/libkernel/CMakeLists.txt                   |  13 ++++
+ core/libs/prx/libkernel/DirectMemory/Export.cpp          |  31 ++++++++++
+ core/libs/prx/libkernel/System/src/ExternalRenderer.cpp  |  18 ++++++
+ core/libs/prx/libkernel/include/ExternalRenderer.hpp     |  39 ++++++++++++
+ core/libs/tests/GuestAppArchive.cpp                      |  65 +++++++++++++++++++-
+ core/libs/tests/GuestAppArchiveStdio.cpp                 | 413 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ core/libs/tests/GuestAstroportHost.cpp                   | 436 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ core/libs/tests/GuestAudioPropagation.cpp                |  57 +++++++++++++++---
+ core/libs/tests/GuestAvPlayer.cpp                        |  80 +++++++++++++++++++++++++
+ core/libs/tests/GuestKernelAppArchive.cpp                |   2 +-
+ core/libs/tests/GuestPad.cpp                             |  62 ++++++++++++++++++++
+ core/libs/tests/GuestSaveDataMountStatus.cpp             |  38 ++++++++++++
+ docs/dev/ENVIRONMENT.md                                  |   5 ++
+ docs/dev/debt/libAstroportHost.md                        |   7 +++
+ docs/dev/debt/libSceAudioOut.md                          |   1 +
+ docs/dev/debt/libSceAudioPropagation.md                  |   4 +-
+ docs/dev/debt/libSceAvPlayer.md                          |   1 +
+ docs/dev/debt/libScePad.md                               |   1 +
+ docs/dev/debt/libSceSaveData.native.md                   |   1 +
+ docs/dev/debt/libc.md                                    |   3 +-
+ docs/dev/debt/libkernel.md                               |   1 +
+ 53 files changed, 2810 insertions(+), 80 deletions(-)
 ```
 
 ## 5. Snapshot
 
-`anyps5-hybrid-src`, branch `linux-native`, commit `2429864775` (full hash `2429864775efd7336ddd49a0332192757cbcee24`), plus 23
+The upstream tree at the base `319621ba2e`, plus 23
 submodules at their pinned commits and 8 nested submodules (`mbedtls/framework`,
 `freetype/subprojects/dlg`, and six under `nghttp2`):
 

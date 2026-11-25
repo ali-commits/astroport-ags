@@ -8,6 +8,7 @@
 #include "prx/libSceAvPlayer/include/AvPlayer.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/GuestHeap.hpp"
+#include "prx/libkernel/include/ExternalRenderer.hpp"
 
 namespace AvPlayer {
 
@@ -43,6 +44,19 @@ AvPlayerMemAllocator WithGuestHeapFallback(AvPlayerMemAllocator memory) {
         memory.deallocate_texture = GuestDeallocate_nid_no_patch;
     }
     return memory;
+}
+
+std::mutex shownMutex;
+int shownPlayers = 0;
+
+void CountShownPlayer(int change) {
+    std::lock_guard lock(shownMutex);
+    const bool before = shownPlayers > 0;
+    shownPlayers += change;
+    const bool after = shownPlayers > 0;
+    if (before == after) return;
+    const auto* renderer = ExternalRendererGet_nid_no_patch();
+    if (renderer && renderer->videoActive) renderer->videoActive(after ? 1 : 0);
 }
 
 }
@@ -86,7 +100,14 @@ Player::~Player() {
         controller.join();
     }
     std::lock_guard lock(mutex);
+    setVideoShownLocked(false);
     source.reset();
+}
+
+void Player::setVideoShownLocked(bool shown) {
+    if (videoShown == shown) return;
+    videoShown = shown;
+    CountShownPlayer(shown ? 1 : -1);
 }
 
 void Player::queue(const Event& event) {
@@ -134,6 +155,7 @@ void Player::deliver(const Event& event) {
         if (source && state != State::Stop) {
             previous = state;
             state = State::Error;
+            setVideoShownLocked(false);
         }
         return;
     }
@@ -183,6 +205,7 @@ void Player::checkEndOfFile() {
         if (!source || state != State::Play || !source->Finished()) return;
         previous = state;
         state = State::EndOfFile;
+        setVideoShownLocked(false);
     }
     deliver({EventStateStop, 0, false, false});
 }
@@ -277,6 +300,7 @@ int Player::startLocked(std::uint64_t startTime) {
     if (result != SCE_OK) {
         previous = state;
         state = State::Error;
+        setVideoShownLocked(false);
         return result;
     }
     previous = state;
@@ -290,6 +314,7 @@ int Player::stopLocked() {
     source->Stop();
     previous = state;
     state = State::Stop;
+    setVideoShownLocked(false);
     queue({EventStateStop, 0, false, false});
     return SCE_OK;
 }
@@ -306,6 +331,7 @@ int Player::Pause() {
     source->Pause();
     previous = state;
     state = State::Pause;
+    setVideoShownLocked(false);
     queue({EventStatePause, 0, false, false});
     return SCE_OK;
 }
@@ -359,7 +385,9 @@ int Player::SetAvSyncMode(std::uint32_t mode) {
 bool Player::GetVideoData(AvPlayerFrameInfoEx& info) {
     std::lock_guard lock(mutex);
     if (!source || (state != State::Play && state != State::Pause)) return false;
-    return source->GetVideoData(info);
+    if (!source->GetVideoData(info)) return false;
+    if (state == State::Play) setVideoShownLocked(true);
+    return true;
 }
 
 bool Player::GetVideoData(AvPlayerFrameInfo& info) {

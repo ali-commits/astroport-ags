@@ -502,6 +502,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 
 | Name | Kind | Source | Default | Description |
 |------|------|--------|---------|-------------|
+| `AGS_CONTROLLER_AUDIO_SINK` | string | `core/libs/prx/libSceAudioOut/src/AudioOut.cpp`, `core/libs/prx/libSceAudioOut/src/AudioOut2Context.cpp` |  | exact name of the audio device to open as the controller sound card; unset or empty opens the first device whose name contains `dualsense` |
 | `APS5_PAD_VIBRATION_DUMP` | string | `core/libs/prx/libSceAudioOut/src/AudioOut2Context.cpp` |  | path of a file that receives the mixed controller haptic channel pair of every AudioOut2 grain as raw 32-bit floats |
 | `APS5_PAD_VIBRATION_VIA_HOST` | string | `core/libs/prx/libSceAudioOut/src/AudioOut2Context.cpp` | on | `0` keeps the haptic channels on the controller sound card when an external renderer is installed; otherwise they play through the renderer while that sound card is open |
 | `APS5_TRACE_AUDIOOUT` | presence | `core/libs/prx/libSceAudioOut/src/AudioOut.cpp` |  | logs each audio-out port opened with its type, sample count, frequency and format |

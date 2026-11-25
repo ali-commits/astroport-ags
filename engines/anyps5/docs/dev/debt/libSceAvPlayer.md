@@ -18,5 +18,6 @@
 
 ### Functional
 
+- [Video shown notification](../../../core/libs/prx/libSceAvPlayer/src/Player.cpp) (libSceAvPlayer) - with an external renderer installed, `ExternalRenderer.videoActive` is told 1 when the first player hands out a video frame while playing and 0 when the last such player pauses, stops, reaches the end of the stream, fails or is closed. A title that keeps a player playing but stops asking for frames leaves the notification on until one of those happens; a player that plays audio only never sets it.
 - [sceAvPlayerGetVideoData / sceAvPlayerGetVideoDataEx](../../../core/libs/prx/libSceAvPlayer/src/Source.cpp) (libSceAvPlayer) - delivers a video frame up to 0.75 × frame duration ahead of its timestamp in default sync mode to accommodate presentation loops that poll slightly before the refresh boundary; the console's exact presentation tolerance is unverified.
 - [sceAvPlayerGetVideoData](../../../core/libs/prx/libSceAvPlayer/src/Source.cpp) (libSceAvPlayer) in sync mode `SCE_AVPLAYER_AV_SYNC_MODE_NONE` skips queued frames that the audio clock has already passed while the title pulls audio, so a title that requests video slower than the film's frame rate keeps the picture with the sound. Whether the console hands out every frame in this mode is unknown. PPSA12544 requests 7-19 frames per second for a 30 fps cinematic

@@ -7,7 +7,7 @@ if(BUILD_TESTING)
     endforeach()
     add_test_executable(guest_avplayer_tests ${LIBS_INCLUDE_DIR}/tests/GuestAvPlayer.cpp)
     target_include_directories(guest_avplayer_tests PRIVATE ${LIBS_INCLUDE_DIR})
-    target_link_libraries(guest_avplayer_tests PRIVATE libSceAvPlayer libc)
+    target_link_libraries(guest_avplayer_tests PRIVATE libSceAvPlayer libkernel libc)
     configure_windows_unwind(guest_avplayer_tests)
     file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/guest_avplayer)
     add_test(NAME guest_avplayer COMMAND guest_avplayer_tests)
@@ -17,6 +17,11 @@ if(BUILD_TESTING)
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/guest_avplayer_paused_first_video
         TIMEOUT 20)
     file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/guest_avplayer_paused_first_video)
+    add_test(NAME guest_avplayer_video_active COMMAND guest_avplayer_tests --video-active)
+    set_tests_properties(guest_avplayer_video_active PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/guest_avplayer_video_active
+        TIMEOUT 30)
+    file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/guest_avplayer_video_active)
     set_tests_properties(guest_avplayer PROPERTIES
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/guest_avplayer
         TIMEOUT 60)
@@ -29,6 +34,8 @@ if(BUILD_TESTING)
         set_tests_properties(guest_avplayer_paused_first_video PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAvPlayer>")
         set_tests_properties(guest_avplayer_callback_close PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAvPlayer>")
+        set_tests_properties(guest_avplayer_video_active PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAvPlayer>")
     endif()
 endif()

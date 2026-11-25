@@ -161,6 +161,7 @@ private:
     bool readyLocked() const;
     int startLocked(std::uint64_t startTime = 0);
     int stopLocked();
+    void setVideoShownLocked(bool shown);
 
     AvPlayerFileReplacement file{};
     AvPlayerMemAllocator memory{};
@@ -178,6 +179,7 @@ private:
     std::int32_t speed = NormalSpeed;
     std::uint32_t syncMode = SyncModeDefault;
     std::uint32_t demuxVideoBytes = 0;
+    bool videoShown = false;
 
     std::mutex eventMutex;
     TimedWait::Condition eventCondition;

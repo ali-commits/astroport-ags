@@ -24,6 +24,7 @@
 #include "SceTypes.hpp"
 #include "prx/libSceAvPlayer/include/AvPlayer.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include "prx/libkernel/include/ExternalRenderer.hpp"
 #include "prx/libSceAvPlayer/include/AvPlayer.hpp"
 
 namespace {
@@ -2025,10 +2026,89 @@ void TestTrailingVideoAfterShortAudio() {
     Check(allocations.blocks.empty(), "trailing video allocations leaked");
 }
 
+std::mutex videoNotesMutex;
+std::vector<int> videoNotes;
+
+void NoteVideoActive(int active) {
+    std::lock_guard lock(videoNotesMutex);
+    videoNotes.push_back(active);
+}
+
+bool VideoNotesAre(std::initializer_list<int> expected) {
+    std::lock_guard lock(videoNotesMutex);
+    return std::equal(videoNotes.begin(), videoNotes.end(), expected.begin(), expected.end());
+}
+
+AvPlayerInternal* StartVideoPlayer(Events& events) {
+    AvPlayerInitData init = InitData(&events);
+    auto* player = sceAvPlayerInit(&init);
+    Check(player != nullptr, "video notify init failed");
+    Check(sceAvPlayerAddSource(player, "/app0/avplayer.mp4") == 0, "video notify add source failed");
+    Check(WaitFor([&] { return events.Seen(EventReady); }), "video notify ready event missing");
+    Check(sceAvPlayerEnableStream(player, VideoStream) == 0, "video notify enable video failed");
+    Check(sceAvPlayerSetLooping(player, true) == 0, "video notify looping failed");
+    Check(sceAvPlayerStart(player) == 0, "video notify start failed");
+    return player;
+}
+
+bool FetchVideo(AvPlayerInternal* player, bool extended) {
+    AvPlayerFrameInfoEx wide{};
+    AvPlayerFrameInfo plain{};
+    return WaitFor([&] { return extended ? sceAvPlayerGetVideoDataEx(player, &wide) != 0 : sceAvPlayerGetVideoData(player, &plain) != 0; });
+}
+
+void TestVideoActiveNotification() {
+    static ExternalRenderer renderer{};
+    renderer.size = sizeof(renderer);
+    renderer.videoActive = NoteVideoActive;
+    Events firstEvents;
+    Events secondEvents;
+    ExternalRendererSet_nid_no_patch(&renderer);
+    auto* first = StartVideoPlayer(firstEvents);
+    Check(VideoNotesAre({}), "video notify sent on start alone");
+    Check(FetchVideo(first, true), "video notify first frame missing");
+    Check(VideoNotesAre({1}), "video notify missing after the first frame");
+    Check(FetchVideo(first, true), "video notify second frame missing");
+    auto* second = StartVideoPlayer(secondEvents);
+    Check(FetchVideo(second, false), "video notify plain frame missing");
+    Check(VideoNotesAre({1}), "video notify repeated for a second player");
+    Check(sceAvPlayerPause(first) == 0, "video notify pause failed");
+    AvPlayerFrameInfoEx paused{};
+    sceAvPlayerGetVideoDataEx(first, &paused);
+    Check(VideoNotesAre({1}), "video notify changed while another player shows video");
+    Check(sceAvPlayerStop(second) == 0, "video notify stop failed");
+    Check(VideoNotesAre({1, 0}), "video notify not cleared once after pause and stop");
+    Check(sceAvPlayerStop(second) == OperationFailed, "video notify second stop accepted");
+    Check(sceAvPlayerResume(first) == 0, "video notify resume failed");
+    Check(VideoNotesAre({1, 0}), "video notify sent on resume alone");
+    Check(FetchVideo(first, false), "video notify frame after resume missing");
+    Check(VideoNotesAre({1, 0, 1}), "video notify missing after resume");
+    Check(sceAvPlayerSetLooping(first, false) == 0, "video notify looping off failed");
+    AvPlayerFrameInfoEx frame{};
+    Check(WaitFor([&] {
+        while (sceAvPlayerGetVideoDataEx(first, &frame)) {}
+        return VideoNotesAre({1, 0, 1, 0});
+    }, 10000), "video notify not cleared at the end of the stream");
+    Check(sceAvPlayerStart(second) == 0, "video notify restart failed");
+    Check(FetchVideo(second, true), "video notify frame after restart missing");
+    Check(VideoNotesAre({1, 0, 1, 0, 1}), "video notify missing after restart");
+    Check(sceAvPlayerClose(second) == 0, "video notify close failed");
+    Check(VideoNotesAre({1, 0, 1, 0, 1, 0}), "video notify not cleared by close");
+    Check(sceAvPlayerClose(first) == 0, "video notify close failed");
+    Check(VideoNotesAre({1, 0, 1, 0, 1, 0}), "video notify sent for an idle player");
+    ExternalRendererSet_nid_no_patch(nullptr);
+}
+
 }
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::strcmp(argv[1], "--video-active") == 0) {
+            WriteMovie();
+            TestVideoActiveNotification();
+            std::puts("AvPlayer video active tests passed");
+            return 0;
+        }
         if (argc == 2 && std::strcmp(argv[1], "--callback-close") == 0) {
             WriteMovie();
             TestCloseFromEventCallback(EventReady);
