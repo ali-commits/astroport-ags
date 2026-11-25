@@ -6,10 +6,13 @@ the plan as built, the facts it rests on, and the status. Kyty paths are under `
 
 ## 1. Status (2026-11-25)
 
-**Code complete, never linked and never run.** The CMake option `KYTY_FSR_FRAMEGEN` is OFF by default, and
+**Built and run once; no frame generated yet.** The CMake option `KYTY_FSR_FRAMEGEN` is OFF by default, and
 `scripts/build-engines.sh` does not turn it on. With it OFF nothing new is fetched or compiled and no new
-symbol is referenced; the hooks are inline no-ops. No game run, no link of `libkyty_renderer.so` and no
-configure of `build-rewrite/kyty` was done for this work.
+symbol is referenced; the hooks are inline no-ops. The ON build (`build-rewrite/kyty-fg`) links and its 11
+`frame_gen_tests` pass. The one game run (Astro Bot, RTX 3090, NVIDIA 620.73, Wayland, Immediate, 60 Hz)
+logged "off: frames of format A2R10G10B10UnormPack32 ..." and "300 frames, 0 generated": AMD has no BGR
+10-bit format. `Generate` now hands AMD an A2B10G10R10 copy of such frames (section 2, the `format` gate);
+that change is built with the option ON and OFF but not run.
 
 | Part | State |
 |---|---|
@@ -86,6 +89,8 @@ Gates (the decision is logged when it changes):
   usable as a storage image; or the device lacks `shaderStorageImageReadWithoutFormat`,
   `shaderStorageImageExtendedFormats` or subgroup arithmetic and quad operations in compute with
   `quadOperationsInAllStages` (the shaders' capabilities; `FrameGen::DeviceSupports`).
+  A2R10G10B10 (BGR) frames are blitted to an A2B10G10R10 copy that AMD reads (+1 blit per real frame,
+  +1 frame of memory); the generated frame is then A2B10G10R10.
 - `error`: context creation failed (off for the run) or three AMD errors in a row.
 
 Continuity: AMD's frame number goes up by one per dispatch. A dispatch resets the history when the new
@@ -126,13 +131,14 @@ Line numbers below are of that commit, under `sdk/`.
 |---|---|---|
 | `3rdparty/CMakeLists.txt` | +56 | fetch (tag, shallow, commit checked), patch, `kyty_ffx`, licence install |
 | `3rdparty/patches/fidelityfx-context-size.patch` | new | the context size |
+| `3rdparty/patches/fidelityfx-scratch-align.patch` | new | the Vulkan backend's scratch arrays 16-byte aligned (clang's aligned stores crashed the first context) |
 | `CMakeLists.txt` | +93 | the option; the shader block (between `# BEGIN/END KYTY_FSR_FRAMEGEN`), which removes `frameGen.cpp` and `ffxBlobs.cpp` from the sources when OFF; `frame_gen_tests` |
 | `W/ffxCompat.h` | new | MSVC names for the SDK sources |
 | `W/ffxReflect.h` | new | SPIR-V binding reader (pure) |
 | `W/ffxBlobs.h`, `W/ffxBlobs.cpp` | new | module table, `ffxGetPermutationBlobByIndex`, `ffxIsWave64` |
 | `W/frameGenLogic.h` | new | `Pacer`, `DisplayAllows`, `Continuity`, `Find`, `FrameTimeMs`, `Stats` (pure) |
 | `W/frameGen.h`, `W/frameGen.cpp` | new | the ring, `Capture`, `Generator`, the Vulkan forwarders and the proxy stub |
-| `W/swapchain.cpp` | +103 -22 | `Frame::capture`, `Configure(extra)`, `Swapchain::PresentMode`, `PresentOnce`, `Generate`, `new_main` |
+| `W/swapchain.cpp` | +136 -22 | `Frame::capture`, `Configure(extra)`, `Swapchain::PresentMode`, `PresentOnce`, `Generate` (with `converted`, the A2B10G10R10 copy of an A2R10G10B10 frame), `new_main` |
 | `W/vulkanWindow.cpp` | +11 -1 | `FrameGen::NoteDisplay` at window creation; enables `shaderStorageImageExtendedFormats` at device creation when requested (only with the option); the physical device for `LowLatency::AppendExtensions`; `FrameGen::Shutdown` in `~WindowContext` |
 | `W/lowLatency.h`, `W/lowLatency.cpp` | +5 -2 | off for frame generation only when it is built in and the device can run it |
 | `src/graphics/host_gpu/renderer/upscalePass.h` | +9 -2 | `Enabled()` also for frame generation |

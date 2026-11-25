@@ -928,6 +928,12 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	    conditional_rendering_extension && conditional_rendering.conditionalRendering == VK_TRUE;
 	graphics.shader_image_int64_atomics_enabled = image_atomic_int64.shaderImageInt64Atomics;
 	features12.shaderSharedInt64Atomics = supported_features12.shaderSharedInt64Atomics;
+#if KYTY_FSR_FRAMEGEN
+	// AMD's backend transitions a D32S8 depth input with the depth aspect only (VUID 03320 otherwise).
+	if (FrameGen::Requested()) {
+		features12.separateDepthStencilLayouts = supported_features12.separateDepthStencilLayouts;
+	}
+#endif
 	// KYTY_NATIVE_F16 (CodegenOptions::native_f16): shaderFloat16 with RoundingModeRTE and
 	// SignedZeroInfNanPreserve for 16-bit floats settable apart from the 32/64-bit modes.
 	if (const auto* native_f16 = std::getenv("KYTY_NATIVE_F16");

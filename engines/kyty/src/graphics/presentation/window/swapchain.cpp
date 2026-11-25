@@ -586,9 +586,13 @@ struct Presenter::Impl {
 	std::atomic<uint64_t> presented_overlay_revision {0};
 	// FrameGen. new_main: bus 0 took a frame that was not shown yet. generated: the frame it
 	// writes, taken from the pool once and kept. Declared after the scheduler and the pool: the
-	// generator ends before them.
+	// generator ends before them. converted: the RGB copy AMD reads when the frame is A2R10G10B10
+	// (AMD has no BGR 10-bit format), taken once and kept like generated.
+	// shortcut: converted stays allocated (31.6 MiB at 4K) after the title leaves A2R10G10B10,
+	// release it if memory gets tight.
 	bool                                 new_main  = false;
 	Frame*                               generated = nullptr;
+	Frame*                               converted = nullptr;
 	std::unique_ptr<FrameGen::Generator> frame_gen;
 	// Last member: it ends before the scheduler it records on.
 	std::unique_ptr<NativeStreamExport> stream_export;
@@ -1846,19 +1850,28 @@ void Presenter::Impl::Present() {
 }
 
 Presenter::Frame* Presenter::Impl::Generate(Frame& frame) {
-	const FrameGen::Source source {frame.image.image,
-	                               {frame.image.extent.width, frame.image.extent.height},
-	                               frame.image.format,
-	                               frame.hdr,
-	                               frame.blank,
-	                               frame.capture};
+	// AMD has no BGR 10-bit format: such a frame reaches it through an RGB copy.
+	constexpr auto   rgb10   = vk::Format::eA2B10G10R10UnormPack32;
+	const bool       convert = frame.image.format == vk::Format::eA2R10G10B10UnormPack32;
+	FrameGen::Source source {frame.image.image,
+	                         {frame.image.extent.width, frame.image.extent.height},
+	                         convert ? rgb10 : frame.image.format,
+	                         frame.hdr,
+	                         frame.blank,
+	                         frame.capture};
 	if (!frame_gen->Prepare(source, swapchain.PresentMode())) {
 		return nullptr;
 	}
 	if (generated == nullptr) {
 		generated = frames.Acquire(source.extent, source.format);
 	}
+	if (convert && converted == nullptr) {
+		converted = frames.Acquire(source.extent, rgb10);
+	}
 	present_scheduler.Wait(generated->present_tick);
+	if (convert) {
+		present_scheduler.Wait(converted->present_tick);
+	}
 	std::optional<RenderLockGuard> render_lock;
 	if (!PresentUnlocked()) {
 		render_lock.emplace(renderer.GetMutex());
@@ -1870,12 +1883,32 @@ Presenter::Frame* Presenter::Impl::Generate(Frame& frame) {
 	generated->blank = false;
 	auto& command    = present_scheduler.BeginCommand();
 	auto  vk_command = command.Handle();
-	frame.Transit(vk_command, vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead);
+	if (convert) {
+		converted->Configure(window.graphic_ctx, source.extent, rgb10);
+		frame.Transit(vk_command, vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead);
+		converted->Transit(vk_command, vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite);
+		vk::ImageBlit region {};
+		region.srcSubresource = vk::ImageSubresourceLayers {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+		region.dstSubresource = region.srcSubresource;
+		region.srcOffsets[1]  = vk::Offset3D {static_cast<int>(source.extent.width),
+		                                      static_cast<int>(source.extent.height), 1};
+		region.dstOffsets[1]  = region.srcOffsets[1];
+		// A blit converts by channel name, so R and B land right; nearest at 1:1 is exact.
+		vk_command.blitImage(frame.image.image, vk::ImageLayout::eTransferSrcOptimal, converted->image.image,
+		                     vk::ImageLayout::eTransferDstOptimal, 1, &region, vk::Filter::eNearest);
+		converted->Transit(vk_command, vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead);
+		source.image = converted->image.image;
+	} else {
+		frame.Transit(vk_command, vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead);
+	}
 	generated->Transit(vk_command, vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite);
 	const bool written = frame_gen->Record(vk_command, source, generated->image.image);
 	const auto tick    = present_scheduler.Submit();
 	frame.present_tick      = tick;
 	generated->present_tick = tick;
+	if (convert) {
+		converted->present_tick = tick;
+	}
 	return written ? generated : nullptr;
 }
 
