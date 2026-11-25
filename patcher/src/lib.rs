@@ -2,7 +2,7 @@
 //!
 //! Loaded with `LD_AUDIT`. Its constructor runs after the dynamic loader has mapped and relocated the
 //! game, before the game's own code starts. A second copy loaded by the renderer skips startup patching
-//! when `KytyGpuQueuePadAudio` is visible. The renderer can call `astro_patch_live` to toggle one mod
+//! when `kyty_embed_api` is visible. The renderer can call `astro_patch_live` to toggle one mod
 //! after checking the current bytes of every entry.
 //!
 //! Each `memory` entry's `offset` is a guest virtual address of
@@ -274,7 +274,7 @@ fn startup_wanted(renderer_loaded: bool) -> bool {
 fn run() -> Result<(), String> {
     let Ok(path) = std::env::var("ASTRO_PATCHES") else { return Ok(()) };
     let renderer_loaded = unsafe {
-        !libc::dlsym(libc::RTLD_DEFAULT, c"KytyGpuQueuePadAudio".as_ptr()).is_null()
+        !libc::dlsym(libc::RTLD_DEFAULT, c"kyty_embed_api".as_ptr()).is_null()
     };
     if !startup_wanted(renderer_loaded) {
         return Ok(());
