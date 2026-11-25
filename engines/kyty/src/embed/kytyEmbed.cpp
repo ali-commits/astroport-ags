@@ -39,6 +39,7 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -131,6 +132,10 @@ int Run(const KytyEmbedConfig* config, const KytyEmbedHooks* hooks) {
 	// Never destroyed: guest threads of the host keep running; flush() saves what must persist.
 	auto& subsystems = *new Common::Subsystems(true);
 	subsystems.Initialize<Config::Lifecycle>();
+	// Diagnostics: Kyty's own log (swapchain size, window events) on stdout; silent otherwise.
+	if (const char* v = std::getenv("KYTY_LOG_CONSOLE"); v != nullptr && std::string_view(v) == "1") {
+		cfg.printf_direction = Config::LogDirection::Console;
+	}
 	Config::Load(cfg);
 	subsystems.Initialize<Log::Lifecycle>();
 	if (const auto param_json = app0 / "sce_sys" / "param.json"; Common::File::IsFileExisting(param_json)) {
