@@ -27,6 +27,7 @@
 #include "streaming/transport.h"
 
 #include <SDL3/SDL.h>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -203,6 +204,8 @@ constexpr const char* KYTY_SDL_WINDOW_CAPTION = "Game";
 
 static void GameEventQuit(WindowLoopState& game) {
 	LOGF("Event: quit\n");
+	// Always on: tells a closed window (a close line comes first) from SIGINT/SIGTERM or an embedder's quit.
+	std::fprintf(stderr, "Window: quit event\n");
 
 	game.need_exit = true;
 }
@@ -523,6 +526,7 @@ void WindowContext::ProcessWindowEvent(const SDL_WindowEvent& event) {
 			break;
 		case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
 			LOGF("Window %" PRIu32 " closed\n", window_event.windowID);
+			std::fprintf(stderr, "Window: close requested\n");
 			break;
 		case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
 		case SDL_EVENT_WINDOW_HDR_STATE_CHANGED: RefreshDisplayLuminance(window); break;

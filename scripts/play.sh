@@ -59,6 +59,8 @@ export ASTROPORT_PAD_PREFER=auto ASTROPORT_RUMBLE_SCALE=${RUMBLE:-100} ASTROPORT
 export ASTROPORT_DS_RUMBLE=${DUALSENSE_RUMBLE:-1}
 export ASTROPORT_WAYLAND_NATIVE=${ASTROPORT_WAYLAND_NATIVE:-1}             # true 4K surface under KDE scaling
 export ASTROPORT_DLSS_PASS=2936e5eca99d75e7                                # the game's upscale pass
+# Where the pass keeps its inputs (patches/settings.json; confirmed by the 'DLSS pass: buffer 0' line)
+export ASTROPORT_DLSS_LAYOUT=${ASTROPORT_DLSS_LAYOUT:-0,1,4,5,6,7,11,13,0,1,0}
 
 # The game patches, applied in memory before the game starts (frame timing fixes, 30/60 FPS cap,
 # 1080p render, lower detail options). The precise frame cap there and ASTROPORT_FPS_LIMIT agree.
@@ -68,6 +70,12 @@ if [ "${CHEATS:-1}" = 1 ] && [ -f "${ASTRO_PATCHES:-$PATCH_FILE}" ]; then
   export LD_AUDIT="$N/patcher/target/release/libastro_patcher.so"
   export ASTRO_PATCHES="${ASTRO_PATCHES:-$PATCH_FILE}"
   [ "${ULTRAWIDE:-0}" = 1 ] && export ASTRO_PATCH_ENABLE="${ASTRO_PATCH_ENABLE:+$ASTRO_PATCH_ENABLE,}ultrawide"
+  # The game's own cap follows the limit, as display.fps does in patches/settings.json: the 30 FPS cap
+  # and the 30 fps physics fixes ("... at 30 fps") give way to the cap patch of that rate.
+  if [ "$ASTROPORT_FPS_LIMIT" != 30 ]; then
+    export ASTRO_PATCH_ENABLE="${ASTRO_PATCH_ENABLE:+$ASTRO_PATCH_ENABLE,}Precise frame cap $ASTROPORT_FPS_LIMIT FPS"
+    export ASTRO_PATCH_SKIP="${ASTRO_PATCH_SKIP:+$ASTRO_PATCH_SKIP,}Precise frame cap 30 FPS,at 30 fps"
+  fi
   [ "${RAY_TRACING:-0}" = 1 ] && export ASTRO_PATCH_SKIP="${ASTRO_PATCH_SKIP:+$ASTRO_PATCH_SKIP,}non-tiled deferred-lighting,disable gi probes"
 fi
 
