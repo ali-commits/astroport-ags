@@ -50,6 +50,8 @@ std::vector<char> Bytes(const std::string& text) {
 constexpr std::size_t ThreadedSize = 20000;
 const std::string Numbers = "42 -17 0x1F 3.5 word [abc] 100eX 1234 0x10 7 8 abcdef 55%";
 
+const std::vector<std::pair<const char*, const char*>> Partials = {{"-", "%d"}, {"0x", "%i"}, {"1e", "%f"}, {".", "%f"}, {"0x1p", "%lf"}, {"(ni", "%p"}};
+
 FileStream* Open(const char* path) {
     auto* stream = fopen_nid_postfix(path, "rb");
     Check(stream != nullptr);
@@ -251,10 +253,15 @@ void Scanning() {
     Check(fscanf_nid_postfix(stream, "%s", text.data()) == 1 && std::strlen(text.data()) == 5000);
     Check(fclose_nid_postfix(stream) == 0);
 
-    stream = Open("/app0/Text/Minus.txt");
-    Check(fscanf_nid_postfix(stream, "%d", &first) == 0 && ftell_nid_postfix(stream) == 1);
-    Check(fscanf_nid_postfix(stream, "%d", &first) == EOF);
-    Check(fclose_nid_postfix(stream) == 0);
+    for (std::size_t index = 0; index < Partials.size(); ++index) {
+        const auto& [input, format] = Partials[index];
+        alignas(16) unsigned char host[16] = {}, value[16] = {};
+        stream = Open(("/app0/Text/Partial" + std::to_string(index) + ".txt").c_str());
+        Check(fscanf_nid_postfix(stream, format, value) == std::sscanf(input, format, host) && std::sscanf(input, format, host) == 0);
+        const auto length = static_cast<std::int64_t>(std::strlen(input));
+        Check(ftell_nid_postfix(stream) == length && sceKernelLseek(fileno_nid_postfix(stream), 0, 1) == length);
+        Check(fscanf_nid_postfix(stream, format, value) == EOF && fclose_nid_postfix(stream) == 0);
+    }
 }
 
 void SharedDescriptors() {
@@ -326,17 +333,18 @@ void Threads() {
 }
 
 void Archive(const std::filesystem::path& root) {
-    AppArchiveFixture::WriteArchive(root / "app0.zar", {
+    std::map<std::string, std::vector<char>> files = {
         {"Assets/Icon.odxb", Bytes("icon")},
         {"Data/Eleven.bin", Bytes("0123456789A")},
         {"Data/Empty.bin", {}},
         {"Data/Threaded.bin", AppArchiveFixture::Pattern(ThreadedSize)},
         {"Text/Lines.txt", Bytes("first\nsecond line\nlast")},
         {"Text/Long.txt", std::vector<char>(5000, '1')},
-        {"Text/Minus.txt", Bytes("-")},
         {"Text/Numbers.txt", Bytes(Numbers)},
         {"Text/Shadow.txt", Bytes("zar!")},
-    });
+    };
+    for (std::size_t index = 0; index < Partials.size(); ++index) files.emplace("Text/Partial" + std::to_string(index) + ".txt", Bytes(Partials[index].first));
+    AppArchiveFixture::WriteArchive(root / "app0.zar", files);
     std::filesystem::create_directories(root / "app0" / "Text");
     { std::ofstream loose(root / "app0" / "Loose.txt", std::ios::binary); loose << "loose"; }
     { std::ofstream shadow(root / "app0" / "Text" / "Shadow.txt", std::ios::binary); shadow << "disk"; }

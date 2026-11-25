@@ -220,7 +220,9 @@ pub unsafe fn start(kyty: *const KytyEmbedApi, host: *const AstroportHostApi) {
             if code != 0 {
                 die(format!("the renderer stopped with code {code}"));
             }
-            // The window was closed: the host exits its usual way, the renderer stays alive.
+            // The window loop ended (SDL also ends it on SIGINT and SIGTERM): the host exits its
+            // usual way, the renderer stays alive.
+            eprintln!("astroport: window closed or SIGINT/SIGTERM after {} ms: exit requested", uptime_ms());
             (crate::host().request_exit.unwrap())(0);
             loop {
                 std::thread::park();

@@ -1,7 +1,9 @@
 # AstroPort bridge: final design
 
-Status: design only. Nothing was built or run. Base: the "thin-seams" proposal (both judges chose it),
-with the grafts the judges named and the facts established separately.
+Status: milestones M0 to M4 are built and run (section 8); the game starts on the bridge and reaches
+the title level. For those parts the text states the system as built; everything from M5 on is still
+design. Base: the "thin-seams" proposal (both judges chose it), with the grafts the judges named and
+the facts established separately.
 
 Every upstream path, function and line number in this document was checked by grep or by reading the
 pristine trees (`engines/kyty` at `dd9f9901`, `engines/anyps5` at `319621ba2e`) on 2026-11-25, unless
@@ -38,7 +40,7 @@ emulator and the upstream tests still build and link.
 | `libkyty_renderer.so` | C++ (whole Kyty object set minus `main.cpp`, plus `src/embed/kytyEmbed.cpp`) | CMake target `kyty_renderer` in `engines/kyty/CMakeLists.txt` | exactly `kyty_embed_api` | system libraries only |
 | `libAstroportHost.prx` | C++, AnyPS5 conventions | AnyPS5 CMake, new directory `core/libs/prx/libAstroportHost/` | `AstroportHostApi_nid_no_patch`; the two HDR helpers under their NIDs | `libScePad.prx`, `libkernel.prx`, `libc.prx` |
 | `libastroport_bridge.so` | Rust (`bridge/`, cdylib) | cargo | `astroport_entry_<hash8>` only | `libkyty_renderer.so`, `libAstroportHost.prx` |
-| `libSceAgc.prx`, `libSceAgcDriver.prx`, `libSceVideoOut.prx` | generated x86-64 assembly (generator is Rust) | `cc -shared -nostdlib` in `scripts/build-engines.sh` | one symbol per NID of that library | `libastroport_bridge.so` |
+| `libSceAgc.prx`, `libSceAgcDriver.prx`, `libSceVideoOut.prx` | generated x86-64 assembly (generator is Rust) | `cc -shared -nostdlib` in `scripts/build-engines.sh` | one symbol per NID of that library (148, 16 and 36 in the tree) | `libastroport_bridge.so`, by file name: the bridge has no soname, so each forwarder is linked with `-l:libastroport_bridge.so` from the folder that holds it and finds it at run time through its `$ORIGIN` run path |
 | `libastro_patcher.so` | Rust (`patcher/`, unchanged) | cargo | unchanged | - |
 
 Three real forwarder files, not symlinks: the release stage test forbids symlinks, and it removes one
@@ -56,8 +58,16 @@ AstroBot -> libSceAgc.prx (forwarder) -> libastroport_bridge.so -> libkyty_rende
                                                                  -> libAstroportHost.prx -> libScePad.prx, libkernel.prx, libc.prx
 ```
 
+The static TLS block holds only while the renderer is loaded at program start. Two cases need
+`GLIBC_TUNABLES=glibc.rtld.optional_static_tls=<bytes>` (the block is about 600 KB): a process started
+with `LD_AUDIT` (the patcher), because glibc then sizes the static TLS area before it loads the
+program's libraries; and stand-alone loading of `libkyty_renderer.so` with `dlopen`
+(`bridge/examples/embed_smoke.rs`). See 7.3.
+
 AnyPS5's own `libSceAgc`, `libSceAgcDriver`, `libSceVideoOut` are still built (`libSceJobManager`
-links against them) and are not installed.
+links against them) and stay in AnyPS5's library folder; the runner does not copy them into a run
+folder (7.4). All libraries of a run folder sit in one `libs/` folder, where the forwarders carry
+those three file names.
 
 ### 1.2 Tools
 
@@ -85,7 +95,7 @@ bridge/
   nidscan.rs       LIB_VERSION / LIB_FUNC scanner; included by build.rs and bin/nidgen.rs via #[path]
   src/lib.rs       constructor, start state, shutdown callback
   src/abi.rs       #[repr(C)] mirrors of the engine tables and PS5 structs, with size asserts
-  src/entry.rs     naked astroport_entry, wait stub, slot array, 17 memory thunks
+  src/entry.rs     naked astroport_entry, wait stub, slot array (200 exports + 17 memory), 17 memory thunks
   src/config.rs    environment -> Config (pure; an invalid value is an error naming the variable)
   src/memory.rs    donation plan, owned-range list, owns(), adoption check
   src/fault.rs     SIGSEGV / SIGBUS action and chaining
@@ -95,32 +105,47 @@ bridge/
   src/audio.rs     pad audio and haptic gain entries
   src/live.rs      live settings: JSON apply -> actions (pure part tested)
   src/bin/nidgen.rs
-  tests/           thunk ABI test, fake-engine tests
+  tests/           thunk ABI test, fake-engine tests (start, fault, cdylib, forwarders)
+  examples/embed_smoke.rs   loads libkyty_renderer.so alone (M1)
 ```
 
 The bridge finds both engines with `dlsym(RTLD_DEFAULT, ...)` for one table-getter symbol each, so
-`cargo test` needs neither engine: tests pass fake tables. Nothing is compiled out under test.
+`cargo test` needs neither engine: tests pass fake tables. Nothing is compiled out under test. A
+process in which neither symbol exists (a test, a tool) is not a game process: the constructor
+returns without doing anything. Exactly one of the two missing is a start-up error.
 
 ### 1.4 Build (`scripts/build-engines.sh`, rewritten in place)
 
+`B` is `$BUILD_DIR` (default `build`); `JOBS=<n>` is passed to ninja and cargo as `-j<n>`.
+
 ```
-cmake -S engines/kyty -B build/kyty -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-      -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-ninja -C build/kyty kyty_renderer
+cmake -S engines/kyty -B $B/kyty -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+      -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS=-fPIC -DKYTY_BUILD_LAUNCHER=OFF
+ninja -C $B/kyty kyty_renderer
 
-cmake -S engines/anyps5 -B build/anyps5 ...            # unchanged
-xargs -a scripts/prx-targets.txt ninja -C build/anyps5 # libAstroportHost.prx replaces lines 1 and 371
-ninja -C build/anyps5 relinker
+cmake -S engines/anyps5 -B $B/anyps5 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+xargs -a scripts/prx-targets.txt ninja -C $B/anyps5   # libAstroportHost.prx is lines 1 and 371
+ninja -C $B/anyps5 relinker
 
-mkdir -p build/libs build/fwd
-ln -sf ../kyty/libkyty_renderer.so ../anyps5/core/libs/libs/libAstroportHost.prx build/libs/
-ASTROPORT_ENGINE_LIBS=$PWD/build/libs cargo build --release --locked --manifest-path bridge/Cargo.toml
-bridge/target/release/nidgen engines/kyty/src/libs build/fwd
+mkdir -p $B/libs $B/fwd
+ln -sf ../kyty/libkyty_renderer.so ../anyps5/core/libs/libs/libAstroportHost.prx $B/libs/
+ASTROPORT_ENGINE_LIBS=$B/libs cargo build --release --locked --manifest-path bridge/Cargo.toml
+cp bridge/target/release/libastroport_bridge.so $B/libs/
+bridge/target/release/nidgen engines/kyty/src/libs $B/fwd
 for l in libSceAgc libSceAgcDriver libSceVideoOut; do
   cc -shared -nostdlib -Wl,-z,now -Wl,-soname,$l.prx -Wl,-rpath,'$ORIGIN' \
-     -o build/fwd/$l.prx build/fwd/$l.S bridge/target/release/libastroport_bridge.so
+     -o $B/fwd/$l.prx $B/fwd/$l.S -L$B/libs -l:libastroport_bridge.so
 done
 ```
+
+`-fPIC` goes through the compiler flags, not `CMAKE_POSITION_INDEPENDENT_CODE`, because only the flags
+also reach Kyty's third-party builds. The bridge has no soname, so a forwarder linked against it by
+path would record that build path as its `DT_NEEDED`; `-l:libastroport_bridge.so` records the bare
+file name.
+
+AnyPS5's tests are not part of this build: they exist only in a tree configured with
+`-DBUILD_TESTING=ON` (the option is off by default), and the M2 cases are registered under it.
 
 Then three checks, a few lines of shell with `nm -D` each, which fail the script:
 
@@ -129,12 +154,27 @@ Then three checks, a few lines of shell with `nm -D` each, which fail the script
    three graphics libraries define is defined by a forwarder or by `libAstroportHost.prx`.
 3. The `astroport_entry_<hash8>` the forwarders import is the one the bridge defines.
 
+Last, the script writes the install tree `$B/install`, made of links into the build folder; it is
+what `astroport-run --install` reads, and the script installs nothing into a run folder:
+
+```
+install/lib/            libkyty_renderer.so, libastroport_bridge.so, the three forwarders,
+                        astroport-exports.txt (and the DLSS runtime when present)
+install/anyps5/libs     -> AnyPS5's library folder (all .prx, including its own three graphics
+                           libraries and libAstroportHost.prx)
+install/anyps5/relinker
+install/patches, install/ags-extension.toml
+```
+
+`install/lib` and `install/anyps5/libs` both hold files named `libSceAgc.prx`, `libSceAgcDriver.prx`
+and `libSceVideoOut.prx`; in a run folder the ones from `install/lib` must be the ones present.
+
 `ags-extension.toml` build list is unchanged (the bridge is built inside `build-engines.sh` because
 the forwarder link needs it). `python3` leaves `depends` only if AnyPS5's own build does not need it.
 
 ### 1.5 The renderer target
 
-`engines/kyty/CMakeLists.txt`, directly after the `kyty_emulator` block (line 3109), about 12 lines.
+`engines/kyty/CMakeLists.txt`, after the Linux block that follows the `kyty_emulator` target, 12 lines.
 It reuses `kyty_emulator_src` (line 289), `kyty_emulator_link_libraries` (645), `inc_headers` (653)
 and `kyty_cpu_check` (1015); `main.cpp` is not in the source list, and `src/embed/` is not in its
 globs, so nothing has to be excluded and `kyty_emulator` is unaffected:
@@ -146,7 +186,7 @@ if(LINUX)
   target_sources(kyty_renderer PRIVATE $<TARGET_OBJECTS:kyty_cpu_check>)
   target_link_libraries(kyty_renderer PRIVATE ${kyty_emulator_link_libraries})
   target_include_directories(kyty_renderer PRIVATE ${inc_headers})
-  target_link_options(kyty_renderer PRIVATE -Wl,-Bsymbolic
+  target_link_options(kyty_renderer PRIVATE -Wl,-Bsymbolic -Wl,--no-undefined
       "-Wl,--version-script=${KYTY_SOURCE_DIR}/embed/kytyEmbed.map")
 endif()
 ```
@@ -160,22 +200,22 @@ endif()
 
 ### 2.1 Kyty: `src/embed/`
 
-| New file | Lines (est.) | Contents |
+| New file | Lines | Contents |
 |---|---|---|
-| `kytyEmbed.h` | 90 | The C table of section 3.1. |
-| `kytyEmbed.cpp` | 260 | Implementation (below). Only in `kyty_renderer`. |
-| `embedOptions.h` | 50 | Header-only: `namespace Embed { struct Options; inline Options& GetOptions(); }` with inline storage, plus the hook pointers and inline helpers `PresentGate`, `Presented`. All-default in the stand-alone emulator, so hooks in upstream files are no-ops there. |
+| `kytyEmbed.h` | 80 | The C table of section 3.1. |
+| `kytyEmbed.cpp` | 291 | Implementation (below). Only in `kyty_renderer`. |
+| `embedOptions.h` | 69 | Header-only: `namespace Embed { struct Options; inline Options& GetOptions(); }` with inline storage, plus the hook pointers and inline helpers `HasPresentGate`, `PresentGate`, `Presented`, `FrameLimit`. Times are `Common::SteadyNs` ticks (`TICKS_PER_S` = 10^9). All-default in the stand-alone emulator, so hooks in upstream files are no-ops there. |
 | `kytyEmbed.map` | 1 | Version script. |
 
 What each table entry wraps:
 
 | Entry | Upstream code it calls |
 |---|---|
-| `run(config, hooks)` | Runs on the bridge's renderer thread and mirrors `Emulator::Run` + `Init` (`src/emulator.cpp:98-209`) without what the host owns. In order: `Common::InitializeThreads()`; fill `Config::ConfigOptions` (`screen_width`, `screen_height`, `fullscreen_enabled`, `hide_cursor_enabled`, `present_mode`, `shader_optimization_type`, `vblank_frequency`, `controller_vibration_intensity`, `dlss_folder`, `dlss_preset`, `splash_enabled = false`; `src/common/emulatorConfig.h:57-98`); copy the rest into `Embed::GetOptions()`; `Libs::Graphics::SetPipelineListExecutable(app0/eboot.bin)`; a heap-allocated `Common::Subsystems` that is never destroyed; `Initialize<Config::Lifecycle>()`, `Config::Load`, `Initialize<Log::Lifecycle>()`; `Loader::SystemContentLoadParamSfo(app0/sce_sys/param.json)` when the file exists; `Libs::LibKernel::PthreadLifecycle`, `Profiler::Lifecycle`, `Libs::LibKernel::Memory::Lifecycle`; **`hooks->reserved()`**; `Libs::Controller::Lifecycle`, `Libs::Graphics::Lifecycle`; `Libs::InitAgcDriver_1`, `Libs::LibGen5::InitVideoOut_1`, `InitLibKernel_1_Mem` (`src/libs/libKernel.cpp:3240`) on a static `Loader::SymbolDatabase`; the session socket client when `AGS_SESSION_SOCKET` is set (6.5); **`hooks->ready()`**; `Libs::Graphics::WindowRun()`; return 0. Not started: `Libs::Network`, `FileSystem`, `Audio`, `Wheel` lifecycles. |
+| `run(config, hooks)` | Runs on the bridge's renderer thread and mirrors `Emulator::Run` + `Init` (`src/emulator.cpp:98-209`) without what the host owns. In order: `Common::InitializeThreads()`; fill `Config::ConfigOptions` (`screen_width`, `screen_height`, `fullscreen_enabled`, `hide_cursor_enabled`, `present_mode`, `shader_optimization_type`, `vblank_frequency`, `controller_vibration_intensity`, `dlss_folder`, `dlss_preset`, `splash_enabled = false`; `src/common/emulatorConfig.h:57-98`); copy the rest into `Embed::GetOptions()`; `Libs::Graphics::SetPipelineListExecutable(app0/eboot.bin)`; a heap-allocated `Common::Subsystems` that is never destroyed; `Initialize<Config::Lifecycle>()`, `Config::Load`, `Initialize<Log::Lifecycle>()`; `Loader::SystemContentLoadParamSfo(app0/sce_sys/param.json)` when the file exists; `Libs::LibKernel::PthreadLifecycle`, `Profiler::Lifecycle`, `Libs::LibKernel::Memory::Lifecycle`; **`hooks->reserved()`**; `Libs::LibKernel::FileSystem::Lifecycle` and `FileSystem::Mount(app0, "/app0")` (the pipeline journal reads the boot level from `/app0/args.txt` through Kyty's mounts); `Libs::Controller::Lifecycle`, `Libs::Graphics::Lifecycle`; `Libs::InitAgcDriver_1`, `Libs::LibGen5::InitVideoOut_1`, `InitLibKernel_1_Mem` (`src/libs/libKernel.cpp:3240`) on a static `Loader::SymbolDatabase`; the session socket client when `AGS_SESSION_SOCKET` is set (6.5); **`hooks->ready()`**; `Libs::Graphics::WindowRun()`. Return codes: 0 when the window loop ended; 1, before anything is started, for a null or too small `config` or `hooks`, a null `app0_dir`, or a second call (one renderer per process). Not started: `Libs::Network`, `Audio`, `Wheel` lifecycles. |
 | `find(nid)` | `symbols.FindByNid(nid, Loader::SymbolType::Func)->vaddr` (`src/loader/symbolDatabase.h:46`), or null. |
-| `fault(address, access, instruction)` | The live part of `TryHandleGuestAccessFault` (`src/loader/runtimeLinker.cpp:744-837`): `Libs::Graphics::FaultCost::SetFaultInstruction` when `FaultCost::MapEnabled()` or `AttribEnabled()` (line 781), then `Libs::LibKernel::Memory::HandleGpuFault(access, address)` (`src/kernel/memory.h:254`, `noexcept`). |
+| `fault(address, access, instruction)` | The live part of `TryHandleGuestAccessFault` (`src/loader/runtimeLinker.cpp:744-837`): `Libs::Graphics::FaultCost::SetFaultInstruction` when `FaultCost::MapEnabled()` or `AttribEnabled()` (line 781), then `Libs::LibKernel::Memory::HandleGpuFault(access, address)` (`src/kernel/memory.h:254`, `noexcept`) inside a `FaultCost::RetriedFaultScope`. When that does not handle a read or write fault and `Memory::PendingAmmMapCovers(address)`, it waits for the queued AMM map (at most `KYTY_FAULT_AMM_WAIT_MS`, default 5000, read once in `run`) and returns 1 when the map is done. An access outside 0..2 returns 0. |
 | `quit()` | Pushes `SDL_EVENT_QUIT` (handled at `window.cpp:615`). Used by the stand-alone smoke test only. |
-| `flush()` | Closes the pad-audio streams, then `Common::Subsystems::EmergencyShutdownActive()`. |
+| `flush()` | Closes the pad-audio streams and refuses later pad audio; then, only when `run` has reached `ready`, `Common::Subsystems::EmergencyShutdownActive()`. |
 | `user_id()` | `Config::GetUserId()`. |
 | `pad_audio(...)` | `Libs::Controller::GetActiveControllerId()`; one `DualSenseHaptics::Open(freq, speaker)` stream per target, reopened on a rate change; `DualSenseHaptics::Queue(...)` (`src/libs/dualSenseHaptics.h:12-19`) with gain times `Libs::Controller::GetSettingScale(...)`. Shortcut: only the active controller is used; the old "enumerate SDL and open a pad" fallback is dropped, because pad selection (2.26) gives Kyty an active controller whenever one is connected. |
 | `set_low_latency_interval(us)`, `set_window_size(w, h)` | Setters of the low-latency module (6.1) and the window's pending size. |
@@ -185,11 +225,12 @@ Edits to upstream Kyty files for the seam itself:
 
 | File | Change | Lines |
 |---|---|---|
-| `CMakeLists.txt` | target `kyty_renderer` (1.5) | ~12 |
-| `src/graphics/presentation/videoOut.cpp` | `VideoOutDriver::Impl::PresentThread` (line 833): before each of the two `m_flip_queue.Flip()` calls (lines 899 and 942) ask `Embed::PresentGate(now, flip_ready)`; skip the flip and bound the next sleep by the returned tick; after a flip that presented call `Embed::Presented(now)`. | ~15 |
-| `src/graphics/presentation/window/window.cpp` | `WindowContext::UpdateTitle` (line 1059): use `Embed::GetOptions().window_title` when set. `Streaming::ReadLiveOutput` (line 51): read the frame limit from `Embed` instead of the old variable name. | ~6 |
+| `CMakeLists.txt` | target `kyty_renderer` (1.5) | 12 |
+| `src/graphics/presentation/videoOut.cpp` | New `bool FlipQueue::Ready()`: a complete flip group is queued (its owner request exists, none of its requests is still a CPU request, all are in state `Ready`); it may not be due yet. `VideoOutDriver::Impl::PresentThread`: before each of the two `m_flip_queue.Flip()` calls it asks `Embed::PresentGate(now, m_flip_queue.Ready())` when a gate is installed (`Embed::HasPresentGate()`); a non-zero answer skips the flip, and in the between-vblank loop bounds the next sleep by the returned tick; after a flip that presented it calls `Embed::Presented` with the tick the gate was asked at, not the tick the present ended at. The second call site asks once per vblank, so a host limit finer than the vblank needs the between-vblank loop (`KYTY_PRESENT_ABS_VBLANK=1` with the Immediate present mode). | 39 |
+| `src/graphics/presentation/window/window.cpp` | `WindowContext::UpdateTitle`: use `Embed::GetOptions().window_title` when set. `Streaming::ReadLiveOutput`: the frame limit is `Embed::FrameLimit()`, which derives it from the low-latency interval (`1 000 000 / interval`, rounded; 60 when the interval is 0), so the session socket reports the bridge's effective limit without a further setter. | 6 |
+| `src/common/CMakeLists.txt`, `src/common/hleWaitStats.h`, `src/graphics/host_gpu/renderer/pipeline/descriptors.cpp`, `src/graphics/shader/recompiler/ir/ProgramCodec.cpp` | Not seam code: one line or a few each so that upstream compiles with clang on Linux (`-fexceptions` for three more sources, `<x86intrin.h>`, an explicit lambda return type, an explicit `emplace` argument). | 8 |
 
-Seam total: about 400 new lines in new files, about 33 lines in 3 upstream files. No edit in
+Seam total: 441 lines in four new files, 57 lines in 3 upstream files, plus the four build fixes. No edit in
 `memory.cpp`, `memory.h`, `memoryAddressSpace.inc`, `hostException.cpp`, `runtimeLinker.cpp`,
 `libAgcDriver.cpp`, `libVideoOut.cpp`, `libKernel.cpp`, `libPad.cpp`, `pipelineCache.cpp`.
 (`InitLibKernel_1_Mem` has no header declaration; the seam declares it itself, as `libs.cpp` does for
@@ -201,8 +242,10 @@ All code follows `engines/anyps5/AGENTS.md`: no comments, a row in `docs/dev/ENV
 variable, a note in `docs/dev/debt/<library>.md` for behaviour that is a model.
 
 **Engine switch, in libkernel (every library already links it).** New
-`core/libs/prx/libkernel/include/ExternalRenderer.hpp` (~35 lines) and
-`core/libs/prx/libkernel/System/src/ExternalRenderer.cpp` (~12 lines):
+`core/libs/prx/libkernel/include/ExternalRenderer.hpp` (39 lines) and
+`core/libs/prx/libkernel/System/src/ExternalRenderer.cpp` (18 lines). The 17 memory members are
+`APS5_VABI` function pointers; the struct is 176 bytes with `owns` at offset 144 (asserted on both
+sides); the setter throws when a table is smaller than that:
 
 ```cpp
 struct ExternalRenderer {
@@ -227,26 +270,29 @@ is installed; nothing depends on the working directory. A null table means upstr
 |---|---|---|
 | `core/libs/prx/libkernel/DirectMemory/Export.cpp` | First statement of 17 exports: `if (const auto* r = ExternalRendererGet_nid_no_patch()) return r->...(...)`. Twelve always; five (`sceKernelMprotect`, `sceKernelMunmap`, `sceKernelVirtualQuery`, `sceKernelSetVirtualRangeName`, `sceKernelClearVirtualRangeName`) only when `r->owns(address, length ? length : 1)`. | ~20 |
 | same file | Logging only: the unforwarded functions listed in F3 print one line the first time they are called with an address the renderer owns (detects spec risk R2). | ~8 |
-| `core/libs/prx/libkernel/Apr/src/Apr.cpp` | `_readFile` (line 160): take the existing staged-copy branch (today `_WIN32` only, line 169) also when a renderer table is installed. | ~3 |
+| `core/libs/prx/libkernel/Apr/src/Apr.cpp` | `_readFile` (line 160): take the existing staged-copy branch (upstream: `_WIN32` only) also when a renderer table is installed; the direct read stays for Linux without a table. | 18 |
 
-**Host services: new `core/libs/prx/libAstroportHost/`** (`CMakeLists.txt` ~6 lines:
-`EXCLUDE_FROM_ALL`, links `libScePad`; `Export.cpp` ~230 lines). The generic loop of
+**Host services: new `core/libs/prx/libAstroportHost/`** (`CMakeLists.txt` 17 lines:
+`EXCLUDE_FROM_ALL`, links `libScePad`, and under `BUILD_TESTING` the test program with its six cases
+`donate conflict events renderer apr pad`; `libAstroportHost.hpp` 58 lines: the table and the two pad
+structs of 3.1; `Export.cpp` 250 lines). The generic loop of
 `core/libs/CMakeLists.txt` (line 165) adds `libkernel`, `libc`, `-z now`, the `$ORIGIN` run path and
 the NID patcher. Passive: no thread, no initialiser. Every function body catches all C++ exceptions.
 
 | Entry | Upstream AnyPS5 functions it wraps |
 |---|---|
 | `donate(base, bytes)` | Fixed ranges only. Check with `GuestArenaNextUsed_nid_no_patch` that no used range intersects (else print the conflicting range and return 0); `GuestArenaMarkUsed_nid_postfix(base, bytes)`; `munmap(base, bytes)`. Returns the base or 0. |
-| `event_add` / `event_delete` / `event_deliver` | `EqueuePin_nid_postfix`, `EqueueAddEvent_nid_postfix`, `EqueueDeleteEvent_nid_postfix`, `EqueueTriggerEvent_nid_postfix` (`libkernel/Equeue/Equeue.hpp:142-145`) with `KernelEqueueEvent` trigger and reset functions exactly as F4 specifies (EOP: filter -14, add + clear, data counts; flip: filter -13, ident 0, counter saturating at 15, payload passed through unmodified, queued behind a still-triggered event). The registration list and its mutex live here. Deliver snapshots the list under the lock and triggers outside it. Unknown queue or kind returns `0x80020009`; recorded in `docs/dev/debt/libAstroportHost.md` as a deliberate difference from upstream's throwing functions. |
+| `event_add` / `event_delete` / `event_deliver` | `EqueuePin_nid_postfix`, `EqueueAddEvent_nid_postfix`, `EqueueDeleteEvent_nid_postfix`, `EqueueTriggerEvent_nid_postfix` (`libkernel/Equeue/Equeue.hpp:142-145`) with `KernelEqueueEvent` trigger and reset functions exactly as F4 specifies (EOP: filter -14, add + clear, data counts; flip: filter -13, ident 0, counter saturating at 15, payload passed through unmodified, queued behind a still-triggered event; every flip registration receives every flip, whatever handle it was registered with). The registration list and its mutex live here. Deliver snapshots the list under the lock and triggers outside it. Unknown queue or kind returns `0x80020009`; recorded in `docs/dev/debt/libAstroportHost.md` as a deliberate difference from upstream's throwing functions. |
 | `pad_publish(port, input)` | Builds `PadInputState`; `PadPublishInputForPort_nid_postfix`; `PadSetPortConnected_nid_postfix` on change. Motion is a field of the same struct, so no latch. |
-| `pad_fetch_output(port, &seq, out)` | `PadFetchOutputForPort_nid_postfix`, copied into a plain struct including the raw 56-byte trigger commands. |
+| `pad_fetch_output(port, &seq, out)` | `PadFetchOutputForPort_nid_postfix`, copied into a plain struct (3.1). The struct has room for the raw 56-byte trigger commands, but `trigger_set` stays 0 until F9 makes `libScePad` keep them (debt note). |
 | `request_exit(code)` | `LibcRequestExit_nid_postfix(code)`. |
 | `on_shutdown(callback)` | `LibcRegisterShutdown_nid_postfix(callback)` (`libc/include/Shutdown.hpp:8`). |
 | `install_renderer(table)` | `ExternalRendererSet_nid_no_patch`. |
 | HDR helpers | `AgcDriverHostHdr_nid_postfix(AgcDriver::HostHdrStatus&)` and `AgcDriverNoteReportedToneMapPeak_nid_postfix(float)` are **defined here** (default SDR status, last noted peak). The NID patcher exports them as `doCCHPPfxkI` and `KMphJjTcNgk`; `libSceSystemService.prx` resolves them from the global scope. They never touch the bridge or a forwarder. |
 
-Seam total in AnyPS5: about 285 new lines in 4 new files, about 31 lines in 2 upstream files, one
-line in `scripts/prx-targets.txt` (ours). No libc change.
+Seam total in AnyPS5: 382 lines in 5 new files (plus the test `core/libs/tests/GuestAstroportHost.cpp`),
+about 50 lines in 3 upstream files (`DirectMemory/Export.cpp` 31, `Apr.cpp` 18, one source line in
+libkernel's `CMakeLists.txt`), two lines in `scripts/prx-targets.txt` (ours). No libc change.
 
 ---
 
@@ -332,7 +378,32 @@ typedef struct AstroportHostApi {
     void     (*install_renderer)(const void* external_renderer);
 } AstroportHostApi;
 const AstroportHostApi* AstroportHostApi_nid_no_patch(void);
+
+typedef struct AstroportTouch { uint16_t x, y; uint8_t id, active; } AstroportTouch;   /* 6 bytes */
+
+typedef struct AstroportPadInput {      /* 48 bytes */
+    uint32_t buttons;                   /* PS5 bit layout */
+    uint8_t  sticks[4];                 /* left x, left y, right x, right y; 128 = centre */
+    uint8_t  l2, r2;
+    uint8_t  connected, has_motion;
+    AstroportTouch touch[2];
+    float    accel[3];                  /* m/s^2 including gravity */
+    float    gyro[3];                   /* rad/s */
+} AstroportPadInput;
+
+typedef struct AstroportPadOutput {     /* 122 bytes */
+    uint8_t rumble_large, rumble_small;
+    uint8_t audio_rumble_large, audio_rumble_small;
+    uint8_t light_bar_valid, light_bar[3];
+    uint8_t trigger_set[2];             /* per trigger (0 = L2, 1 = R2): a command was set */
+    uint8_t trigger[2][56];             /* raw trigger commands */
+} AstroportPadOutput;
 ```
+
+The two pad structs are defined in `bridge/src/abi.rs` and mirrored in `libAstroportHost.hpp`; their
+fields follow spec-anyps5 C8 to C10. `abi.rs` asserts every size at compile time: `KytyEmbedConfig`
+104, `KytyEmbedHooks` 48, `KytyEmbedFns` 112, `KytyEmbedApi` 96, `AstroportHostApi` 80,
+`ExternalRenderer` 176, `PadData` 120, the kernel event 32.
 
 `ExternalRenderer` is in 2.2.
 
@@ -364,6 +435,7 @@ Phase 1 runs in the bridge's ELF constructor (`.init_array`), after both engines
 the loader, before any guest code:
 
 1. `dlsym(RTLD_DEFAULT, "kyty_embed_api")` and `"AstroportHostApi_nid_no_patch"`; check versions.
+   Neither found: not a game process, return (1.3).
 2. Parse the environment into `Config` (section 7). An invalid value aborts naming the variable.
 3. Donate the ranges (5.1).
 4. Install the `SIGSEGV` / `SIGBUS` action (5.3).
@@ -383,10 +455,13 @@ means the constructor never waits on a thread that loads the Vulkan driver, so t
 if start-up constructors turn out to run under the loader lock. All Kyty subsystems are initialised
 on one thread, as upstream does.
 
-Phase 2, renderer thread, inside `run`: after `ready()` the bridge resolves every export with
-`api.find(nid)` (a null result aborts with the NID and the Kyty function name; the table was generated
-from Kyty's source), binds three event slots to its own functions, publishes the slot array, opens the
-pad, creates the proxy queue, starts the pump and relay threads, sets `READY` and wakes waiters.
+Phase 2, renderer thread (8 MiB stack, the size of a process main stack), inside `hooks.ready()`: the
+bridge creates the proxy queue and starts the pump, resolves every export with `api.find(nid)` (a
+null result aborts with the NID and the Kyty function name; the table was generated from Kyty's
+source) except the three event exports, which get its own functions, opens the pad and starts the
+relay thread, and only then binds all slots, sets `READY` and wakes waiters. The slots are bound last
+because the fault handler passes every fault on until `READY`: no guest thread may reach Kyty earlier.
+A `run` that returns non-zero aborts the process with the code.
 
 The renderer starts eagerly, in parallel with the game's own start-up. No guest thread performs the
 bring-up, and the donation point is defined (before guest code). This closes spec-anyps5 R1 and
@@ -394,13 +469,14 @@ spec-kyty risk 5.
 
 ### 3.5 Callers that arrive before ready
 
-Every slot initially points at one wait stub (4.3). It saves the argument registers, calls
-`wait_ready()` (a condition variable with a 120 s limit; on time-out it prints the export's NID and
-Kyty function name and aborts), restores the registers and jumps through the slot again.
+Every slot initially points at one wait stub (4.3). It recovers the slot index, saves the argument
+registers, calls `wait_ready(index)` (a condition variable with a 120 s limit; on time-out it prints
+the export's NID and Kyty function name and aborts), restores the registers and dispatches through
+the slot again.
 
-Possible simplification, decided by the M0 constructor test: if a start-up constructor may safely
-block on a thread that loads `libvulkan.so.1`, the constructor waits for `ready` and the wait stub is
-deleted (slots then point at a loud abort before start).
+Possible simplification, permitted by the M0 constructor test below and **not taken**: the
+constructor would wait for `ready` and the wait stub would be deleted. The wait stub is kept, so the
+game's start-up overlaps the renderer's.
 
 **M0 constructor experiment, 2026-11-25** (`bridge/tests/ctor_experiment.sh`; glibc 2.44, NVIDIA
 RTX 3090). A stub library's constructor spawned a thread that did `dlopen("libvulkan.so.1")`,
@@ -484,13 +560,16 @@ also calls the cache's own save.
 
 ```
 game: call <NID>@plt
-  -> forwarder .prx   "<NID>":  mov $index, %r11d ; jmp *astroport_entry_<hash8>@GOTPCREL(%rip)
-  -> bridge           astroport_entry:  jmp *SLOTS(,%r11,8)
+  -> forwarder .prx   "<NID>":  movl $index, %r11d ; jmp *astroport_entry_<hash8>@GOTPCREL(%rip)
+  -> bridge           astroport_entry:  shl $3, %r11 ; add SLOTS@GOTPCREL(%rip), %r11 ; jmp *(%r11)
   -> Kyty HLE function (KYTY_SYSV_ABI), or a Rust function (three event exports)
 ```
 
-Two jumps, no stack use, no register touched except `r11`, which the System V convention leaves free
-at a call boundary. Integer, vector and variadic arguments pass untouched.
+The dispatch is position independent: a shared library cannot use the absolute form
+`jmp *SLOTS(,%r11,8)`, so the slot's address is computed in `r11` from the array's GOT entry. At the
+target, `r11` therefore holds the address of the slot, not the index. Two jumps, no stack use, no
+register touched except `r11` (and the flags), which the System V convention leaves free at a call
+boundary. Integer, vector and variadic arguments pass untouched.
 
 ### 4.2 Export list: title-independent
 
@@ -504,21 +583,27 @@ by a forwarder, they reach Kyty through `ExternalRenderer`.
 **Every** NID Kyty registers for the three libraries is exported, so the artifacts do not depend on a
 title or game version. "Fail when the game imports something unimplemented" moves to where the game is
 known: `runner` compares every NID the relinked executable and its bundled modules import from the
-three libraries (the registry the relinker writes; a `#` suffix is stripped) with
-`astroport-exports.txt` and fails the job naming the missing NIDs. Imports of AnyPS5's own libraries
+three libraries (every `AstroBot*.registry.json` the relinker writes into the run folder; a `#`
+suffix is stripped) with `install/lib/astroport-exports.txt` and fails the job naming the missing
+NIDs. A NID counts as provided when **any** of the three forwarders exports it, not only the one
+named after the importing library: the loader resolves symbols by name alone, and Kyty files some
+NIDs under another library than the game imports them from. Imports of AnyPS5's own libraries
 are checked at build time (1.4, check 2).
 
 ### 4.3 The wait stub
 
 One naked Rust function, used only before ready:
 
+* recovers the slot index from `r11`, which the dispatch left pointing at the slot:
+  `sub SLOTS@GOTPCREL(%rip), %r11 ; shr $3, %r11`;
 * saves `rdi rsi rdx rcx r8 r9 rax r10 r11` and `xmm0..xmm7` (`rax` carries the vector-register count
-  of variadic calls, `r11` the index);
-* aligns the stack to 16 bytes at the call; calls `wait_ready(index)`;
-* restores everything and jumps to `SLOTS[r11]`.
+  of variadic calls, `r11` the index) in a 200-byte frame, which also aligns the stack to 16 bytes at
+  the call; calls `wait_ready(index)`;
+* restores everything and runs the same dispatch sequence as `astroport_entry` on the index.
 
 Constraints: no red-zone use, no callee-saved register modified, nothing left on the stack at the tail
-jump. The 17 memory thunks are generated by one macro: `mov $index, %r11d ; jmp astroport_entry`.
+jump. The 17 memory thunks are generated by one macro: `mov $index, %r11d` followed by the dispatch
+sequence inline (slots 200..216, after the graphics exports).
 
 ### 4.4 Symbol isolation of the renderer library
 
@@ -606,11 +691,11 @@ variable. Sizes are estimates.
 | 2.10 window close | MUST | Rust | 3.8. |
 | 2.13 pad output | SHOULD | Rust `pad.rs` | 3.7. |
 | 2.16 cache title id | SHOULD | Kyty seam | `Loader::SystemContentLoadParamSfo(app0/sce_sys/param.json)`; upstream `PipelineCacheTitleId()` (`pipelineCache.cpp:218`) then works unpatched. No title-id variable. |
-| 2.17 frame-rate limiter | SHOULD | Rust `limiter.rs` + 15 lines in `videoOut.cpp` | State machine as specified (interval = ceil(f / limit); cadence rule with 1 ms lateness; restart from now otherwise; `unlimited`; reset on change). `present_gate` returns the due tick so the between-vblank loop sleeps instead of polling. The absolute-vblank timeline is selected by upstream `KYTY_PRESENT_ABS_VBLANK=1` in `fixed_env`. Ctrl+F2 cycling, overlay text and title suffix are not built (optional in the spec). |
+| 2.17 frame-rate limiter | SHOULD | Rust `limiter.rs` + 15 lines in `videoOut.cpp` | State machine as specified (interval = ceil(f / limit); cadence rule with 1 ms lateness; restart from now otherwise; `unlimited`; reset on change). `present_gate` returns the due tick whether or not a flip is ready (Kyty passes `FlipQueue::Ready()` as `flip_ready`), so the between-vblank loop sleeps instead of polling; `presented` receives the tick the gate was asked at (2.1). The absolute-vblank timeline is selected by upstream `KYTY_PRESENT_ABS_VBLANK=1` in `fixed_env`. Ctrl+F2 cycling, overlay text and title suffix are not built (optional in the spec). |
 | 2.18 motion relay | SHOULD | Rust `pad.rs` | 3.7, with the quaternion fallback. |
 | 2.20 fixed window title | SHOULD | Kyty, `window.cpp` `UpdateTitle` | Options `window_title`. |
 | 2.21 DLSS | SHOULD | Kyty | 6.4. |
-| 2.25 low-latency mode | SHOULD | Kyty, new `src/graphics/presentation/window/lowLatency.{h,cpp}` (~230) + hooks: `vulkanWindow.cpp` (`VulkanCreateDevice` line 679, `WindowContext::CreateVulkan` 2203; ~12), `swapchain.cpp` (`Swapchain::Create` 403, `Destroy` 571, `Present` 1260; ~15), `videoOut.cpp` (`VideoOutSubmitFlip`, `FlipQueue::Reserve` 974, `Flip`; ~10), `src/libs/agc.cpp` (`AgcDcbSetFlip` 4308 and the submit helper; ~6) | As specified: only with both `VK_NV_low_latency2` and `VK_KHR_present_id`; latency create-info chained at swapchain creation; low latency on, boost on; one timeline semaphore; the sleep on the guest thread bounded to 100 ms; one mutex around every call naming the swapchain, also across `vkQueuePresentKHR`. No "measure" mode, no frame-generation branch. **The minimum interval is derived**: the bridge calls `set_low_latency_interval(1 000 000 / effective limit)` whenever the effective frame limit changes (launch, live setting, video override), 0 for none or `unlimited`. No interval variable. Off while FSR frame generation is requested. |
+| 2.25 low-latency mode | SHOULD | Kyty, new `src/graphics/presentation/window/lowLatency.{h,cpp}` (~230) + hooks: `vulkanWindow.cpp` (`VulkanCreateDevice` line 679, `WindowContext::CreateVulkan` 2203; ~12), `swapchain.cpp` (`Swapchain::Create` 403, `Destroy` 571, `Present` 1260; ~15), `videoOut.cpp` (`VideoOutSubmitFlip`, `FlipQueue::Reserve` 974, `Flip`; ~10), `src/libs/agc.cpp` (`AgcDcbSetFlip` 4308 and the submit helper; ~6) | As specified: only with both `VK_NV_low_latency2` and `VK_KHR_present_id`; latency create-info chained at swapchain creation; low latency on, boost on; one timeline semaphore; the sleep on the guest thread bounded to 100 ms; one mutex around every call naming the swapchain, also across `vkQueuePresentKHR`. No "measure" mode, no frame-generation branch. **The minimum interval is derived**: the bridge calls `set_low_latency_interval(1 000 000 / effective limit)` whenever the effective frame limit changes (launch, live setting, video override), 0 for none or `unlimited`. The same value is the one channel that tells Kyty the effective frame limit: `Embed::FrameLimit()` turns it back into frames per second for the session socket (2.1). No interval variable. Off while FSR frame generation is requested. |
 | 2.26 controller selection, rumble strength | SHOULD | Kyty, `src/libs/controller.cpp` (near `RefreshPlayers` 1549, `GameController::ApplyVibration` 1358; ~110) + the controller button handler in `window.cpp` (~6) | Options `pad_prefer`, `rumble_scale`, `rumble_switch_floor`. |
 | 3.1 pad audio entry, rumble scale seeding | ours | Kyty seam `pad_audio`; Rust config | `rumble_scale` also seeds `controller_vibration_intensity`. |
 | 3.1 / 3.5 DualSense edits (`src/libs/dualSenseBluetooth.cpp`, `dualSenseHaptics.cpp`) | ours | Kyty | Not in the tree. Written again from the spec text; the rumble switch is Options `ds_rumble`. The two wireless opt-out switches are not re-created (never set by the product). See decision 3. |
@@ -759,7 +844,10 @@ Kept names (upstream or ours, nothing to implement): `KYTY_HANG_WATCHDOG`, `KYTY
 `KYTY_DRAW_PREP_SPIN_US`, `KYTY_DRAW_PREP_COLD_SPIN_US`, `KYTY_BUFFER_RANGE_FIXES`,
 `KYTY_AGC_DONE_MODE`, `KYTY_PIPELINE_LIST_PREPARE`, `KYTY_PIPELINE_LIST_CROSS`,
 `KYTY_PRESENT_ABS_VBLANK`, `ANYPS5_LANGUAGE`, `AGS_SESSION_SOCKET`, `AGS_SESSION_PROTOCOL`,
-`LD_AUDIT`, `ASTRO_PATCH_PROCESS`, `GLIBC_TUNABLES` (until M4 shows whether it is still needed).
+`LD_AUDIT`, `ASTRO_PATCH_PROCESS`, `GLIBC_TUNABLES`. The last one stays:
+`glibc.rtld.optional_static_tls=0x200000` is required whenever the patcher is loaded with `LD_AUDIT`
+(1.1); without the tunable the game starts only without the patcher (`scripts/play.sh`:
+`STATIC_TLS=0` works only with `CHEATS=0`).
 Driver variables used as is: `NVPRESENT_ENABLE_SMOOTH_MOTION`, `__NGX_SHOW_INDICATOR`,
 `DISABLE_LSFGVK`.
 
@@ -775,15 +863,15 @@ is no longer read by Kyty).
 |---|---|
 | `patches/settings.json` | `fixed_env`: drop the removed variables; rename the rest per 7.1 / 7.2; add `ASTROPORT_APP0={run}/app0`, `ASTROPORT_DLSS_PASS=2936e5eca99d75e7`, `KYTY_PRESENT_ABS_VBLANK=1`. `settings`: `display.fps` sets only `ASTROPORT_FPS_LIMIT`; `graphics.ultrawide` -> `ASTROPORT_WIDTH/HEIGHT`; `controller.rumble` -> `ASTROPORT_DS_RUMBLE`; `perf.low_latency` -> `ASTROPORT_LOW_LATENCY`; `fullscreen` -> `ASTROPORT_FULLSCREEN`; `graphics.dlss` -> `ASTROPORT_DLSS`. |
 | `adapter/src/launch.rs`, `settings.rs` | The same renames where names are built in code; the low-latency interval assertion in the tests goes. Nothing structural. |
-| `runner/src/layout.rs` | `install_libs` (line 166): copy AnyPS5 libraries except the three graphics ones; copy `libAstroportHost.prx`, `libkyty_renderer.so`, `libastroport_bridge.so` and the three forwarders into `libs/`. The DLSS runtime copy stays. |
-| `runner/src/build.rs` | Import check against `astroport-exports.txt` (4.2), with a unit test on a two-entry registry. |
+| `runner/src/layout.rs` | `install_libs` reads the install tree of 1.4 (`--install`): copy every `.prx` of `anyps5/libs` except the three graphics ones (`libAstroportHost.prx` is required), then from `lib/` the three forwarders, `libkyty_renderer.so`, `libastroport_bridge.so` and any `libnvidia-ngx-dlss.so.*`, all into the run folder's `libs/` as copies; files it did not install are pruned from `libs/`. A hand refresh of a run folder must keep that order: AnyPS5's libraries first, `install/lib/*` last, so the forwarders win over AnyPS5's files of the same name. |
+| `runner/src/build.rs` | Import check against `lib/astroport-exports.txt` across the three forwarders (4.2), with a unit test on a small registry. |
 | `scripts/build-engines.sh` | 1.4. |
 | `scripts/prx-targets.txt` | Lines 1 and 371: `libAstroportHost.prx`. |
 | `scripts/release/inside.sh` | Drop `-DKYTY_NGX_SDK_DIR` (line 18). |
 | `scripts/release/fetch-dlss.sh` | Require only the runtime `lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.*` and `LICENSE.txt`; sparse checkout shrinks accordingly. The pin in `dlss.env` is unchanged. |
 | `scripts/release/stage.sh` | New file names; no `shims/`; the NGX symbol check (line 83) is replaced by "the runtime file is present"; `ASTROPORT_REQUIRE_DLSS=1` fails when it is not. |
 | `scripts/release/test.sh`, `package.sh` | Follow the above (no fake NGX symbol, no fake static library). |
-| `scripts/play-hybrid.sh` -> `scripts/play.sh` | Rewritten on the new names; `KYTY_SO` goes (use the run folder's `libs/`). |
+| `scripts/play-hybrid.sh` -> `scripts/play.sh` | Rewritten on the new names; `KYTY_SO` goes (use the run folder's `libs/`). `RUN_DIR` names the run folder; `ASTROPORT_*` variables already set win over its defaults; it sets `GLIBC_TUNABLES` unless `STATIC_TLS=0` (7.3). |
 | `scripts/smoke.sh` (new) | 1.2. |
 | `scripts/check-repo.sh` | Required-file list updated; a grep that no file outside `docs/rewrite/` contains the removed project's prefix or library names; the K6 grep. |
 | `README.md`, `NOTICE.md`, both `UPSTREAM.md` | Describe the new layout; `UPSTREAM.md` section 3 and 4 list our carried changes only. |
@@ -796,13 +884,19 @@ Each ends in a check that runs on this machine. Run-based checks use `scripts/sm
 `timeout`, `DISABLE_LSFGVK=1`, grep of the single log). "Files" is what the milestone owns;
 milestones that own disjoint files can run in parallel.
 
+**State: M0 to M4 are done** (the tree builds with `scripts/build-engines.sh`, all three build checks
+pass, and the game starts on the bridge and reaches the title level). Measured on the development
+machine (RTX 3090, windowed 1280x720, warm caches): the log shows "astroport: adopted 3/3",
+"astroport: renderer ready in N ms" with N about 700, and "astroport: first frame presented after
+N ms" with N about 1400, both counted from the bridge's constructor. M5 to M11 are open.
+
 | # | Milestone | Verified by | Files | Parallel with |
 |---|---|---|---|---|
-| M0 | Baseline and unknowns. Pristine engines build; bridge skeleton with `nidscan` + `nidgen`; forwarders link; constructor experiment; `smoke.sh`. | `ninja -C build/kyty kyty_emulator dlss_tests && ctest --test-dir build/kyty -R '^dlss$'` passes; AnyPS5 `prx-targets` build; `cargo test` in all four crates (the scanner finds 200 `LIB_FUNC` lines, three libraries, 17 memory functions on the real tree); three forwarders assemble and link against a stub bridge, and a C program linked against them calls one NID through the stub. Constructor experiment: a stub library as `DT_NEEDED` whose constructor spawns a thread that loads `libvulkan.so.1`, once with the constructor waiting and once not; result written into this document (decides 3.5). | `bridge/` skeleton, `scripts/smoke.sh` | - |
-| M1 | Kyty seam | `ninja -C build/kyty kyty_renderer`; `nm -D --defined-only` shows only `kyty_embed_api`; `ninja kyty_emulator` still links. A Rust example (`bridge/examples/embed_smoke.rs`) loads the library alone, calls `run` on a second thread, receives `reserved` then `ready`, a black window appears, `find("23LRUSvYu1M")` is non-null, `fns.equeue_create` / `equeue_wait` and `fns.pad_read_state` work from a plain thread, `quit` ends it with exit code 0. No AnyPS5 involved. **This is also the upstream-merge check.** | `engines/kyty/src/embed/`, `CMakeLists.txt`, 2 hooks | M2, M3 |
-| M2 | AnyPS5 seam | New ctest cases under `core/libs/tests/`: a donation leaves the range unmapped and marked used; a non-free donation returns 0 and names the conflict; event add / deliver / delete on a real event queue with EOP and flip semantics; a fake `ExternalRenderer` receives the 17 calls and `owns` gating works; an APR read into a write-protected page succeeds. | `core/libs/prx/libAstroportHost/`, `libkernel/` (3 files) | M1, M3 |
-| M3 | Bridge core against fake tables | `cargo test`: thunk ABI test (a C-ABI function with six integer, eight double and variadic arguments is called through a thunk before and after binding and sees all values); strict config parsing; limiter (a 30 FPS cap delivers 30.00 over simulated timer overshoot; a late frame restarts cadence; video override; interval derivation); pad output differences; quaternion fallback; event registry; fault handler with a prior handler installed first: an unowned page reaches the prior handler, an owned page reaches the fake `fault`. | `bridge/src/` | M1, M2 |
-| M4 | Integration: first frame | `scripts/build-engines.sh` passes its three checks; the run folder starts with `LD_BIND_NOW=1` without unresolved symbols; `smoke.sh` finds "donated", "adopted 3/3", "renderer ready in N ms" and a presented frame within 120 s; pipeline cache files are named after the title id; one run without `GLIBC_TUNABLES`; one run on X11 shows the window icon. | `scripts/build-engines.sh`, `runner/` | - |
+| M0 | **Done.** Baseline and unknowns. Pristine engines build; bridge skeleton with `nidscan` + `nidgen`; forwarders link; constructor experiment; `smoke.sh`. | `ninja -C build/kyty kyty_emulator dlss_tests && ctest --test-dir build/kyty -R '^dlss$'` passes; AnyPS5 `prx-targets` build; `cargo test` in all four crates (the scanner finds 200 `LIB_FUNC` lines, three libraries, 17 memory functions on the real tree); three forwarders assemble and link against a stub bridge, and a C program linked against them calls one NID through the stub. Constructor experiment: a stub library as `DT_NEEDED` whose constructor spawns a thread that loads `libvulkan.so.1`, once with the constructor waiting and once not; result written into this document (decides 3.5). | `bridge/` skeleton, `scripts/smoke.sh` | - |
+| M1 | **Done.** Kyty seam | `ninja -C build/kyty kyty_renderer`; `nm -D --defined-only` shows only `kyty_embed_api`; `ninja kyty_emulator` still links. A Rust example (`bridge/examples/embed_smoke.rs`) loads the library alone with `dlopen` (so it needs `GLIBC_TUNABLES=glibc.rtld.optional_static_tls=1048576`, see 1.1), calls `run` on a second thread, receives `reserved` then `ready`, a black window appears, `find("23LRUSvYu1M")` is non-null, `fns.equeue_create` / `equeue_wait` and `fns.pad_read_state` work from a plain thread, `quit` ends it with exit code 0. No AnyPS5 involved. **This is also the upstream-merge check.** | `engines/kyty/src/embed/`, `CMakeLists.txt`, 2 hooks | M2, M3 |
+| M2 | **Done.** AnyPS5 seam | New ctest cases under `core/libs/tests/` (`guest_astroport_host_*`, in a tree configured with `-DBUILD_TESTING=ON`): a donation leaves the range unmapped and marked used; a non-free donation returns 0 and names the conflict; event add / deliver / delete on a real event queue with EOP and flip semantics; a fake `ExternalRenderer` receives the 17 calls and `owns` gating works; an APR read into a write-protected page succeeds. | `core/libs/prx/libAstroportHost/`, `libkernel/` (3 files) | M1, M3 |
+| M3 | **Done.** Bridge core against fake tables | `cargo test`: thunk ABI test (a C-ABI function with six integer, eight double and variadic arguments is called through a thunk before and after binding and sees all values); strict config parsing; limiter (a 30 FPS cap delivers 30.00 over simulated timer overshoot; a late frame restarts cadence; video override; interval derivation); pad output differences; quaternion fallback; event registry; fault handler with a prior handler installed first: an unowned page reaches the prior handler, an owned page reaches the fake `fault`. | `bridge/src/` | M1, M2 |
+| M4 | **Done.** Integration: first frame | `scripts/build-engines.sh` passes its three checks; the run folder starts with `LD_BIND_NOW=1` without unresolved symbols; `smoke.sh` finds "donated", "adopted 3/3", "renderer ready in N ms" (about 0.7 s) and "first frame presented after N ms" (about 1.4 s warm), well inside the 120 s limit; pipeline cache files are named after the title id; one run without `GLIBC_TUNABLES` (result: needed with the patcher, 7.3); one run on X11 shows the window icon. | `scripts/build-engines.sh`, `runner/` | - |
 | M5 | MUST complete | Pad input moves the menu; closing the window ends the process with code 0 within 3 s and cache files have a fresh time stamp; the exit summary shows handled faults > 0; a ten-minute session streams assets without APR errors and without an "unforwarded memory call" line. | `bridge/src/pad.rs`, `events.rs` fixes | - |
 | M6 | Host SHOULD features | Rumble, light bar, adaptive triggers on a DualSense; a motion section responds; unit test of the F10 table; Bluetooth DualSense speaker and haptics, no deadlock after ten minutes; a first save is created; O9 helper unit test. | `libScePad`, `libSceAudioOut`, `libSceSaveData.native` | M7, M8, M9 |
 | M7 | Kyty presentation features | Limiter measured at 30.0 and 60.0 FPS (`KYTY_PACE_LOG` or the session metrics); window title fixed; the driver's latency report shows filled time stamps with the mode on, "unavailable" is logged without the extension; a second pad takes over on a button press; a live frame cap and haptic gain change during play; the studio intro plays in sync at caps 30, 120 and off (A5 + K9); Wayland native surface at true resolution. | `engines/kyty/src/graphics/presentation/`, `src/libs/controller.cpp`, `dualSense*.cpp`, `libSceAvPlayer`, `bridge/src/live.rs` | M6, M9 (not M8: shares `vulkanWindow.cpp`, `swapchain.cpp`) |
@@ -820,7 +914,7 @@ is independent work on a running game, limited only by the shared files named in
 
 | # | Risk | Detected by | Fallback |
 |---|---|---|---|
-| 1 | Start-up constructors run under the loader lock, or a lifecycle before Memory loads a library; the 10 s wait for `reserved` then times out. | M0 constructor experiment; the abort message names the step. | Do not wait in the constructor; rely on the adoption check after `ready` only. |
+| 1 | Start-up constructors run under the loader lock, or a lifecycle before Memory loads a library; the 10 s wait for `reserved` then times out. | M0 constructor experiment (3.5): does not occur; the abort message names the step. | Do not wait in the constructor; rely on the adoption check after `ready` only. |
 | 2 | Kyty does not adopt an unmapped range (upstream changes `ReserveGuestRegions`, or something maps into the gap). | The `EEXIST` check aborts with the range; M1 covers the scan itself. | Fix at the seam; the check is the guard. |
 | 3 | A fixed donation is not free (something already lives at `0x200000000` or `0xDC00000000` when the constructor runs). | `donate` returns 0 and prints both ranges (M2 test, M4 run). | Move the general range (one constant). For the system-managed range there is no alternative; the message says what was there. |
 | 4 | Kyty subsystems or HLE helpers expect a Kyty thread (thread-local state, profiler, watchdog) when called from bridge threads or guest threads. | M1 calls the helpers from a plain thread; M4 / M5 play test with `KYTY_HANG_WATCHDOG=0`. | Create pump and relay through a seam function that uses Kyty's own thread helper. |
@@ -829,7 +923,7 @@ is independent work on a running game, limited only by the shared files named in
 | 7 | A fault handler installed later does not chain; or Kyty needs a branch of `TryHandleGuestAccessFault` the seam did not carry (lines 782-837). | M3 chain test; the exit summary's handled / passed-on counters; a crash at a GPU-visible address in M5. | Port the missing branch into `fault`. |
 | 8 | Kernel writes into protected pages outside APR (spec R5). | Any "returned N of M bytes" or `EFAULT` in the M5 session. | The same staging pattern at that call site; a general host-write capability only if a second path appears. |
 | 9 | Unforwarded memory functions matter (spec R2). | The one-time log line of 2.2. | Forward the specific function; one line each. |
-| 10 | The static TLS tunable is still required. | M4 runs with and without `GLIBC_TUNABLES`. | Keep it in `fixed_env`. |
+| 10 | The static TLS tunable is still required. | M4 runs with and without `GLIBC_TUNABLES`. Result: required with `LD_AUDIT` (7.3). | Taken: it stays in `fixed_env` and in `scripts/play.sh`. |
 | 11 | Symbol leakage from the renderer (SDL2 against SDL3). | Build check 1 on every build. | - |
 | 12 | Stale forwarder or bridge after a Kyty update changes the `LIB_FUNC` set; scanner misreads a changed macro. | `astroport_entry_<hash8>` mismatch at link or load; `find` aborts naming the NID; scanner errors on an empty library; the runner's import check. | Fix the scanner. |
 | 13 | NGX's device extension needs a large free address window below 1 TiB, and the arena plus Kyty hold `0x10000..0xFC00000000` (spec R4). | M8a: device creation with the NGX extensions. | A third `donate` made **after** `reserved` (for example 48 GiB below `0xDC00000000`): the arena marks it used and unmaps it, Kyty has already scanned, so it stays free for the driver. No engine change. |
@@ -843,7 +937,7 @@ is independent work on a running game, limited only by the shared files named in
 | 21 | Frame generation: AMD's Vulkan swapchain is Win32-bound; no Linux port exists. | M10 spike before any implementation. | Decision 1: lsfg-vk and Smooth Motion stay the shipped answer. |
 | 22 | Our earlier engine features are under-specified and the clean-room rule forbids reading our own old commits. | Now. | Decision 3. |
 | 23 | lsfg-vk on the development machine doubles frame counts and forces FIFO for the process name `AstroBot`. | Would show as 60 FPS at a 30 cap. | `smoke.sh` always sets `DISABLE_LSFGVK=1`. |
-| 24 | Upstream merges touch the edited lines. | By design the seam edits are small: Kyty 3 upstream files / ~33 lines, AnyPS5 2 upstream files / ~31 lines. | Merge check = `kyty_renderer` builds, M1 smoke test and M2 ctest pass. |
+| 24 | Upstream merges touch the edited lines. | By design the seam edits are small: Kyty 3 upstream files / 57 lines (plus four one-line build fixes), AnyPS5 3 upstream files / ~50 lines. | Merge check = `kyty_renderer` builds, M1 smoke test and M2 ctest pass. |
 
 Not built on purpose: lazy start, a host-driven init / shutdown lifecycle, memory register /
 unregister / invalidate entries, a log callback (each side writes stderr), vblank events, multi-port
